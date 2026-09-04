@@ -645,7 +645,7 @@ pub fn agent_detect() -> Result<AgentStatus, String> {
     let mut hermes_configured = false;
     if hermes_installed {
         if let Ok(raw) = std::fs::read_to_string(&hermes_p) {
-            hermes_configured = raw.contains("WorkBuddy (127.0.0.1:8787)") || raw.contains("8787");
+            hermes_configured = raw.contains("WorkBuddy (127.0.0.1:");
         }
     }
 
@@ -800,10 +800,19 @@ fn remove_hermes() -> Result<String, String> {
     let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     let mut val: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| e.to_string())?;
     if let Some(map) = val.as_mapping_mut() {
+        // 1. 移除 providers
         if let Some(seq) = map.get_mut(&serde_yaml::Value::String("custom_providers".into())).and_then(|v| v.as_sequence_mut()) {
             seq.retain(|item| {
                 let s = serde_yaml::to_string(item).unwrap_or_default();
                 !s.contains("WorkBuddy") && !s.contains("codebuddy2openai")
+            });
+        }
+        // 2. 移除 model_aliases
+        if let Some(am) = map.get_mut(&serde_yaml::Value::String("model_aliases".into())).and_then(|v| v.as_mapping_mut()) {
+            am.retain(|k, v| {
+                let ks = k.as_str().unwrap_or_default();
+                let vs = serde_yaml::to_string(v).unwrap_or_default();
+                !ks.contains("workbuddy") && !vs.contains("8787")
             });
         }
     }
