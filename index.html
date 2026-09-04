@@ -395,6 +395,24 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="divider"></div>
 
+            <!-- 控制台黑框窗口与调试 -->
+            <div class="form-group">
+              <label class="switch-label">
+                <input id="chk-debug-console" type="checkbox" />
+                <span class="switch-slider"></span>
+                <span class="switch-text">启动服务时显示 Debug 黑色控制台窗口</span>
+              </label>
+              <p class="muted field-hint">默认关闭（静默在后台启动，无黑框打扰）。开启后启动服务将保留前台 CMD 调试控制台。</p>
+              <div style="margin-top: 10px;">
+                <button id="btn-open-live-console" class="btn btn-secondary btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  立即弹出前台 Debug 调试窗口
+                </button>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
             <!-- 关闭窗口行为设置 -->
             <div class="form-group">
               <label class="field-label">关闭主窗口时的行为</label>

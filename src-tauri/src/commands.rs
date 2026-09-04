@@ -461,9 +461,10 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
 
 #[tauri::command]
 pub fn agent_detect() -> Result<AgentStatus, String> {
-    let mut hermes_p = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
-    if !hermes_p.exists() || std::fs::read_to_string(&hermes_p).map(|s| s.trim().is_empty()).unwrap_or(true) {
-        let alt = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+    // Hermes 真实配置文件在 %LOCALAPPDATA%\hermes\config.yaml
+    let mut hermes_p = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+    if !hermes_p.exists() {
+        let alt = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
         if alt.exists() {
             hermes_p = alt;
         }
@@ -516,9 +517,9 @@ pub fn agent_remove(agent_type: String) -> Result<String, String> {
 }
 
 fn configure_hermes(port: u16) -> Result<String, String> {
-    let mut p = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
-    if !p.exists() || std::fs::read_to_string(&p).map(|s| s.trim().is_empty()).unwrap_or(true) {
-        let alt = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+    let mut p = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+    if !p.exists() {
+        let alt = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
         if alt.exists() {
             p = alt;
         }
@@ -616,9 +617,9 @@ workbuddy-hy4:
 }
 
 fn remove_hermes() -> Result<String, String> {
-    let mut p = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
-    if !p.exists() || std::fs::read_to_string(&p).map(|s| s.trim().is_empty()).unwrap_or(true) {
-        let alt = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+    let mut p = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+    if !p.exists() {
+        let alt = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
         if alt.exists() {
             p = alt;
         }
@@ -763,6 +764,22 @@ pub fn proxy_start(
         cmd.arg("--desensitize");
     }
 
+    // Windows 平台静默模式设置：如果不开启 debug console，则彻底隐藏黑框
+    let show_console = if let Some(cfg_state) = app.try_state::<crate::AppConfigState>() {
+        cfg_state.0.lock().map(|c| c.show_debug_console).unwrap_or(false)
+    } else {
+        false
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        if !show_console {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
     let child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -770,6 +787,27 @@ pub fn proxy_start(
         .map_err(|e| format!("启动反代失败: {e}"))?;
     *guard = Some(child);
     Ok(format!("started(port {port})"))
+}
+
+#[tauri::command]
+pub fn proxy_open_console(port: u16, desensitize: Option<bool>) -> Result<String, String> {
+    let python = "C:\\Users\\<username>\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe";
+    let script = "C:\\Users\\<username>\\Desktop\\codebuddy2openai\\converter.py";
+    let mut args = format!("\"{python}\" \"{script}\" --port {port}");
+    if desensitize.unwrap_or(true) {
+        args.push_str(" --desensitize");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        Command::new("cmd.exe")
+            .args(["/c", "start", "WorkBuddy to OpenAI Console", "cmd.exe", "/k", &args])
+            .spawn()
+            .map_err(|e| format!("打开控制台失败: {e}"))?;
+    }
+
+    Ok("控制台窗口已打开".into())
 }
 
 #[tauri::command]

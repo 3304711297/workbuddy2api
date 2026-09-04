@@ -28,11 +28,22 @@ impl Default for CloseAction {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct AppConfig {
     pub close_action: CloseAction,
     pub auto_start_proxy: bool,
+    pub show_debug_console: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            close_action: CloseAction::HideToTray,
+            auto_start_proxy: false,
+            show_debug_console: false, // 默认为静默不显示窗口
+        }
+    }
 }
 
 pub struct AppConfigState(pub Mutex<AppConfig>);
@@ -184,6 +195,7 @@ pub fn run_app() {
             commands::agent_remove,
             // 反代控制与测试
             commands::proxy_start,
+            commands::proxy_open_console,
             commands::proxy_stop,
             commands::proxy_restart,
             commands::proxy_health,

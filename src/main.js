@@ -618,21 +618,54 @@ function initSettings() {
   const inputPort = document.getElementById('input-port');
   const btnSave = document.getElementById('btn-save-port');
   const chkDesensitize = document.getElementById('chk-desensitize');
+  const chkDebugConsole = document.getElementById('chk-debug-console');
+  const btnOpenLiveConsole = document.getElementById('btn-open-live-console');
   const radioCloseActions = document.querySelectorAll('input[name="close-action"]');
 
   // 读取后端配置
   (async () => {
     try {
       const cfg = await invokeTauri('get_app_settings');
-      if (cfg && cfg.close_action) {
-        radioCloseActions.forEach(r => {
-          r.checked = (r.value === cfg.close_action);
-        });
+      if (cfg) {
+        if (cfg.close_action) {
+          radioCloseActions.forEach(r => {
+            r.checked = (r.value === cfg.close_action);
+          });
+        }
+        if (chkDebugConsole) {
+          chkDebugConsole.checked = Boolean(cfg.show_debug_console);
+        }
       }
     } catch (e) {
       console.warn('获取设置失败:', e);
     }
   })();
+
+  chkDebugConsole?.addEventListener('change', async (e) => {
+    try {
+      const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
+      await invokeTauri('save_app_settings', {
+        settings: {
+          close_action: currentClose,
+          auto_start_proxy: false,
+          show_debug_console: e.target.checked
+        }
+      });
+      showToast(e.target.checked ? '已启用：启动服务时显示 Debug 调试窗口' : '已恢复默认：静默后台启动（无黑框）', 'success');
+    } catch (err) {
+      showToast(`保存设置失败: ${err.message || err}`, 'error');
+    }
+  });
+
+  btnOpenLiveConsole?.addEventListener('click', async () => {
+    try {
+      showToast('正在调出 Debug 调试窗口...', 'info');
+      const msg = await invokeTauri('proxy_open_console', { port: state.port, desensitize: state.desensitize });
+      showToast(msg, 'success');
+    } catch (err) {
+      showToast(`弹出窗口失败: ${err.message || err}`, 'error');
+    }
+  });
 
   radioCloseActions.forEach(r => {
     r.addEventListener('change', async () => {
@@ -641,7 +674,8 @@ function initSettings() {
           await invokeTauri('save_app_settings', {
             settings: {
               close_action: r.value,
-              auto_start_proxy: false
+              auto_start_proxy: false,
+              show_debug_console: chkDebugConsole ? chkDebugConsole.checked : false
             }
           });
           showToast(r.value === 'hide_to_tray' ? '已设置为：关闭窗口时最小化到系统托盘' : '已设置为：关闭窗口时停止服务并退出', 'success');
