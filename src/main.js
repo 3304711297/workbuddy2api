@@ -456,13 +456,16 @@ async function loadAgentsStatus() {
     }
   } catch (e) {
     console.error('Agent 检测失败:', e);
+    showToast(`Agent 检测失败: ${e.message || e}`, 'error');
+    if (hBadge) hBadge.textContent = '检测失败';
+    if (zBadge) zBadge.textContent = '检测失败';
   }
 }
 
 function initAgentActions() {
   document.getElementById('btn-config-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agentType: 'hermes', port: state.port });
+      const res = await invokeTauri('agent_configure', { agent_type: 'hermes', port: state.port });
       showToast(res, 'success');
       loadAgentsStatus();
     } catch (e) {
@@ -472,7 +475,7 @@ function initAgentActions() {
 
   document.getElementById('btn-remove-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agentType: 'hermes' });
+      const res = await invokeTauri('agent_remove', { agent_type: 'hermes' });
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
@@ -482,7 +485,7 @@ function initAgentActions() {
 
   document.getElementById('btn-config-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agentType: 'zcode', port: state.port });
+      const res = await invokeTauri('agent_configure', { agent_type: 'zcode', port: state.port });
       showToast(res, 'success');
       loadAgentsStatus();
     } catch (e) {
@@ -492,7 +495,7 @@ function initAgentActions() {
 
   document.getElementById('btn-remove-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agentType: 'zcode' });
+      const res = await invokeTauri('agent_remove', { agent_type: 'zcode' });
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
@@ -615,6 +618,39 @@ function initSettings() {
   const inputPort = document.getElementById('input-port');
   const btnSave = document.getElementById('btn-save-port');
   const chkDesensitize = document.getElementById('chk-desensitize');
+  const radioCloseActions = document.querySelectorAll('input[name="close-action"]');
+
+  // 读取后端配置
+  (async () => {
+    try {
+      const cfg = await invokeTauri('get_app_settings');
+      if (cfg && cfg.close_action) {
+        radioCloseActions.forEach(r => {
+          r.checked = (r.value === cfg.close_action);
+        });
+      }
+    } catch (e) {
+      console.warn('获取设置失败:', e);
+    }
+  })();
+
+  radioCloseActions.forEach(r => {
+    r.addEventListener('change', async () => {
+      if (r.checked) {
+        try {
+          await invokeTauri('save_app_settings', {
+            settings: {
+              close_action: r.value,
+              auto_start_proxy: false
+            }
+          });
+          showToast(r.value === 'hide_to_tray' ? '已设置为：关闭窗口时最小化到系统托盘' : '已设置为：关闭窗口时停止服务并退出', 'success');
+        } catch (e) {
+          showToast(`保存设置失败: ${e.message || e}`, 'error');
+        }
+      }
+    });
+  });
 
   btnSave?.addEventListener('click', () => {
     const val = parseInt(inputPort.value, 10);
@@ -658,5 +694,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // 默认启动检测健康
   checkHealth();
+  loadAgentsStatus();
   setInterval(checkHealth, 15000);
 });

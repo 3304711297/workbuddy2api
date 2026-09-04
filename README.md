@@ -1,231 +1,169 @@
-# codebuddy2openai
+<div align="center">
 
-> 把 **CodeBuddy / WorkBuddy（腾讯代码助手）** 的订阅，转换成 **OpenAI 兼容 API**，让你能在任何支持 OpenAI 协议的客户端（ZCode、Cherry Studio、NextChat、LobeChat 等）里复用它。
+# 🚀 CodeBuddy2OpenAI
 
-> ⚠️ **关于 Codex CLI**：新版 Codex CLI 已不再支持 `wire_api = "chat"`，只支持 `completions` 格式，因此**本工具无法直接接入 Codex CLI**，请改用下方「OpenAI 兼容客户端」方案。
+### 独立桌面控制台 · WorkBuddy 转 OpenAI 兼容端点 · 多账号资产管理 · Agent 一键接入
 
-[English](#english) · [中文文档](#中文文档)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/3304711297/codebuddy2openai)
+[![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8.svg?logo=tauri)](https://tauri.app/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python)](https://www.python.org/)
+
+<p align="center">
+  <b>无需下载或安装原版腾讯 WorkBuddy 客户端</b>，直接在浏览器中完成网页授权，<br/>
+  将腾讯代码助手能力转换为标准的 <code>OpenAI /v1/chat/completions</code> 接口，供日常各类 AI 编程助理极速调用！
+</p>
+
+</div>
 
 ---
 
-## 中文文档
+## ✨ 核心特性
 
-一个极简的本地协议转换器（proxy / adapter）：读取你本机已登录的 CodeBuddy 桌面端凭据，把它的对话能力包装成标准的 OpenAI `/v1/chat/completions`、`/v1/models` 接口。**不碰登录授权、不碰你已有的客户端配置、跨平台、单文件。**
+- 🖥️ **独立现代化桌面 GUI (Tauri v2 + 原生深色设计)**：提供直观的服务看板、端口设置、实时延迟测试与状态指示。
+- 🔑 **无需安装原版 WorkBuddy**：集成浏览器 OAuth 授权全自动轮询流程，直接扫码/验证码登录获取凭据。
+- 👥 **多账号管理与切换**：凭据统一持久化于本地数据库，支持一键切换活跃账号、手动刷新 Token 与账号删除。
+- 📊 **内嵌真实积分资产看板**：逆向对接腾讯官方计量计费接口，实时掌握账户剩余积分、使用进度条及资源包配额明细。
+- 🤖 **Agent 智能体一键接入**：
+  - **Hermes Agent**：一键检测并注入 `config.yaml`（自动注册供应商并映射 7 个快捷模型别名）。
+  - **ZCode**：一键检测并注入 `cli/config.json` 与 `v2/config.json`（自动映射 15 个模型）。
+  - 均支持一键写入与一键移除恢复。
+- ⚡ **超全模型矩阵映射**：内置 `glm-5.3-flash` (1M 上下文)、`glm-5.3`、`kimi-k3`、`deepseek-v4-pro`、`hy4-preview` 等 15 个主流大模型映射。
+- 🛡️ **安全脱敏支持**：内置 `--desensitize` 敏感词处理机制，避免系统提示词误触发安全风控拦截。
 
-### ✨ 特性
+---
 
-- 🔄 **OpenAI 兼容**：标准 `/v1/chat/completions`（支持流式 SSE）、`/v1/models`、`/health`。
-- 🛠️ **Function Calling（工具调用）**：支持请求里的 `tools`，返回 OpenAI 格式的 `tool_calls`，可在 ZCode / Cherry Studio 等 agent 客户端里驱动工具、多轮回传结果。
-- 🪶 **单文件、极简**：核心就一个 `converter.py`，不复杂。
-- 🔐 **零授权改动**：直接调用本机已登录的 `codebuddy` CLI，自动复用桌面端登录态，不重新登录、不存密码。
-- 🖥️ **跨平台**：自动定位 macOS / Windows / Linux 上的 CLI 与登录文件。
-- 🛡️ **安全**：默认只监听 `127.0.0.1`；工具的声明与执行都由客户端负责，转换器只做鉴权与透传。
-- ⚡ **流式输出**：实时增量 token，体验与原生 OpenAI 流式一致。
+## 📐 系统架构与工作流
 
-### 🧠 它是怎么工作的
+```mermaid
+flowchart TD
+    subgraph Client [AI 客户端 / 智能体]
+        Hermes[Hermes Agent]
+        ZCode[ZCode 终端]
+        Other[Cherry Studio / NextChat / OpenAI SDK]
+    end
 
+    subgraph Console [CodeBuddy2OpenAI 桌面控制台 (Tauri v2)]
+        GUI[前端 UI (服务看板/账号资产/Agent接入)]
+        Core[Rust 后端 (多账号/配置写入/生命周期)]
+        DB[(本地 accounts.json)]
+    end
+
+    subgraph Proxy [本地反代服务 (端口 8787)]
+        Server[FastAPI / Uvicorn]
+        Converter[converter.py (格式转换/流式/函数调用)]
+    end
+
+    subgraph Remote [腾讯官方云端]
+        Auth[OAuth 授权中心]
+        Meter[Billing 计费与积分中心]
+        Copilot[Copilot 模型推理服务]
+    end
+
+    Hermes -->|http://127.0.0.1:8787/v1| Server
+    ZCode -->|http://127.0.0.1:8787/v1| Server
+    Other -->|http://127.0.0.1:8787/v1| Server
+
+    GUI <-->|Tauri IPC Invoke| Core
+    Core <--> DB
+    Core -->|进程托管与健康探针| Server
+    Core -->|OAuth 授权与积分直查| Auth
+    Core -->|查询资源包额度| Meter
+
+    Server --> Converter
+    Converter -->|原生 Bearer Token 转发| Copilot
 ```
-ZCode / Cherry Studio / 任意 OpenAI 客户端
-        │  POST /v1/chat/completions  (标准 OpenAI 协议，含 tools)
-        ▼
-┌────────────────────┐
-│  converter.py      │  ← 本地 FastAPI 服务 (127.0.0.1:8787)
-│  读 token + 注入   │
-│  鉴权 header + 透传│
-└────────────────────┘
-        │  POST /v2/chat/completions  (带 Authorization/X-User-Id 等头)
-        ▼
-┌────────────────────────────────┐
-│  copilot.tencent.com 后端      │  ← 原生标准 OpenAI 协议
-│  (GLM-5.2 / Kimi / DeepSeek)   │     含原生 tools / tool_calls / SSE 流式
-└────────────────────────────────┘
+
+---
+
+## 🚀 快速开始
+
+### 方式一：直接运行桌面客户端（推荐）
+
+双击桌面生成的 **`CodeBuddy2OpenAI`** 快捷方式，或直接运行发布产物：
+```bash
+src-tauri/target/release/codebuddy2openai.exe
 ```
 
-转换器直连 CodeBuddy 后端（`copilot.tencent.com/v2/chat/completions`），该后端本身就是**标准 OpenAI chat/completions 协议**。转换器只做两件事：①读取本机登录凭据并注入鉴权 header；②在本地 `/v1/*` 与后端 `/v2/*` 之间透传。因为后端原生支持 `tools` / `tool_calls`，function calling 是模型自带能力，**无需任何 prompt 注入或文本解析**。token 过期时转换器会自动调刷新接口并回写。
+1. **授权登录**：进入「授权新账号」页面，点击开始授权，浏览器将自动唤起腾讯登录页，完成授权后客户端自动保存凭据并切到账号面板。
+2. **启动服务**：在「服务看板」点击「启动服务」，本地将监听 `http://127.0.0.1:8787`。
+3. **Agent 一键接入**：进入「Agent 一键接入」页面，点击「一键写入配置」即可直接在 Hermes 或 ZCode 中畅享 WorkBuddy 模型！
 
-> 历史版本曾通过「调 CLI + `<tool_call>` 文本标签解析」实现 function calling，但在嵌套 agent（subagent）场景下，subagent 的输出会夹带标签污染对话。**v2.0 改为直连后端，彻底解决了这个问题。**
+---
 
-### 📦 前置条件
+### 方式二：本地构建与源码调试
 
-1. 已安装并**登录** CodeBuddy / WorkBuddy 桌面端（[腾讯云 CodeBuddy 官网](https://www.codebuddy.ai/)）。转换器会自动在这些位置找登录态：
-   - **macOS**：`~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/*.info`
-   - **Windows**：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`
-   - **Linux**：`~/.local/share/CodeBuddyExtension\Data\Public\auth\*.info`
-2. **Python 3.8+**（无需 Node.js，不再依赖 CLI）。
-3. 安装依赖（一次性）：
-   ```bash
-   pip install fastapi "uvicorn[standard]" httpx
-   ```
-
-### 🚀 快速开始
+#### 环境要求
+- Node.js 18+ 与 npm
+- Rust 1.77+ 与 Cargo
+- Python 3.10+（需安装依赖 `httpx fastapi uvicorn[standard]`）
 
 ```bash
-# 1. 克隆
-git clone https://github.com/HanHan666666/codebuddy2openai.git
+# 1. 克隆本项目
+git clone https://github.com/3304711297/codebuddy2openai.git
 cd codebuddy2openai
 
-# 2. 装依赖
-pip install fastapi "uvicorn[standard]" httpx
+# 2. 安装前端依赖并构建
+npm install
+npm run build
 
-# 3. 启动（确保 CodeBuddy 桌面端已登录）
-python3 converter.py
-# 看到「✅ 监听 http://127.0.0.1:8787」即成功
+# 3. 运行 Tauri 开发模式或构建 Release 版本
+cd src-tauri
+cargo tauri dev       # 调试模式
+cargo tauri build --no-bundle   # Release 编译
 ```
-
-启动时会做一次预检，打印账号信息和 token 状态。
-
-### 🛠️ Function Calling（工具调用）
-
-后端原生支持标准 OpenAI function calling。客户端（如 ZCode / Cherry Studio）在请求里带 `tools`，模型原生返回 `tool_calls`（`finish_reason:"tool_calls"`），客户端执行工具后把 `role:"tool"` 的结果回传即可——和直连 OpenAI 完全一致。流式、非流式、多轮工具调用都支持。
-
-### 🔌 接入客户端
-
-⚠️ **关于 Codex CLI（重要）**：新版本 Codex CLI 已**移除** `wire_api = "chat"` 的支持，目前只认 `completions` 格式，因此**本转换器无法直接接入 Codex CLI**。仓库里的 `codex-codebuddy.example.toml` 仅作历史/参考保留，实测在当前 Codex 上跑不通，请不要照抄。
-
-✅ **可用方式 —— 任何标准 OpenAI 兼容客户端**（走 `/v1/chat/completions`）。常见选择：
-
-- **ZCode**（OpenAI 兼容 Agent）
-- **Cherry Studio**
-- **NextChat / LobeChat / Open WebUI**
-- 任何支持自定义 `base_url` 的 OpenAI SDK 客户端
-
-通用接入步骤（以这类客户端为例）：
-
-1. 保持转换器运行：`python3 converter.py`
-2. 在客户端的「自定义模型 / OpenAI 兼容」设置里：
-   - **API Base / 接口地址**：`http://127.0.0.1:8787/v1`
-   - **API Key**：留空（转换器默认不校验）；若启动时用了 `--api-key`，则填同一个
-   - **模型名**：`glm-5.2`（或 `kimi-k2.7` / `deepseek-v4-pro` / `auto` 等，见下方列表）
-
-示例配置（如果你用的客户端读 toml / 自定义 provider 片段）：
-
-```toml
-[model_providers.codebuddy]
-name = "CodeBuddy (via local converter)"
-base_url = "http://127.0.0.1:8787/v1"
-env_key = "CODEBUDDY2OPENAI_KEY"
-# 注意：本接口是 OpenAI chat 协议（/v1/chat/completions）。
-# Codex CLI 因不再支持该 wire_api 而无法使用，请用 ZCode / Cherry Studio 等 OpenAI 兼容客户端。
-```
-
-### 🧪 curl 验证
-
-```bash
-# 列模型
-curl http://127.0.0.1:8787/v1/models
-
-# 非流式
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'
-
-# 流式
-curl -N http://127.0.0.1:8787/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"数1到5"}]}'
-```
-
-### 🤖 可用模型
-
-`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`minimax-m3-pay`、`hy3-preview-agent`、`auto`
-
-（来自 CLI `--help` 的 `--model` 说明，具体可用性以你的订阅为准。）
-
-### 📁 项目结构
-
-```
-codebuddy2openai/
-├── converter.py                     # 转换器主程序（单文件）
-├── desensitize.py                   # 脱敏模块（可选，--desensitize 启用）
-├── codex-codebuddy.example.toml     # provider 配置示例片段（仅供参考；Codex CLI 已不支持，见上方说明）
-├── README.md
-└── LICENSE
-```
-
-### 🔧 命令行参数
-
-```
-python3 converter.py [--host HOST] [--port PORT] [--api-key KEY] [--log PATH] [--desensitize] [--skip-check]
-```
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `--host` | `127.0.0.1` | 监听地址 |
-| `--port` | `8787` | 监听端口 |
-| `--api-key` | 无 | 启用鉴权；客户端需带同样 key（也可用环境变量 `CODEBUDDY2OPENAI_KEY`）|
-| `--log` | 无 | **开启日志并写到该文件**（如 `--log converter.log`）。不传则不记。也可用环境变量 `CODEBUDDY2OPENAI_LOG`。|
-| `--desensitize` | 关 | 启用脱敏：对 system 消息里的合规声明敏感词（DoS/exploit/credential/C2 等）插入零宽空格，缓解被后端内容审核误拦（见下方 FAQ）。|
-| `--skip-check` | 否 | 跳过启动预检 |
-
-示例：
-```bash
-python3 converter.py --log converter.log          # 记日志到当前目录 converter.log
-python3 converter.py --log /tmp/cb.log            # 记到指定路径
-python3 converter.py                              # 不记日志
-```
-
-每条日志记录：模型、是否流式、消息数、最后一条用户提问、耗时、finish_reason、工具调用、token 数；若后端内容审核拦截会标 `⚠️内容审核拦截`。**每次请求都用唯一 ID 串起来，并完整落盘**：发往后端的完整请求体（REQUEST BODY）、后端返回的完整内容（非流式是聚合后的 RESPONSE BODY，流式是后端原始的 RESPONSE RAW SSE）。排查"内容审核拦截""返回异常"等问题时，直接看日志里对应 ID 的完整报文即可。示例：
-```
-[2026-06-19 11:56:32] [9cc4488e] ▶ REQUEST glm-5.2 | stream=False | msgs=1 | last_user='Reply: pong'
-[2026-06-19 11:56:32] [9cc4488e] ── REQUEST BODY ──
-{ "model": "glm-5.2", "messages": [{"role":"user","content":"Reply: pong"}] }
-[2026-06-19 11:56:35] [9cc4488e] ◀ RESPONSE glm-5.2 | 3.0s | finish=stop | tokens=11
-[2026-06-19 11:56:35] [9cc4488e] ── RESPONSE BODY ──
-{ "choices":[{"message":{"content":"pong"},...}], "usage":{...} }
-```
-
-### ❓ 常见问题
-
-- **找不到登录文件**：在桌面端完成登录（不是只装、要登进去）。路径见上方「前置条件」。
-- **客户端报 401**：转换器若用了 `--api-key`，客户端那边要带同样的 key；若是后端 401，可能是 token 失效（转换器会自动刷新，若仍失败需在桌面端重新登录）。
-- **响应慢**：可换 `deepseek-v4-flash` 等更快的模型。
-- **"敏感内容"被拦截**：这是 CodeBuddy 后端的**内容审核**（腾讯合规策略），在模型推理之前就拦了。常见触发原因是客户端注入的 system prompt 里含安全相关英文术语（如 DoS / exploit / credential / C2 等——这些往往是客户端**合规声明模板**里的"拒绝作恶"措辞，属误伤）。两种应对：①用 `--log xxx.log` 在日志里看 `⚠️内容审核拦截` 标记定位是哪条请求；②加 `--desensitize` 启用脱敏模块（`desensitize.py`），它对 system 消息里的这类合规词插入零宽空格（人/模型读无差别，但后端关键词匹配失效），可显著降低被误拦概率。注意：脱敏只针对客户端固定模板，不能也不应绕过对用户真实有害输入的审核。
-
-### ⚠️ 免责声明
-
-本项目为个人学习与研究用途，非官方产品，与腾讯 / CodeBuddy / OpenAI 无任何关联。使用本工具即表示你已阅读并同意：仅在你拥有合法订阅的前提下使用，遵守相关服务条款，自负风险。
-
-### 📄 开源协议
-
-[MIT](./LICENSE)
 
 ---
 
-<a name="english"></a>
-# English
+## ⚙️ 模型支持列表
 
-A minimal local **protocol converter / proxy** that exposes your already-logged-in **CodeBuddy / WorkBuddy (Tencent coding assistant)** subscription as a standard **OpenAI-compatible API**, so you can use it from any OpenAI-protocol client (ZCode, Cherry Studio, NextChat, LobeChat, Open WebUI, etc.). **No auth changes, no edits to your client config, cross-platform, single file.**
-
-> ⚠️ **Codex CLI note:** newer Codex CLI dropped `wire_api = "chat"` and only supports the `completions` format, so **this tool cannot be used with Codex CLI**. Use any OpenAI-compatible client instead.
-
-### ✨ Features
-
-- 🔄 **OpenAI-compatible**: standard `/v1/chat/completions` (streaming SSE), `/v1/models`, `/health`.
-- 🪶 **Single-file & minimal**: core is one `converter.py`.
-- 🔐 **Zero-auth hassle**: calls your locally-logged-in `codebuddy` CLI; reuses the desktop login session.
-- 🖥️ **Cross-platform**: auto-locates CLI & auth on macOS / Windows / Linux.
-- 🛡️ **Safe**: listens on `127.0.0.1` only; disables all built-in CLI tools for pure chat.
-
-### 🚀 Quick Start
-
-```bash
-git clone https://github.com/HanHan666666/codebuddy2openai.git
-cd codebuddy2openai
-pip install fastapi "uvicorn[standard]"
-python3 converter.py
-```
-
-Then point your OpenAI-compatible client at `http://127.0.0.1:8787/v1` (API base), leave the key blank unless you started the converter with `--api-key`. Note: Codex CLI is **not** supported (it dropped `wire_api = "chat"`); use ZCode, Cherry Studio, or any OpenAI-compatible client instead.
-
-### ⚠️ Disclaimer
-
-For personal learning and research only. Not affiliated with Tencent / CodeBuddy / OpenAI. Use only with a subscription you legally hold, in compliance with the relevant terms of service, at your own risk.
-
-License: [MIT](./LICENSE)
+| 模型标识 (Model ID) | 上下文窗口 (Context) | 特性说明 |
+| :--- | :--- | :--- |
+| `glm-5.3-flash` | **1,048,576 (1M)** | 主力推荐、极速响应、超长文本处理 |
+| `glm-5.3` | **1,048,576 (1M)** | 深度推理、高智商编码任务 |
+| `glm-5.2` | **1,048,576 (1M)** | 稳定版长文本通用模型 |
+| `glm-5v-turbo` | **1,048,576 (1M)** | 视觉多模态图像分析能力 |
+| `kimi-k3` | **200,000 (200K)** | 超长文本检索与细致分析 |
+| `kimi-k2.7` | **200,000 (200K)** | 通用对话与写作 |
+| `deepseek-v4-pro` | **200,000 (200K)** | 针对复杂算法与架构的高阶代码模型 |
+| `deepseek-v4-flash`| **200,000 (200K)** | 极速响应轻量代码模型 |
+| `hy4-preview` | **200,000 (200K)** | 腾讯混元最新一代预览版 |
+| `auto` | **1,048,576 (1M)** | 智能自动路由 |
 
 ---
 
-<!-- SEO keywords -->
-<sub>
-**Keywords / 关键词:** codebuddy to openai · codebuddy2openai · codebuddy openai compatible api · codebuddy api proxy · codebuddy workbuddy openai adapter · tencent codebuddy openai · codebuddy glm-5.2 api · codebuddy kimi deepseek openai · openai compatible proxy local llm gateway · codebuddy function calling · codebuddy tool use tool_calls · codebuddy zcode cherry studio · 腾讯代码助手 openai · codebuddy 转 openai · codebuddy 接入 zcode cherry studio · 本地大模型代理 openai 协议 · codebuddy 订阅 复用 · workbuddy api 转换 · codebuddy 工具调用
-</sub>
+## 💻 客户端接入示例 (Python SDK)
+
+```python
+from openai import OpenAI
+
+# 本地 CodeBuddy2OpenAI 端点
+client = OpenAI(
+    base_url="http://127.0.0.1:8787/v1",
+    api_key="local" # 本地模式固定填写 local
+)
+
+response = client.chat.completions.create(
+    model="glm-5.3-flash",
+    messages=[
+        {"role": "user", "content": "你好，请用 Python 写一个支持并发的安全队列。"}
+    ],
+    temperature=0.7
+)
+
+print(response.choices[0].message.content)
+```
+
+---
+
+## 🤝 致谢与声明
+
+- 本项目基于 [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) 进行深度二次开发与架构重构。
+- 架构设计深度借鉴了优秀开源项目 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 的桌面端实践思路。
+- 本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。
+
+---
+
+## 📄 开源许可证
+
+本项目基于 [MIT License](LICENSE) 开源。

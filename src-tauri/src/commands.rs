@@ -109,6 +109,12 @@ fn desktop_auth_info_path() -> PathBuf {
 }
 
 fn hermes_config_path() -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .unwrap_or_else(|_| "C:\\Users\\<username>".into());
+    let user_p = Path::new(&home).join(".hermes\\config.yaml");
+    if user_p.exists() {
+        return user_p;
+    }
     let base = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
     Path::new(&base).join("hermes\\config.yaml")
@@ -455,7 +461,13 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
 
 #[tauri::command]
 pub fn agent_detect() -> Result<AgentStatus, String> {
-    let hermes_p = hermes_config_path();
+    let mut hermes_p = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
+    if !hermes_p.exists() || std::fs::read_to_string(&hermes_p).map(|s| s.trim().is_empty()).unwrap_or(true) {
+        let alt = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+        if alt.exists() {
+            hermes_p = alt;
+        }
+    }
     let hermes_installed = hermes_p.exists();
     let mut hermes_configured = false;
     if hermes_installed {
@@ -494,7 +506,7 @@ pub fn agent_configure(agent_type: String, port: u16) -> Result<String, String> 
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn agent_remove(agent_type: String) -> Result<String, String> {
     match agent_type.as_str() {
         "hermes" => remove_hermes(),
@@ -504,7 +516,13 @@ pub fn agent_remove(agent_type: String) -> Result<String, String> {
 }
 
 fn configure_hermes(port: u16) -> Result<String, String> {
-    let p = hermes_config_path();
+    let mut p = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
+    if !p.exists() || std::fs::read_to_string(&p).map(|s| s.trim().is_empty()).unwrap_or(true) {
+        let alt = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+        if alt.exists() {
+            p = alt;
+        }
+    }
     if !p.exists() {
         return Err(format!("Hermes 配置文件未找到: {}", p.display()));
     }
@@ -598,7 +616,13 @@ workbuddy-hy4:
 }
 
 fn remove_hermes() -> Result<String, String> {
-    let p = hermes_config_path();
+    let mut p = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
+    if !p.exists() || std::fs::read_to_string(&p).map(|s| s.trim().is_empty()).unwrap_or(true) {
+        let alt = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
+        if alt.exists() {
+            p = alt;
+        }
+    }
     if !p.exists() { return Ok("文件不存在".into()); }
     let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     let mut val: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| e.to_string())?;

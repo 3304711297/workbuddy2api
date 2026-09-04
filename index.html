@@ -395,6 +395,24 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="divider"></div>
 
+            <!-- 关闭窗口行为设置 -->
+            <div class="form-group">
+              <label class="field-label">关闭主窗口时的行为</label>
+              <div class="radio-group" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
+                <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input type="radio" name="close-action" value="hide_to_tray" checked />
+                  <span><strong>最小化到系统托盘</strong>（不停用服务，后台继续静默提供 API）</span>
+                </label>
+                <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input type="radio" name="close-action" value="quit" />
+                  <span><strong>直接退出程序</strong>（自动停止反代服务并释放端口）</span>
+                </label>
+              </div>
+              <p class="muted field-hint">点击右下角系统托盘图标可快速调出/隐藏控制台主窗口。</p>
+            </div>
+
+            <div class="divider"></div>
+
             <div class="form-group">
               <label class="field-label">凭据存储目录</label>
               <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\codebuddy2openai\accounts.json" />
