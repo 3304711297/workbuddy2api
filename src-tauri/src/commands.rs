@@ -714,9 +714,23 @@ pub fn proxy_start(
     let script = if resource_script.exists() {
         resource_script
     } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join("../../converter.py")
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_default();
+        let direct_script = exe_dir.join("../../../converter.py");
+        if direct_script.exists() {
+            direct_script
+        } else {
+            let desktop_script = PathBuf::from("C:/Users/<username>/Desktop/codebuddy2openai/converter.py");
+            if desktop_script.exists() {
+                desktop_script
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| e.to_string())?
+                    .join("converter.py")
+            }
+        }
     };
 
     let mut cmd = Command::new(python);
