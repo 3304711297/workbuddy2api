@@ -21,3 +21,11 @@ Thumbs.db
 *.token
 *.key
 secrets.*
+
+# 前端构建产物（Vite -> dist/，Tauri frontendDist 引用）
+dist/
+node_modules/
+
+
+# Rust/Tauri 编译产物
+src-tauri/target/

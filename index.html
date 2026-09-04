@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CodeBuddy2OpenAI 控制台</title>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <div id="app" class="app-layout">
+    <!-- 非 Tauri 环境提示横幅（默认隐藏） -->
+    <div id="env-banner" class="env-banner hidden">
+      ⚠️ 当前运行在纯浏览器环境中，Tauri 后端命令不可用，所有操作仅作界面演示。
+    </div>
+
+    <!-- 左侧主侧边栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">CodeBuddy</span>
+          <span class="brand-subtitle">to OpenAI <small id="app-ver">v0.2.0</small></span>
+        </div>
+      </div>
+
+      <!-- 服务简要状态微标 -->
+      <div class="sidebar-status-card">
+        <div class="status-indicator">
+          <span id="side-dot" class="dot dot-stopped"></span>
+          <span id="side-status-text">服务已停止</span>
+        </div>
+        <div class="status-details">
+          <span class="mono" id="side-port-badge">:8787</span>
+          <span id="side-active-user" class="truncate">未登录</span>
+        </div>
+      </div>
+
+      <!-- 导航项列表 -->
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="dashboard">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="9"/>
+            <rect x="14" y="3" width="7" height="5"/>
+            <rect x="14" y="12" width="7" height="9"/>
+            <rect x="3" y="16" width="7" height="5"/>
+          </svg>
+          <span>服务看板</span>
+        </button>
+
+        <button class="nav-item" data-tab="accounts">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span>账号与资产</span>
+        </button>
+
+        <button class="nav-item" data-tab="agents">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="4" y="4" width="16" height="16" rx="2"/>
+            <rect x="9" y="9" width="6" height="6"/>
+            <line x1="9" y1="1" x2="9" y2="4"/>
+            <line x1="15" y1="1" x2="15" y2="4"/>
+            <line x1="9" y1="20" x2="9" y2="23"/>
+            <line x1="15" y1="20" x2="15" y2="23"/>
+            <line x1="20" y1="9" x2="23" y2="9"/>
+            <line x1="20" y1="15" x2="23" y2="15"/>
+            <line x1="1" y1="9" x2="4" y2="9"/>
+            <line x1="1" y1="15" x2="4" y2="15"/>
+          </svg>
+          <span>Agent 一键接入</span>
+        </button>
+
+        <button class="nav-item" data-tab="models">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+          <span>模型与接口</span>
+        </button>
+
+        <button class="nav-item" data-tab="oauth">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+            <polyline points="10 17 15 12 10 7"/>
+            <line x1="15" y1="12" x2="3" y2="12"/>
+          </svg>
+          <span>授权新账号</span>
+        </button>
+
+        <button class="nav-item" data-tab="settings">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          <span>服务设置</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- 右侧工作主区 -->
+    <main class="main-content">
+      <!-- 页面顶部 Header -->
+      <header class="content-header">
+        <div class="header-left">
+          <h1 id="page-title">服务看板</h1>
+          <p id="page-desc" class="page-desc">反代服务运行状态与全局端点概览</p>
+        </div>
+        <div class="header-right">
+          <button id="btn-start" class="btn btn-primary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            启动服务
+          </button>
+          <button id="btn-restart" class="btn btn-secondary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            重启
+          </button>
+          <button id="btn-stop" class="btn btn-danger">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><rect x="6" y="6" width="12" height="12"/></svg>
+            停止
+          </button>
+        </div>
+      </header>
+
+      <!-- 页面主体内容容器 -->
+      <div class="content-body">
+        
+        <!-- 1. 服务看板页面 (Dashboard) -->
+        <section id="panel-dashboard" class="panel-page active">
+          <!-- 状态与接入网关卡片网格 -->
+          <div class="grid-2">
+            <!-- 运行状态卡 -->
+            <div class="card status-card">
+              <div class="card-header-flex">
+                <h3 class="card-title">反代服务状态</h3>
+                <span id="dash-status-badge" class="badge badge-stopped">已停止</span>
+              </div>
+              <div class="metric-row">
+                <div class="metric-item">
+                  <span class="metric-label">监听端口</span>
+                  <span id="dash-port" class="metric-value mono">8787</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">运行架构</span>
+                  <span id="dash-mode" class="metric-value">Direct Proxy</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">脱敏状态</span>
+                  <span id="dash-desensitize" class="metric-value text-success">已启用</span>
+                </div>
+              </div>
+              <div class="divider"></div>
+              <div class="card-footer-info">
+                <span>当前活跃账号：<strong id="dash-active-account">—</strong></span>
+                <span id="dash-health-time" class="muted">—</span>
+              </div>
+            </div>
+
+            <!-- API 端点一键复制卡 -->
+            <div class="card">
+              <div class="card-header-flex">
+                <h3 class="card-title">本地接入端点</h3>
+                <span class="badge badge-info">OpenAI 兼容</span>
+              </div>
+              <div class="copy-input-group">
+                <label class="field-label">Base URL</label>
+                <div class="input-with-btn">
+                  <input id="endpoint-url" class="input mono" type="text" readonly value="http://127.0.0.1:8787/v1" />
+                  <button class="btn btn-sm btn-copy" data-copy="endpoint-url">复制</button>
+                </div>
+              </div>
+              <div class="copy-input-group" style="margin-top: 10px;">
+                <label class="field-label">API Key (本地固定)</label>
+                <div class="input-with-btn">
+                  <input id="endpoint-key" class="input mono" type="text" readonly value="local" />
+                  <button class="btn btn-sm btn-copy" data-copy="endpoint-key">复制</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 连通性实时测试卡片 -->
+          <div class="card" style="margin-top: 16px;">
+            <div class="card-header-flex">
+              <div>
+                <h3 class="card-title">接口连通性测试</h3>
+                <p class="card-desc">向本地反代发送真实测试完成请求，检验链路健康与响应延迟</p>
+              </div>
+              <button id="btn-test-chat" class="btn btn-secondary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                测试连通性
+              </button>
+            </div>
+            <div id="test-result-box" class="test-result-box hidden">
+              <div class="test-status-line">
+                <span id="test-status-tag" class="badge badge-valid">成功</span>
+                <span class="muted">模型: <strong id="test-model-tag" class="mono">glm-5.3-flash</strong></span>
+                <span class="muted">耗时: <strong id="test-latency" class="mono text-success">— ms</strong></span>
+              </div>
+              <div id="test-response-text" class="test-output-quote"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. 账号与资产管理页面 (Accounts) -->
+        <section id="panel-accounts" class="panel-page">
+          <div class="section-title-row">
+            <div>
+              <h2>账号与资源资产</h2>
+              <p class="muted">管理多账号凭据切换，实时查看各账号的剩余积分与资源包</p>
+            </div>
+            <div class="actions">
+              <button id="btn-refresh-all-usage" class="btn btn-secondary btn-sm">刷新全部数据</button>
+              <button class="btn btn-primary btn-sm" id="btn-goto-oauth">添加新账号</button>
+            </div>
+          </div>
+
+          <!-- 当前活跃账号卡片（内嵌积分进度条与资源包明细） -->
+          <div id="active-account-container" class="active-account-box">
+            <!-- 动态渲染 -->
+          </div>
+
+          <!-- 多账号列表 -->
+          <h3 class="sub-section-title" style="margin-top: 24px;">全部已保存账号</h3>
+          <div id="accounts-list" class="accounts-grid">
+            <!-- 动态填充账号卡片 -->
+          </div>
+        </section>
+
+        <!-- 3. Agent 一键接入页面 (Agents) -->
+        <section id="panel-agents" class="panel-page">
+          <div class="section-title-row">
+            <div>
+              <h2>Agent 智能体一键接入</h2>
+              <p class="muted">一键为你的日常 AI 助手配置 WorkBuddy 模型，无需手动编辑 YAML/JSON 配置文件</p>
+            </div>
+            <button id="btn-refresh-agents" class="btn btn-secondary btn-sm">重新检测状态</button>
+          </div>
+
+          <div class="grid-2">
+            <!-- Hermes Agent 卡片 -->
+            <div class="card agent-card">
+              <div class="agent-card-header">
+                <div class="agent-icon hermes-icon">H</div>
+                <div>
+                  <h3 class="agent-name">Hermes Agent</h3>
+                  <p class="muted agent-sub">Nous Research 驱动的系统与编码助理</p>
+                </div>
+                <span id="hermes-status-badge" class="badge badge-info">检测中</span>
+              </div>
+              <p class="agent-desc">自动在 <code>config.yaml</code> 注册 <code>WorkBuddy</code> 供应商并配置 7 个便捷别名（如 <code>workbuddy-glm53</code>, <code>workbuddy-kimi3</code> 等）。</p>
+              <div class="agent-path-text">路径: <span id="hermes-path" class="mono truncate">—</span></div>
+              <div class="divider"></div>
+              <div class="agent-actions">
+                <button id="btn-config-hermes" class="btn btn-primary btn-sm">一键写入配置</button>
+                <button id="btn-remove-hermes" class="btn btn-secondary btn-sm">移除配置</button>
+              </div>
+            </div>
+
+            <!-- ZCode 卡片 -->
+            <div class="card agent-card">
+              <div class="agent-card-header">
+                <div class="agent-icon zcode-icon">Z</div>
+                <div>
+                  <h3 class="agent-name">ZCode</h3>
+                  <p class="muted agent-sub">VSCode / CLI 终端编码平台</p>
+                </div>
+                <span id="zcode-status-badge" class="badge badge-info">检测中</span>
+              </div>
+              <p class="agent-desc">自动在 <code>cli/config.json</code> 与 <code>v2/config.json</code> 注册 <code>provider.workbuddy</code> 并配置完整的 15 个模型映射。</p>
+              <div class="agent-path-text">路径: <span id="zcode-path" class="mono truncate">—</span></div>
+              <div class="divider"></div>
+              <div class="agent-actions">
+                <button id="btn-config-zcode" class="btn btn-primary btn-sm">一键写入配置</button>
+                <button id="btn-remove-zcode" class="btn btn-secondary btn-sm">移除配置</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. 模型与接口速查 (Models) -->
+        <section id="panel-models" class="panel-page">
+          <div class="section-title-row">
+            <div>
+              <h2>可用模型与接入代码</h2>
+              <p class="muted">当前已由反代标准化暴露的 15 个模型别名映射及标准客户端接入示例</p>
+            </div>
+          </div>
+
+          <!-- 模型表格 -->
+          <div class="card" style="padding: 0; overflow: hidden;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>请求模型名称 (ID)</th>
+                  <th>后端映射</th>
+                  <th>上下文窗口</th>
+                  <th>特性标签</th>
+                </tr>
+              </thead>
+              <tbody id="models-table-body">
+                <!-- 动态填充 -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 代码集成示例 -->
+          <div class="card" style="margin-top: 16px;">
+            <div class="card-header-flex">
+              <h3 class="card-title">Python 接入示例 (OpenAI SDK)</h3>
+              <button class="btn btn-sm btn-secondary" data-copy="code-python">复制代码</button>
+            </div>
+            <pre class="code-block"><code id="code-python">from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8787/v1",
+    api_key="local"
+)
+
+response = client.chat.completions.create(
+    model="glm-5.3-flash",
+    messages=[{"role": "user", "content": "你好，请写一段快速排序。"}],
+)
+print(response.choices[0].message.content)</code></pre>
+          </div>
+        </section>
+
+        <!-- 5. 授权新账号页面 (OAuth) -->
+        <section id="panel-oauth" class="panel-page">
+          <div class="card oauth-card">
+            <h2 class="card-title">浏览器安全授权登录</h2>
+            <p class="card-desc">无需下载或安装 WorkBuddy 桌面端，直接通过腾讯官方网页授权登录获取凭据。</p>
+            
+            <div class="oauth-box">
+              <button id="btn-oauth-start" class="btn btn-primary btn-lg">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                开始网页授权登录
+              </button>
+            </div>
+
+            <!-- 轮询与链接等待区 -->
+            <div id="oauth-process-area" class="oauth-process-area hidden">
+              <div class="divider"></div>
+              <div class="oauth-url-container">
+                <label class="field-label">授权链接（如果浏览器未自动唤起，请手动点击或复制）：</label>
+                <div class="input-with-btn">
+                  <input id="oauth-link-input" class="input mono" type="text" readonly value="" />
+                  <button id="btn-open-browser" class="btn btn-primary">在浏览器打开</button>
+                </div>
+              </div>
+
+              <!-- 状态脉冲与等待提示 -->
+              <div class="polling-status-box">
+                <div class="spinner"></div>
+                <div>
+                  <div id="oauth-status-text" class="polling-main-text">正在等待浏览器端登录完成...</div>
+                  <div class="muted" style="font-size: 12px; margin-top: 4px;">支持手机验证码、微信扫码等方式，完成授权后本客户端将自动识别并保存</div>
+                </div>
+                <button id="btn-oauth-cancel" class="btn btn-secondary btn-sm" style="margin-left: auto;">取消</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 6. 服务设置页面 (Settings) -->
+        <section id="panel-settings" class="panel-page">
+          <div class="card settings-card">
+            <h2 class="card-title">代理与环境设置</h2>
+            
+            <div class="form-group">
+              <label class="field-label">监听端口</label>
+              <div class="input-with-btn" style="max-width: 320px;">
+                <input id="input-port" class="input mono" type="number" min="1024" max="65535" value="8787" />
+                <button id="btn-save-port" class="btn btn-secondary">保存端口</button>
+              </div>
+              <p class="muted field-hint">默认 8787，修改后需重启反代服务生效。</p>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="form-group">
+              <label class="switch-label">
+                <input id="chk-desensitize" type="checkbox" checked />
+                <span class="switch-slider"></span>
+                <span class="switch-text">启用内容安全脱敏 (--desensitize)</span>
+              </label>
+              <p class="muted field-hint">自动处理敏感触发词，避免触发内容审核误报阻断。</p>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="form-group">
+              <label class="field-label">凭据存储目录</label>
+              <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\codebuddy2openai\accounts.json" />
+              <p class="muted field-hint">所有登录账号的 Token 统一保存在此文件中，与 WorkBuddy 桌面端完全解耦。</p>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- 全局 Toast 提示容器 -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
