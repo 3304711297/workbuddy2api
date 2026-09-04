@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Mutex;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State, WindowEvent,
 };
@@ -92,6 +92,29 @@ fn save_app_settings(
     Ok("设置已成功保存".into())
 }
 
+pub fn update_tray_status<R: tauri::Runtime>(
+    proxy_handle: &ProxyHandle,
+    status_item: &MenuItem<R>,
+    toggle_item: &MenuItem<R>,
+) {
+    let mut is_running = false;
+    if let Ok(mut guard) = proxy_handle.0.lock() {
+        if let Some(child) = guard.as_mut() {
+            if child.try_wait().map(|s| s.is_none()).unwrap_or(false) {
+                is_running = true;
+            }
+        }
+    }
+
+    if is_running {
+        let _ = status_item.set_text("内核状态：运行中");
+        let _ = toggle_item.set_text("停止内核");
+    } else {
+        let _ = status_item.set_text("内核状态：已停止");
+        let _ = toggle_item.set_text("启动内核");
+    }
+}
+
 pub fn run_app() {
     let initial_config = load_app_config();
 
@@ -100,41 +123,98 @@ pub fn run_app() {
         .manage(ProxyHandle(Mutex::new(None)))
         .manage(AppConfigState(Mutex::new(initial_config)))
         .setup(|app| {
-            // 系统托盘菜单
+            // 系统托盘右键菜单（完全对齐代理内核标准交互）
             let open_item = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let status_item = MenuItem::with_id(app, "status", "内核状态：已停止", false, None::<&str>)?;
+            let toggle_item = MenuItem::with_id(app, "toggle_core", "启动内核", true, None::<&str>)?;
+            let restart_item = MenuItem::with_id(app, "restart_core", "重启内核", true, None::<&str>)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &open_item,
+                    &sep1,
+                    &status_item,
+                    &toggle_item,
+                    &restart_item,
+                    &sep2,
+                    &quit_item,
+                ],
+            )?;
+
+            let status_item_menu = status_item.clone();
+            let toggle_item_menu = toggle_item.clone();
+
+            let status_item_click = status_item.clone();
+            let toggle_item_click = toggle_item.clone();
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().expect("应用图标缺失"))
                 .tooltip("CodeBuddy2OpenAI 桌面控制台")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app_handle, event| match event.id().as_ref() {
-                    "open" => {
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
+                .on_menu_event(move |app_handle, event| {
+                    let proxy_opt = app_handle.try_state::<ProxyHandle>();
+                    match event.id().as_ref() {
+                        "open" => {
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
                         }
-                    }
-                    "quit" => {
-                        // 退出前停止反代
-                        if let Some(handle) = app_handle.try_state::<ProxyHandle>() {
-                            let _ = commands::proxy_stop(handle);
+                        "toggle_core" => {
+                            if let Some(handle) = proxy_opt {
+                                let mut is_running = false;
+                                if let Ok(mut guard) = handle.0.lock() {
+                                    if let Some(child) = guard.as_mut() {
+                                        if child.try_wait().map(|s| s.is_none()).unwrap_or(false) {
+                                            is_running = true;
+                                        }
+                                    }
+                                }
+                                if is_running {
+                                    let _ = commands::proxy_stop(handle.clone());
+                                } else {
+                                    let _ = commands::proxy_start(handle.clone(), app_handle.clone(), 8787, Some(true));
+                                }
+                                update_tray_status(&handle, &status_item_menu, &toggle_item_menu);
+                            }
                         }
-                        app_handle.exit(0);
+                        "restart_core" => {
+                            if let Some(handle) = proxy_opt {
+                                let _ = commands::proxy_stop(handle.clone());
+                                std::thread::sleep(std::time::Duration::from_millis(350));
+                                let _ = commands::proxy_start(handle.clone(), app_handle.clone(), 8787, Some(true));
+                                update_tray_status(&handle, &status_item_menu, &toggle_item_menu);
+                            }
+                        }
+                        "quit" => {
+                            // 退出前停止反代
+                            if let Some(handle) = proxy_opt {
+                                let _ = commands::proxy_stop(handle);
+                            }
+                            app_handle.exit(0);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 })
-                .on_tray_icon_event(|tray, event| {
+                .on_tray_icon_event(move |tray, event| {
+                    let app_handle = tray.app_handle();
+                    // 每次触发托盘事件时刷新状态项
+                    if let Some(handle) = app_handle.try_state::<ProxyHandle>() {
+                        update_tray_status(&handle, &status_item_click, &toggle_item_click);
+                    }
+
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
                     {
-                        let app_handle = tray.app_handle();
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let is_visible = window.is_visible().unwrap_or(false);
                             if is_visible {
