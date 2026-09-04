@@ -940,6 +940,8 @@ pub fn proxy_start(
     };
 
     let mut cmd = Command::new(python);
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
     cmd.arg(script).arg("--port").arg(port.to_string());
     if desensitize.unwrap_or(true) {
         cmd.arg("--desensitize");
@@ -998,13 +1000,14 @@ fn log_file_path() -> PathBuf {
 pub fn proxy_get_logs() -> Result<String, String> {
     let p = log_file_path();
     if p.exists() {
-        let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+        let raw = String::from_utf8_lossy(&bytes);
         // 如果日志太大，仅截取最后 80KB 保持平滑
         if raw.len() > 80_000 {
             let start = raw.len() - 80_000;
             return Ok(raw[start..].to_string());
         }
-        return Ok(raw);
+        return Ok(raw.to_string());
     }
     Ok("暂无日志输出，请启动反代服务".into())
 }
