@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, State, WindowEvent,
+    Emitter, Manager, State, WindowEvent,
 };
 
 pub mod commands;
@@ -177,7 +177,7 @@ pub fn run_app() {
                                     }
                                 }
                                 if is_running {
-                                    let _ = commands::proxy_stop(handle.clone());
+                                    let _ = commands::proxy_stop(handle.clone(), app_handle.clone());
                                 } else {
                                     let _ = commands::proxy_start(handle.clone(), app_handle.clone(), 8787, Some(true));
                                 }
@@ -186,7 +186,7 @@ pub fn run_app() {
                         }
                         "restart_core" => {
                             if let Some(handle) = proxy_opt {
-                                let _ = commands::proxy_stop(handle.clone());
+                                let _ = commands::proxy_stop(handle.clone(), app_handle.clone());
                                 std::thread::sleep(std::time::Duration::from_millis(350));
                                 let _ = commands::proxy_start(handle.clone(), app_handle.clone(), 8787, Some(true));
                                 update_tray_status(&handle, &status_item_menu, &toggle_item_menu);
@@ -195,7 +195,7 @@ pub fn run_app() {
                         "quit" => {
                             // 退出前停止反代
                             if let Some(handle) = proxy_opt {
-                                let _ = commands::proxy_stop(handle);
+                                let _ = commands::proxy_stop(handle, app_handle.clone());
                             }
                             app_handle.exit(0);
                         }
@@ -249,7 +249,7 @@ pub fn run_app() {
                     CloseAction::Quit => {
                         // 关闭窗口且自动停用反代服务并退出应用
                         if let Some(handle) = app.try_state::<ProxyHandle>() {
-                            let _ = commands::proxy_stop(handle);
+                            let _ = commands::proxy_stop(handle, app.clone());
                         }
                         // 允许正常关闭与退出
                     }

@@ -180,6 +180,11 @@ function updateServiceStatus(isRunning, data = null) {
   const dashTime = document.getElementById('dash-health-time');
   const dashActive = document.getElementById('dash-active-account');
   const sideUser = document.getElementById('side-active-user');
+  const btnStart = document.getElementById('btn-start');
+  const btnStop = document.getElementById('btn-stop');
+
+  if (btnStart) btnStart.disabled = isRunning;
+  if (btnStop) btnStop.disabled = !isRunning;
 
   if (isRunning) {
     sideDot.className = 'dot dot-running';
@@ -885,9 +890,25 @@ window.addEventListener('DOMContentLoaded', () => {
   initSettings();
   initLogs();
 
-  // 默认启动检测健康
+  // 监听 Tauri 事件广播（托盘启动/停止/重启时即时响应）
+  if (window.__TAURI__?.event?.listen) {
+    window.__TAURI__.event.listen('proxy-status-changed', () => {
+      setTimeout(checkHealth, 200);
+      setTimeout(checkHealth, 800);
+    });
+  }
+
+  // 窗口获取焦点时立即检测（用户从托盘切回控制台瞬间刷新）
+  window.addEventListener('focus', checkHealth);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      checkHealth();
+    }
+  });
+
+  // 默认启动检测健康（缩短为 3 秒轻量轮询）
   checkHealth();
   loadAgentsStatus();
   loadModelsMatrix();
-  setInterval(checkHealth, 15000);
+  setInterval(checkHealth, 3000);
 });

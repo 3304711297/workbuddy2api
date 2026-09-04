@@ -969,6 +969,11 @@ pub fn proxy_start(
         .spawn()
         .map_err(|e| format!("启动反代失败: {e}"))?;
     *guard = Some(child);
+
+    // 广播服务状态变更事件
+    use tauri::Emitter;
+    let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": true, "port": port }));
+
     Ok(format!("started(port {port})"))
 }
 
@@ -1005,15 +1010,39 @@ pub fn proxy_clear_logs() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn proxy_stop(handle: State<'_, ProxyHandle>) -> Result<String, String> {
+pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Result<String, String> {
     let mut guard = handle.0.lock().map_err(|e| e.to_string())?;
+    let mut stopped = false;
     if let Some(child) = guard.as_mut() {
         if child.kill().is_ok() {
             *guard = None;
-            return Ok("stopped".into());
+            stopped = true;
         }
     }
-    Ok("not-running".into())
+
+    // 兜底清理可能残留的 converter.py 进程
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*converter.py*' -and $_.Name -eq 'python.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+            ])
+            .output();
+    }
+
+    use tauri::Emitter;
+    let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
+
+    if stopped {
+        Ok("stopped".into())
+    } else {
+        Ok("not-running".into())
+    }
 }
 
 #[tauri::command]
@@ -1023,7 +1052,7 @@ pub async fn proxy_restart(
     port: u16,
     desensitize: Option<bool>,
 ) -> Result<String, String> {
-    let _ = proxy_stop(handle.clone());
+    let _ = proxy_stop(handle.clone(), app.clone());
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     proxy_start(handle, app, port, desensitize)
 }
