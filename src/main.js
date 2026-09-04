@@ -468,7 +468,7 @@ async function loadAgentsStatus() {
 function initAgentActions() {
   document.getElementById('btn-config-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agent_type: 'hermes', port: state.port });
+      const res = await invokeTauri('agent_configure', { agent_type: 'hermes', agentType: 'hermes', port: state.port });
       showToast(res, 'success');
       loadAgentsStatus();
     } catch (e) {
@@ -478,7 +478,7 @@ function initAgentActions() {
 
   document.getElementById('btn-remove-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agent_type: 'hermes' });
+      const res = await invokeTauri('agent_remove', { agent_type: 'hermes', agentType: 'hermes' });
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
@@ -488,7 +488,7 @@ function initAgentActions() {
 
   document.getElementById('btn-config-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agent_type: 'zcode', port: state.port });
+      const res = await invokeTauri('agent_configure', { agent_type: 'zcode', agentType: 'zcode', port: state.port });
       showToast(res, 'success');
       loadAgentsStatus();
     } catch (e) {
@@ -498,7 +498,7 @@ function initAgentActions() {
 
   document.getElementById('btn-remove-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agent_type: 'zcode' });
+      const res = await invokeTauri('agent_remove', { agent_type: 'zcode', agentType: 'zcode' });
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
@@ -601,6 +601,17 @@ async function loadModelsMatrix() {
   }
 }
 
+function formatMultiplier(raw) {
+  if (!raw || raw === '—') return '<span class="muted">—</span>';
+  const match = String(raw).match(/(\d+(?:\.\d+)?)/);
+  if (!match) return `<span class="badge badge-info mono">${raw}</span>`;
+  const num = parseFloat(match[1]);
+  if (num === 0) {
+    return `<span class="badge badge-valid" style="background: rgba(16,185,129,0.2); color: #34d399; font-weight: 700;">免费 (0.00x)</span>`;
+  }
+  return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span>`;
+}
+
 function renderModelsTable(list) {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
@@ -611,11 +622,8 @@ function renderModelsTable(list) {
   }
 
   tbody.innerHTML = list.map(m => {
-    // 倍率展示
-    let creditsBadge = `<span class="badge badge-info">${m.credits}</span>`;
-    if (m.credits.includes('x0.00')) {
-      creditsBadge = `<span class="badge badge-valid" style="background: rgba(16,185,129,0.2); color: #34d399;">免费 (${m.credits})</span>`;
-    }
+    // 纯粹干净的倍率展示（去除无意义的 credits 单词）
+    const creditsBadge = formatMultiplier(m.credits);
 
     // 思考模式配置下拉
     let effortSelect = '<span class="muted" style="font-size: 11px;">不支持思考</span>';

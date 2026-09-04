@@ -670,7 +670,7 @@ pub fn agent_detect() -> Result<AgentStatus, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn agent_configure(agent_type: String, port: u16) -> Result<String, String> {
     match agent_type.as_str() {
         "hermes" => configure_hermes(port),
