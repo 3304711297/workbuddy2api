@@ -102,6 +102,7 @@ function initTabs() {
       if (tab === 'accounts') loadAccountsData();
       if (tab === 'agents') loadAgentsStatus();
       if (tab === 'dashboard') checkHealth();
+      if (tab === 'models') loadModelsMatrix();
       if (tab === 'logs') loadLogs();
     });
   });
@@ -584,20 +585,133 @@ function initOAuth() {
 }
 
 // ---------------------------------------------------------------------------
-// 模型表格渲染与代码复制
+// 模型全量矩阵与参数定制 (倍率/思考强度/上下文)
 // ---------------------------------------------------------------------------
-function initModelsAndCopy() {
+async function loadModelsMatrix() {
   const tbody = document.getElementById('models-table-body');
-  if (tbody) {
-    tbody.innerHTML = state.models.map(m => `
-      <tr>
-        <td><strong class="mono" style="color: #60a5fa;">${m.id}</strong></td>
-        <td><span class="mono muted">${m.target}</span></td>
-        <td><span class="mono">${m.ctx}</span></td>
-        <td>${m.tags.map(t => `<span class="badge badge-info" style="margin-right:4px;">${t}</span>`).join('')}</td>
-      </tr>
-    `).join('');
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px;"><span class="spinner"></span> 正在同步全量模型与计费倍率数据...</td></tr>`;
+
+  try {
+    const list = await invokeTauri('models_fetch_all');
+    renderModelsTable(list);
+  } catch (e) {
+    console.warn('获取全量模型列表失败，降级展示基础模型:', e);
+    renderFallbackModels();
   }
+}
+
+function renderModelsTable(list) {
+  const tbody = document.getElementById('models-table-body');
+  if (!tbody) return;
+
+  if (!list || list.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align: center; padding: 20px;">未获取到模型数据</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = list.map(m => {
+    // 倍率展示
+    let creditsBadge = `<span class="badge badge-info">${m.credits}</span>`;
+    if (m.credits.includes('x0.00')) {
+      creditsBadge = `<span class="badge badge-valid" style="background: rgba(16,185,129,0.2); color: #34d399;">免费 (${m.credits})</span>`;
+    }
+
+    // 思考模式配置下拉
+    let effortSelect = '<span class="muted" style="font-size: 11px;">不支持思考</span>';
+    if (m.supports_reasoning) {
+      const currentEffort = m.custom_reasoning_effort || 'default';
+      const options = [];
+      options.push(`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认 (${m.default_effort})</option>`);
+      
+      for (const ef of m.supported_efforts) {
+        options.push(`<option value="${ef}" ${currentEffort === ef ? 'selected' : ''}>强度: ${ef}</option>`);
+      }
+      if (m.can_disable_thinking) {
+        options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
+      }
+      effortSelect = `
+        <select class="input mono" style="padding: 3px 6px; font-size: 11px; width: 130px;" id="effort-${m.id}">
+          ${options.join('')}
+        </select>
+      `;
+    }
+
+    // 上下文限制输入
+    const defaultCtx = m.max_input_tokens;
+    const currentCtx = m.custom_context_window || defaultCtx;
+    const ctxInput = `
+      <div style="display: flex; align-items: center; gap: 4px;">
+        <input type="number" class="input mono" style="padding: 3px 6px; font-size: 11px; width: 100px;" 
+          id="ctx-${m.id}" value="${currentCtx}" min="1024" max="${defaultCtx}" step="1024" />
+        <small class="muted" style="font-size: 10px;">/ ${Math.round(defaultCtx/1000)}k</small>
+      </div>
+    `;
+
+    // 标签与描述
+    const tagsHtml = m.tags.map(t => `<span class="badge badge-info" style="font-size: 10px; margin-right: 3px;">${t}</span>`).join('');
+    const descHtml = m.description ? `<div class="muted truncate" style="font-size: 11px; max-width: 220px; margin-top: 3px;" title="${m.description}">${m.description}</div>` : '';
+
+    return `
+      <tr>
+        <td>
+          <strong class="mono" style="color: #60a5fa; font-size: 13px;">${m.id}</strong>
+          <div class="muted" style="font-size: 11px;">${m.name}</div>
+        </td>
+        <td>${creditsBadge}</td>
+        <td>${ctxInput}</td>
+        <td>${effortSelect}</td>
+        <td>
+          <div>${tagsHtml}</div>
+          ${descHtml}
+        </td>
+        <td>
+          <button class="btn btn-secondary btn-sm" onclick="saveModelConfig('${m.id}')" style="padding: 3px 8px; font-size: 11px;">保存</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderFallbackModels() {
+  const tbody = document.getElementById('models-table-body');
+  if (!tbody) return;
+  tbody.innerHTML = state.models.map(m => `
+    <tr>
+      <td><strong class="mono" style="color: #60a5fa;">${m.id}</strong></td>
+      <td><span class="badge badge-info">标准倍率</span></td>
+      <td><span class="mono">${m.ctx}</span></td>
+      <td><span class="muted">默认</span></td>
+      <td>${m.tags.map(t => `<span class="badge badge-info" style="margin-right:4px;">${t}</span>`).join('')}</td>
+      <td><span class="muted">—</span></td>
+    </tr>
+  `).join('');
+}
+
+window.saveModelConfig = async (modelId) => {
+  const ctxInput = document.getElementById(`ctx-${modelId}`);
+  const effortSelect = document.getElementById(`effort-${modelId}`);
+  
+  const ctxVal = ctxInput ? parseInt(ctxInput.value, 10) : null;
+  const effortVal = effortSelect ? effortSelect.value : null;
+
+  try {
+    const res = await invokeTauri('model_save_config', {
+      modelId,
+      contextWindow: ctxVal && !isNaN(ctxVal) ? ctxVal : null,
+      reasoningEffort: effortVal && effortVal !== 'default' ? effortVal : null
+    });
+    showToast(res, 'success');
+  } catch (e) {
+    showToast(`保存失败: ${e.message || e}`, 'error');
+  }
+};
+
+function initModelsAndCopy() {
+  document.getElementById('btn-refresh-models')?.addEventListener('click', () => {
+    loadModelsMatrix();
+    showToast('已从云端同步模型列表', 'info');
+  });
 
   // 复制按钮事件代理
   document.querySelectorAll('[data-copy]').forEach(btn => {
@@ -766,5 +880,6 @@ window.addEventListener('DOMContentLoaded', () => {
   // 默认启动检测健康
   checkHealth();
   loadAgentsStatus();
+  loadModelsMatrix();
   setInterval(checkHealth, 15000);
 });

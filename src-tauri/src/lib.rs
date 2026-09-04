@@ -189,6 +189,9 @@ pub fn run_app() {
             commands::accounts_refresh_token,
             // 配额与积分
             commands::usage_query,
+            // 模型全量获取与配置
+            commands::models_fetch_all,
+            commands::model_save_config,
             // Agent 一键集成
             commands::agent_detect,
             commands::agent_configure,

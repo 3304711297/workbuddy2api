@@ -183,37 +183,67 @@ class CredentialManager:
 
 
 # ---------------------------------------------------------------------------
-# 模型列表
+# 模型列表与配置
 # ---------------------------------------------------------------------------
+
+def _model_settings_file() -> str:
+    base = os.environ.get("LOCALAPPDATA", r"C:\Users\<username>\AppData\Local")
+    d = os.path.join(base, "codebuddy2openai")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "model_settings.json")
+
+
+def _load_model_settings() -> dict:
+    p = _model_settings_file()
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
 MODEL_MAP = {
     "hy4": "hy4-preview",
     "hy4-preview": "hy4-preview",
     "hy4-preview-agent": "hy4-preview",
     "hunyuan-4": "hy4-preview",
-    "hy3": "hy3-preview-agent",
-    "hy3-preview": "hy3-preview-agent",
-    "hy3-preview-agent": "hy3-preview-agent",
+    "hy3": "hy3-x",
+    "hy3-preview": "hy3-x",
+    "hy3-preview-agent": "hy3-x",
     "kimi-k3": "kimi-k3-1",
-    "minimax-m3": "minimax-m3-pay",
+    "minimax-m3": "minimax-m3",
 }
 
 DEFAULT_MODELS = [
     "auto",
     "hy4-preview",
+    "hy4-preview-x",
     "hy3",
+    "hy3-x",
     "glm-5.3",
     "glm-5.3-flash",
     "glm-5.2",
     "glm-5.1",
+    "glm-5.0",
     "glm-5v-turbo",
+    "glm-4.7",
+    "glm-4.6",
+    "glm-4.6v",
+    "minimax-m3",
+    "minimax-m2.5",
+    "kimi-k3-1",
     "kimi-k3",
     "kimi-k2.7",
     "kimi-k2.6",
     "kimi-k2.5",
+    "kimi-k2-thinking",
     "deepseek-v4-pro",
     "deepseek-v4-flash",
-    "minimax-m3",
+    "deepseek-v3-2-volc",
+    "hunyuan-2.0-thinking",
+    "hunyuan-chat",
+    "default",
 ]
 
 # 后端请求体里出现过的额外字段（透传时若客户端给了就保留）
@@ -337,6 +367,28 @@ async def chat_completions(request: Request,
     model_name = payload.get("model", "auto")
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
+
+    # 应用用户在控制台配置的自定义参数（上下文限制/思考强度等）
+    user_settings = _load_model_settings()
+    custom_cfg = user_settings.get(model_name) or user_settings.get(mapped_model) or {}
+
+    # 1. 思考模式与思考强度
+    custom_effort = custom_cfg.get("reasoning_effort")
+    if custom_effort:
+        if custom_effort == "disable":
+            body.pop("reasoning_effort", None)
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        else:
+            body["reasoning_effort"] = custom_effort
+            if "chat_template_kwargs" not in body:
+                body["chat_template_kwargs"] = {"enable_thinking": True}
+
+    # 2. 上下文截断保护 / max_tokens
+    custom_ctx = custom_cfg.get("context_window")
+    if custom_ctx and isinstance(custom_ctx, int) and custom_ctx > 0:
+        if "max_tokens" not in body:
+            body["max_tokens"] = min(custom_ctx, 64000)
+
     tool_names = [t.get("function", {}).get("name") for t in (payload.get("tools") or [])
                   if isinstance(t, dict)]
     last_user = _last_user_text(messages)

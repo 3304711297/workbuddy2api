@@ -296,20 +296,23 @@
         <section id="panel-models" class="panel-page">
           <div class="section-title-row">
             <div>
-              <h2>可用模型与接入代码</h2>
-              <p class="muted">当前已由反代标准化暴露的 15 个模型别名映射及标准客户端接入示例</p>
+              <h2>可用模型矩阵与参数定制</h2>
+              <p class="muted">全量读取 WorkBuddy 官方后端 27+ 模型矩阵，支持查看实时倍率、修改上下文窗口大小以及调节/关闭思考强度</p>
             </div>
+            <button id="btn-refresh-models" class="btn btn-secondary btn-sm">从云端同步模型列表</button>
           </div>
 
           <!-- 模型表格 -->
-          <div class="card" style="padding: 0; overflow: hidden;">
+          <div class="card" style="padding: 0; overflow-x: auto;">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>请求模型名称 (ID)</th>
-                  <th>后端映射</th>
-                  <th>上下文窗口</th>
-                  <th>特性标签</th>
+                  <th>模型 ID / 名称</th>
+                  <th>计费倍率</th>
+                  <th>上下文窗口上限 (Tokens)</th>
+                  <th>思考强度 (Reasoning)</th>
+                  <th>标签 / 描述</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="models-table-body">
