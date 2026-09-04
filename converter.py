@@ -186,11 +186,34 @@ class CredentialManager:
 # 模型列表
 # ---------------------------------------------------------------------------
 
+MODEL_MAP = {
+    "hy4": "hy4-preview",
+    "hy4-preview": "hy4-preview",
+    "hy4-preview-agent": "hy4-preview",
+    "hunyuan-4": "hy4-preview",
+    "hy3": "hy3-preview-agent",
+    "hy3-preview": "hy3-preview-agent",
+    "hy3-preview-agent": "hy3-preview-agent",
+    "kimi-k3": "kimi-k3-1",
+    "minimax-m3": "minimax-m3-pay",
+}
+
 DEFAULT_MODELS = [
-    "glm-5.2", "glm-5.1", "glm-5v-turbo",
-    "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
-    "deepseek-v4-pro", "deepseek-v4-flash",
-    "minimax-m3-pay", "hy3-preview-agent", "auto",
+    "auto",
+    "hy4-preview",
+    "hy3",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5v-turbo",
+    "kimi-k3",
+    "kimi-k2.7",
+    "kimi-k2.6",
+    "kimi-k2.5",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "minimax-m3",
 ]
 
 # 后端请求体里出现过的额外字段（透传时若客户端给了就保留）
@@ -312,6 +335,8 @@ async def chat_completions(request: Request,
 
     # 日志：请求摘要
     model_name = payload.get("model", "auto")
+    mapped_model = MODEL_MAP.get(model_name, model_name)
+    body["model"] = mapped_model
     tool_names = [t.get("function", {}).get("name") for t in (payload.get("tools") or [])
                   if isinstance(t, dict)]
     last_user = _last_user_text(messages)
