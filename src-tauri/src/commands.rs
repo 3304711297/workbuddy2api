@@ -780,34 +780,56 @@ pub fn proxy_start(
         }
     }
 
+    // 重定向标准输出与错误输出到本地日志文件，供控制台实时查看
+    let log_path = log_file_path();
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("无法创建日志文件: {e}"))?;
+
+    let log_err = log_file.try_clone().map_err(|e| e.to_string())?;
+
     let child = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err))
         .spawn()
         .map_err(|e| format!("启动反代失败: {e}"))?;
     *guard = Some(child);
     Ok(format!("started(port {port})"))
 }
 
+fn log_file_path() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
+    let dir = Path::new(&base).join("codebuddy2openai");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("proxy_stdout.log")
+}
+
 #[tauri::command]
-pub fn proxy_open_console(port: u16, desensitize: Option<bool>) -> Result<String, String> {
-    let python = "C:\\Users\\<username>\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe";
-    let script = "C:\\Users\\<username>\\Desktop\\codebuddy2openai\\converter.py";
-    let mut args = format!("\"{python}\" \"{script}\" --port {port}");
-    if desensitize.unwrap_or(true) {
-        args.push_str(" --desensitize");
+pub fn proxy_get_logs() -> Result<String, String> {
+    let p = log_file_path();
+    if p.exists() {
+        let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        // 如果日志太大，仅截取最后 80KB 保持平滑
+        if raw.len() > 80_000 {
+            let start = raw.len() - 80_000;
+            return Ok(raw[start..].to_string());
+        }
+        return Ok(raw);
     }
+    Ok("暂无日志输出，请启动反代服务".into())
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        Command::new("cmd.exe")
-            .args(["/c", "start", "WorkBuddy to OpenAI Console", "cmd.exe", "/k", &args])
-            .spawn()
-            .map_err(|e| format!("打开控制台失败: {e}"))?;
+#[tauri::command]
+pub fn proxy_clear_logs() -> Result<String, String> {
+    let p = log_file_path();
+    if p.exists() {
+        std::fs::write(&p, "").map_err(|e| e.to_string())?;
     }
-
-    Ok("控制台窗口已打开".into())
+    Ok("日志已清空".into())
 }
 
 #[tauri::command]

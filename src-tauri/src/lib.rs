@@ -195,7 +195,8 @@ pub fn run_app() {
             commands::agent_remove,
             // 反代控制与测试
             commands::proxy_start,
-            commands::proxy_open_console,
+            commands::proxy_get_logs,
+            commands::proxy_clear_logs,
             commands::proxy_stop,
             commands::proxy_restart,
             commands::proxy_health,

@@ -81,6 +81,7 @@ function initTabs() {
     models: { title: '模型与接口', desc: '查看支持的标准模型别名与多语言接入示例' },
     oauth: { title: '授权新账号', desc: '无需原版 WorkBuddy 客户端，浏览器直接网页授权绑定' },
     settings: { title: '服务设置', desc: '代理端口、脱敏选项及凭据目录管理' },
+    logs: { title: '实时运行日志', desc: '内嵌控制台查看本地反代服务的完整输出与 Debug 信息' },
   };
 
   navItems.forEach(item => {
@@ -101,6 +102,7 @@ function initTabs() {
       if (tab === 'accounts') loadAccountsData();
       if (tab === 'agents') loadAgentsStatus();
       if (tab === 'dashboard') checkHealth();
+      if (tab === 'logs') loadLogs();
     });
   });
 
@@ -651,19 +653,9 @@ function initSettings() {
           show_debug_console: e.target.checked
         }
       });
-      showToast(e.target.checked ? '已启用：启动服务时显示 Debug 调试窗口' : '已恢复默认：静默后台启动（无黑框）', 'success');
+      showToast(e.target.checked ? '已启用：启动服务时显示外部 CMD 调试窗口' : '已恢复默认：静默后台启动（无黑框）', 'success');
     } catch (err) {
       showToast(`保存设置失败: ${err.message || err}`, 'error');
-    }
-  });
-
-  btnOpenLiveConsole?.addEventListener('click', async () => {
-    try {
-      showToast('正在调出 Debug 调试窗口...', 'info');
-      const msg = await invokeTauri('proxy_open_console', { port: state.port, desensitize: state.desensitize });
-      showToast(msg, 'success');
-    } catch (err) {
-      showToast(`弹出窗口失败: ${err.message || err}`, 'error');
     }
   });
 
@@ -710,6 +702,50 @@ function initSettings() {
 }
 
 // ---------------------------------------------------------------------------
+// 实时运行日志 (Logs)
+// ---------------------------------------------------------------------------
+let logInterval = null;
+
+async function loadLogs() {
+  const viewer = document.getElementById('log-viewer');
+  if (!viewer) return;
+  try {
+    const raw = await invokeTauri('proxy_get_logs');
+    viewer.textContent = raw || '（暂无日志输出）';
+    viewer.scrollTop = viewer.scrollHeight;
+  } catch (e) {
+    viewer.textContent = `获取日志失败: ${e.message || e}`;
+  }
+}
+
+function initLogs() {
+  const btnRefresh = document.getElementById('btn-refresh-logs');
+  const btnClear = document.getElementById('btn-clear-logs');
+
+  btnRefresh?.addEventListener('click', () => {
+    loadLogs();
+    showToast('日志已刷新', 'info');
+  });
+
+  btnClear?.addEventListener('click', async () => {
+    try {
+      await invokeTauri('proxy_clear_logs');
+      loadLogs();
+      showToast('日志已清空', 'info');
+    } catch (e) {
+      showToast(`清空失败: ${e.message || e}`, 'error');
+    }
+  });
+
+  // 处于 logs 标签页时定时拉取
+  setInterval(() => {
+    if (state.currentTab === 'logs') {
+      loadLogs();
+    }
+  }, 2000);
+}
+
+// ---------------------------------------------------------------------------
 // 初始化入口
 // ---------------------------------------------------------------------------
 window.addEventListener('DOMContentLoaded', () => {
@@ -725,6 +761,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initOAuth();
   initModelsAndCopy();
   initSettings();
+  initLogs();
 
   // 默认启动检测健康
   checkHealth();

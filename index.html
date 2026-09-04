@@ -101,6 +101,14 @@
           </svg>
           <span>服务设置</span>
         </button>
+
+        <button class="nav-item" data-tab="logs">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+          <span>实时日志</span>
+        </button>
       </nav>
     </aside>
 
@@ -400,15 +408,9 @@ print(response.choices[0].message.content)</code></pre>
               <label class="switch-label">
                 <input id="chk-debug-console" type="checkbox" />
                 <span class="switch-slider"></span>
-                <span class="switch-text">启动服务时显示 Debug 黑色控制台窗口</span>
+                <span class="switch-text">启动服务时显示外部 CMD 调试黑框</span>
               </label>
-              <p class="muted field-hint">默认关闭（静默在后台启动，无黑框打扰）。开启后启动服务将保留前台 CMD 调试控制台。</p>
-              <div style="margin-top: 10px;">
-                <button id="btn-open-live-console" class="btn btn-secondary btn-sm">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                  立即弹出前台 Debug 调试窗口
-                </button>
-              </div>
+              <p class="muted field-hint">默认关闭（静默无黑框）。建议直接在左侧「实时日志」页面内嵌查看调试日志。</p>
             </div>
 
             <div class="divider"></div>
@@ -436,6 +438,28 @@ print(response.choices[0].message.content)</code></pre>
               <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\codebuddy2openai\accounts.json" />
               <p class="muted field-hint">所有登录账号的 Token 统一保存在此文件中，与 WorkBuddy 桌面端完全解耦。</p>
             </div>
+          </div>
+        </section>
+
+        <!-- 7. 内嵌实时日志页面 (Logs) -->
+        <section id="panel-logs" class="panel-page">
+          <div class="section-title-row">
+            <div>
+              <h2>服务运行与 Debug 日志</h2>
+              <p class="muted">内嵌控制台实时查看反代服务的启动、请求流与错误输出，无需弹窗黑框</p>
+            </div>
+            <div class="actions" style="display: flex; gap: 8px;">
+              <button id="btn-refresh-logs" class="btn btn-secondary btn-sm">刷新日志</button>
+              <button id="btn-clear-logs" class="btn btn-secondary btn-sm">清空日志</button>
+            </div>
+          </div>
+
+          <div class="card" style="padding: 0; overflow: hidden; background: #0b0d11;">
+            <div style="background: #151821; padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
+              <span class="mono" style="font-size: 12px; color: var(--text-secondary);">proxy_stdout.log</span>
+              <span id="log-auto-scroll" class="muted" style="font-size: 11px;">自动同步中 (每 2 秒)</span>
+            </div>
+            <pre id="log-viewer" class="code-block" style="border: none; border-radius: 0; min-height: 420px; max-height: 520px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; padding: 16px; line-height: 1.5; font-size: 12px; color: #a6adbb;"></pre>
           </div>
         </section>
 
