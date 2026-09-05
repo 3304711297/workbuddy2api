@@ -33,6 +33,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 try:
@@ -266,6 +267,45 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
 
 
 # ---------------------------------------------------------------------------
+# Host 校验（防 DNS rebinding）
+# ---------------------------------------------------------------------------
+
+# 仅允许本机回环主机名（Host 头可带端口后缀，IPv6 允许方括号形式）
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _extract_hostname(host_header: str) -> str:
+    """从 Host 头提取纯主机名，兼容 host:port 与 [::1]:port 两种形式。"""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end != -1 else host
+    if host.count(":") == 1:  # host:port（裸 IPv6 不会恰好只有一个冒号）
+        return host.split(":", 1)[0]
+    return host
+
+
+class LocalHostOnlyMiddleware(BaseHTTPMiddleware):
+    """校验 Host 头，拒绝非本机回环地址的请求，防 DNS rebinding。
+
+    对 /health 与 /v1/* 全部生效；GUI/CLI 正常用法 Host 均为本机回环，无行为变化。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        host_header = request.headers.get("host") or ""
+        if _extract_hostname(host_header) not in _ALLOWED_HOSTS:
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": f"forbidden host: {host_header}",
+                                   "type": "invalid_host"}},
+            )
+        return await call_next(request)
+
+
+app.add_middleware(LocalHostOnlyMiddleware)
+
+
+# ---------------------------------------------------------------------------
 # 日志（写文件）
 # ---------------------------------------------------------------------------
 
@@ -314,15 +354,18 @@ def _cred() -> CredentialManager:
 
 @app.get("/health")
 def health():
+    # 安全收窄：/health 无需鉴权即可访问，只暴露布尔/状态字段，
+    # 不再返回 uid/nickname/enterpriseName/token 过期时间/auth 文件路径等敏感信息。
+    # 身份信息请通过鉴权后的 /v1/* 接口或桌面控制台获取。
     cred = CONFIG["cred"]
-    info: dict = {"status": "ok", "platform": sys.platform, "python": sys.version.split()[0],
-                  "auth_file": str(find_auth_file() or "(未找到)"), "mode": "direct-proxy (native function calling)"}
+    authenticated = False
     if cred is not None:
         try:
-            info["credential"] = cred.summary()
-        except Exception as e:
-            info["credential_error"] = str(e)
-    return info
+            cred.summary()
+            authenticated = True
+        except Exception:
+            authenticated = False
+    return {"status": "ok", "authenticated": authenticated}
 
 
 @app.get("/v1/models")

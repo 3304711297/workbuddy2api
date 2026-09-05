@@ -172,6 +172,17 @@ async function checkHealth() {
   }
 }
 
+// /health 已安全收窄（只返回 status/authenticated），身份信息改用鉴权的 Tauri 接口获取
+async function getActiveAccountNickname() {
+  try {
+    const list = await invokeTauri('accounts_list');
+    const active = list.find(a => a.is_active) || list[0];
+    return active?.nickname || '已登录';
+  } catch (e) {
+    return '已登录';
+  }
+}
+
 function updateServiceStatus(isRunning, data = null) {
   state.running = isRunning;
   const sideDot = document.getElementById('side-dot');
@@ -192,9 +203,10 @@ function updateServiceStatus(isRunning, data = null) {
     dashBadge.className = 'badge badge-running';
     dashBadge.textContent = '运行中';
 
-    const nick = data?.credential?.nickname || data?.nickname || '晚街';
-    dashActive.textContent = nick;
-    sideUser.textContent = nick;
+    getActiveAccountNickname().then((nick) => {
+      dashActive.textContent = nick;
+      sideUser.textContent = nick;
+    });
     dashTime.textContent = `检测时间: ${new Date().toLocaleTimeString()}`;
   } else {
     sideDot.className = 'dot dot-stopped';

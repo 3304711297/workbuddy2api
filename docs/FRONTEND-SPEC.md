@@ -22,7 +22,7 @@
    | `auth_poll` | `{state: string}` | `{code: number, msg: string, data: object\|null}` | 轮询登录结果。**`code === 11217` = 登录进行中**（继续轮询，建议 2s 间隔）；`data !== null` = 登录成功（含 accessToken/refreshToken/account）；其他 = 失败 |
    | `proxy_start` | `{port: number}` | `string`（如 `"started(port 8787)"`） | 启动 Python 反代；幂等 |
    | `proxy_stop` | 无 | `string` | 停止反代 |
-   | `proxy_health` | `{port: number}` | `{uid, nickname, enterpriseName, token_expires_at, token_expired, status, mode, ...}` | 健康检查；**失败会 reject**（连接拒绝），需 catch 并显示「服务未运行」 |
+   | `proxy_health` | `{port: number}` | `{status: string, authenticated: bool}` | 健康检查（安全收窄：不再返回身份信息）；**失败会 reject**（连接拒绝），需 catch 并显示「服务未运行」。账号昵称等身份信息改用 `accounts_list` 获取 |
 
 4. 不需要实现真实二维码渲染（登录页直接展示 authUrl 链接 + 「打开浏览器登录」按钮即可）。
 
@@ -46,7 +46,7 @@
 ### Tab 2：账号
 - 大卡片显示当前账号：昵称（大字）、uid（等宽小字）、企业名（若有）
 - token 状态徽章：绿色「有效」/ 红色「已过期」+ 过期时间（格式 `YYYY-MM-DD HH:mm`，由 `token_expires_at` 毫秒时间戳换算）
-- 数据来源：`proxy_health` 返回值；服务未运行时整卡置灰 + 提示「启动服务后可见」
+- 数据来源：`accounts_list`（鉴权 Tauri 接口，含昵称/uid/到期时间）；服务运行状态仍由 `proxy_health` 判定
 
 ### Tab 3：设置
 - 端口输入框（默认 8787，数字 1024-65535）
