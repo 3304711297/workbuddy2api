@@ -4,18 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CodeBuddy2OpenAI 控制台</title>
-  <!-- 防闪烁：DOM 渲染前根据 localStorage / 系统偏好预设主题（默认深色） -->
-  <script>
-    (function () {
-      try {
-        var t = localStorage.getItem('codebuddy2openai.theme');
-        if (t !== 'light' && t !== 'dark') {
-          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-        }
-        document.documentElement.dataset.theme = t;
-      } catch (e) { /* 存储不可用时保持深色默认 */ }
-    })();
-  </script>
+  <!-- 防闪烁：DOM 渲染前根据 localStorage / 系统偏好预设主题（默认深色）。
+       外部静态脚本（public/theme-preset.js），满足 CSP script-src 'self' 且同步阻塞加载无闪白 -->
+  <script src="/theme-preset.js"></script>
   <link rel="stylesheet" href="./src/style.css" />
 </head>
 <body>

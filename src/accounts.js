@@ -1,7 +1,7 @@
 /**
  * 账号与资产管理 (核心：内嵌积分、多账号管理)
- * 说明：动态 HTML 中的 `onclick="loadAccountsData()"` 等字符串保持原样
- * （原实现为模块作用域函数，window 上并不存在该全局名，行为逐字节一致）。
+ * 说明：「刷新积分」按钮原 inline onclick 引用模块作用域函数（点击必抛错），
+ * 已改 id 监听修复；保留的 `.nav-item[data-tab=...]` DOM click 跳转走全局 querySelector，行为正常。
  */
 
 import { state } from './state.js';
@@ -88,7 +88,7 @@ function renderActiveAccountAndUsage(acct, usage) {
     quotaHtml = `
       <div class="embedded-quota-box" style="text-align: center; padding: 16px;">
         <span class="muted">暂未获取到该账号积分资产</span>
-        <button class="btn btn-secondary btn-sm" style="margin-left: 10px;" onclick="loadAccountsData()">刷新积分</button>
+        <button class="btn btn-secondary btn-sm" style="margin-left: 10px;" id="btn-refresh-usage">刷新积分</button>
       </div>
     `;
   }
@@ -127,6 +127,9 @@ function renderActiveAccountAndUsage(acct, usage) {
       showToast(`Token 刷新失败: ${e.message || e}`, 'error');
     }
   });
+
+  // 刷新积分按钮：原 inline onclick 引用模块作用域函数（window 上无此名，点击必抛错），改 id 监听修复
+  document.getElementById('btn-refresh-usage')?.addEventListener('click', () => loadAccountsData());
 }
 
 function renderAccountsGrid(list) {
