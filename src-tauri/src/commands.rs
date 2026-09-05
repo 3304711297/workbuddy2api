@@ -7,9 +7,19 @@
 use crate::ProxyHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use tauri::{Manager, State};
+
+/// 对 127.0.0.1:<port> 做带超时的 TCP 连通性探测（800ms 上限，避免 UI 卡顿）
+fn loopback_port_open(port: u16) -> bool {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok()
+}
 
 // ---------------------------------------------------------------------------
 // 基础数据模型
@@ -72,7 +82,10 @@ pub struct AgentStatus {
     pub hermes_configured: bool,
     pub hermes_config_path: String,
     pub zcode_installed: bool,
-    pub zcode_configured: bool,
+    /// provider.workbuddy 仍写在 ZCode 的 JSON 配置里（ZCode Desktop 不读取，仅作残留提示）
+    pub zcode_provider_registered: bool,
+    /// 对 c2o 服务端口的真实可达性探测（这才是 ZCode 里能不能拉到模型的决定条件）
+    pub zcode_service_online: bool,
     pub zcode_cli_path: String,
     pub zcode_v2_path: String,
 }
@@ -673,7 +686,7 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn agent_detect() -> Result<AgentStatus, String> {
+pub fn agent_detect(port: Option<u16>) -> Result<AgentStatus, String> {
     // Hermes 真实配置文件：HERMES_HOME 环境变量优先 → %LOCALAPPDATA%\hermes → %USERPROFILE%\.hermes
     let hermes_p = resolve_hermes_config();
     let hermes_installed = hermes_p.exists();
@@ -687,19 +700,23 @@ pub fn agent_detect() -> Result<AgentStatus, String> {
     let zcode_c = zcode_cli_path();
     let zcode_v = zcode_v2_path();
     let zcode_installed = zcode_c.exists() || zcode_v.exists();
-    let mut zcode_configured = false;
+    // provider.workbuddy 是否仍写在 JSON 配置里（ZCode Desktop 不读这份文件，仅作残留提示）
+    let mut zcode_provider_registered = false;
     if zcode_c.exists() {
         if let Ok(raw) = std::fs::read_to_string(&zcode_c) {
-            zcode_configured = raw.contains("workbuddy") && raw.contains("8787");
+            zcode_provider_registered = raw.contains("workbuddy") && raw.contains("8787");
         }
     }
+    // 关键状态：c2o 服务端口真实可达性（决定 ZCode 里能否拉到模型）
+    let zcode_service_online = loopback_port_open(port.unwrap_or(8787));
 
     Ok(AgentStatus {
         hermes_installed,
         hermes_configured,
         hermes_config_path: hermes_p.to_string_lossy().to_string(),
         zcode_installed,
-        zcode_configured,
+        zcode_provider_registered,
+        zcode_service_online,
         zcode_cli_path: zcode_c.to_string_lossy().to_string(),
         zcode_v2_path: zcode_v.to_string_lossy().to_string(),
     })
@@ -845,55 +862,29 @@ fn remove_hermes() -> Result<String, String> {
 }
 
 fn configure_zcode(port: u16) -> Result<String, String> {
-    let models_list = vec![
+    // ZCode Desktop 的自定义供应商列表存放在其内部压缩数据库里，只认界面内添加，
+    // 直接写 JSON 配置文件不会被读取（实测确认）。因此这里不再写文件，
+    // 而是返回引导信息由前端复制到剪贴板，引导用户在 Desktop 界面内添加。
+    let models_list = [
         "auto", "hy4-preview", "hy3", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1",
         "glm-5v-turbo", "kimi-k3", "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
-        "deepseek-v4-pro", "deepseek-v4-flash", "minimax-m3"
+        "deepseek-v4-pro", "deepseek-v4-flash", "minimax-m3",
     ];
-    let mut models_obj = serde_json::Map::new();
-    for m in models_list {
-        let ctx = if m.contains("glm") || m == "auto" { 1048576 } else { 200000 };
-        models_obj.insert(m.into(), serde_json::json!({
-            "name": m,
-            "limit": { "context": ctx }
-        }));
-    }
-
-    let wb_provider = serde_json::json!({
-        "apiFormat": "openai-compatible",
-        "defaultKind": "openai",
-        "enabled": true,
-        "kind": "openai",
-        "models": models_obj,
-        "name": "WorkBuddy (codebuddy2openai)",
-        "npm": "@ai-sdk/openai-compatible",
-        "options": {
-            "apiKey": "local",
-            "baseURL": format!("http://127.0.0.1:{port}/v1")
-        },
-        "source": "custom"
+    let payload = serde_json::json!({
+        "mode": "manual-guide",
+        "base_url": format!("http://127.0.0.1:{port}/v1"),
+        "api_format": "Chat Completions (/chat/completions)",
+        "api_key": "local",
+        "models": models_list,
+        "steps": [
+            "1. 打开 ZCode Desktop → 模型设置 → 添加供应商",
+            "2. Base URL / API Key 粘贴下方对应值，API 格式选 Chat Completions",
+            "3. 在模型列表里逐个添加上方模型名（至少加一个，推荐 glm-5.3-flash）",
+            "4. 保存后确认本控制台服务已启动（端口在线），即可在聊天中选择 WorkBuddy 模型"
+        ],
+        "note": "ZCode Desktop 只认界面内添加的供应商；此前写入配置文件的 workbuddy 残留可用『清理文件残留』按钮移除"
     });
-
-    for path in [zcode_cli_path(), zcode_v2_path()] {
-        if path.exists() {
-            let bak = path.with_extension("json.bak-codebuddy-gui");
-            let _ = std::fs::copy(&path, bak);
-
-            let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            if let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(obj) = cfg.as_object_mut() {
-                    let provs = obj.entry("provider").or_insert(serde_json::json!({}));
-                    if let Some(p_obj) = provs.as_object_mut() {
-                        p_obj.insert("workbuddy".into(), wb_provider.clone());
-                    }
-                }
-                let out = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-                let _ = std::fs::write(&path, out);
-            }
-        }
-    }
-
-    Ok("ZCode 配置一键写入成功！".into())
+    Ok(serde_json::to_string(&payload).map_err(|e| e.to_string())?)
 }
 
 fn remove_zcode() -> Result<String, String> {
@@ -911,7 +902,7 @@ fn remove_zcode() -> Result<String, String> {
             }
         }
     }
-    Ok("已从 ZCode 移除 WorkBuddy 配置".into())
+    Ok("已清理配置文件中的 workbuddy 残留。注意：ZCode Desktop 模型设置里手动添加的 WorkBuddy 条目存储在其内部数据库，需在界面中手动删除".into())
 }
 
 // ---------------------------------------------------------------------------

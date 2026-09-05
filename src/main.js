@@ -447,8 +447,8 @@ async function loadAgentsStatus() {
   const zPath = document.getElementById('zcode-path');
 
   try {
-    const res = await invokeTauri('agent_detect');
-    
+    const res = await invokeTauri('agent_detect', { port: state.port });
+
     // Hermes 状态
     hPath.textContent = res.hermes_config_path || '未找到';
     if (!res.hermes_installed) {
@@ -462,17 +462,20 @@ async function loadAgentsStatus() {
       hBadge.textContent = '未配置';
     }
 
-    // ZCode 状态
+    // ZCode 状态：徽章反映服务真实可达性（Desktop 只认 UI 内添加，文件写入不生效）
     zPath.textContent = res.zcode_cli_path || '未找到';
     if (!res.zcode_installed) {
       zBadge.className = 'badge badge-stopped';
       zBadge.textContent = '未安装';
-    } else if (res.zcode_configured) {
+    } else if (res.zcode_service_online) {
       zBadge.className = 'badge badge-valid';
-      zBadge.textContent = '已接入配置';
+      zBadge.textContent = '服务在线 · 可接入';
+    } else if (res.zcode_provider_registered) {
+      zBadge.className = 'badge badge-info';
+      zBadge.textContent = '服务离线（文件残留）';
     } else {
       zBadge.className = 'badge badge-info';
-      zBadge.textContent = '未配置';
+      zBadge.textContent = '服务离线';
     }
   } catch (e) {
     console.error('Agent 检测失败:', e);
@@ -505,11 +508,34 @@ function initAgentActions() {
 
   document.getElementById('btn-config-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agent_type: 'zcode', agentType: 'zcode', port: state.port });
-      showToast(res, 'success');
-      loadAgentsStatus();
+      const raw = await invokeTauri('agent_configure', { agent_type: 'zcode', agentType: 'zcode', port: state.port });
+      const guide = JSON.parse(raw);
+      const lines = [
+        `Base URL: ${guide.base_url}`,
+        `API 格式: ${guide.api_format}`,
+        `API Key:  ${guide.api_key}`,
+        `模型列表: ${guide.models.join(', ')}`,
+        '',
+        '操作步骤:',
+        ...guide.steps,
+        '',
+        `说明: ${guide.note}`,
+      ];
+      const text = lines.join('\n');
+      const wrap = document.getElementById('zcode-guide');
+      const box = document.getElementById('zcode-guide-text');
+      if (box) box.value = text;
+      if (wrap) wrap.style.display = 'block';
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {
+        if (box) { box.focus(); box.select(); copied = document.execCommand('copy'); }
+      }
+      showToast(copied ? '接入配置已复制到剪贴板，请在 ZCode Desktop 模型设置中粘贴' : '配置已生成，请在下方文本框中手动复制', 'success');
     } catch (e) {
-      showToast(`配置失败: ${e.message || e}`, 'error');
+      showToast(`生成接入配置失败: ${e.message || e}`, 'error');
     }
   });
 
@@ -519,7 +545,7 @@ function initAgentActions() {
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
-      showToast(`移除失败: ${e.message || e}`, 'error');
+      showToast(`清理失败: ${e.message || e}`, 'error');
     }
   });
 

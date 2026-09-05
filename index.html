@@ -281,12 +281,15 @@
                 </div>
                 <span id="zcode-status-badge" class="badge badge-info">检测中</span>
               </div>
-              <p class="agent-desc">自动在 <code>cli/config.json</code> 与 <code>v2/config.json</code> 注册 <code>provider.workbuddy</code> 并配置完整的 15 个模型映射。</p>
+              <p class="agent-desc">ZCode Desktop 的供应商列表只认界面内添加。点击「复制接入配置」后，在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴对应值。</p>
               <div class="agent-path-text">路径: <span id="zcode-path" class="mono truncate">—</span></div>
+              <div id="zcode-guide" style="display:none; margin-top:8px;">
+                <textarea id="zcode-guide-text" class="mono" readonly style="width:100%; min-height:110px; font-size:12px; padding:8px; background:#1a1a1a; color:#e8e8e8; border:1px solid #333; border-radius:6px; resize:vertical;"></textarea>
+              </div>
               <div class="divider"></div>
               <div class="agent-actions">
-                <button id="btn-config-zcode" class="btn btn-primary btn-sm">一键写入配置</button>
-                <button id="btn-remove-zcode" class="btn btn-secondary btn-sm">移除配置</button>
+                <button id="btn-config-zcode" class="btn btn-primary btn-sm">复制接入配置</button>
+                <button id="btn-remove-zcode" class="btn btn-secondary btn-sm">清理文件残留</button>
               </div>
             </div>
           </div>
