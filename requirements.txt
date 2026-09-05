@@ -1,0 +1,4 @@
+# codebuddy2openai converter 运行依赖（GUI 会自动向 converter.py 传参，无需手工运行）
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27

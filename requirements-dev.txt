@@ -1,0 +1,2 @@
+# 开发/CI 专用依赖（pytest 套件见 tests/）
+pytest>=8.0

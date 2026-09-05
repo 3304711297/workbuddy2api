@@ -26,6 +26,17 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -q
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -36,4 +47,8 @@ jobs:
 
       - name: Cargo check
         run: cargo check --locked
+        working-directory: src-tauri
+
+      - name: Cargo test
+        run: cargo test --locked
         working-directory: src-tauri
