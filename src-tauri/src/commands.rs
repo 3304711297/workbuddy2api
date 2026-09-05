@@ -1004,7 +1004,13 @@ pub fn proxy_get_logs() -> Result<String, String> {
         let raw = String::from_utf8_lossy(&bytes);
         // 如果日志太大，仅截取最后 80KB 保持平滑
         if raw.len() > 80_000 {
-            let start = raw.len() - 80_000;
+            // 日志含中文/emoji 时，字节偏移可能落在多字节字符中间，
+            // 直接切片会 panic "byte index is not a char boundary"。
+            // 这里把 start 向后调整到最近的字符边界。
+            let mut start = raw.len() - 80_000;
+            while start < raw.len() && !raw.is_char_boundary(start) {
+                start += 1;
+            }
             return Ok(raw[start..].to_string());
         }
         return Ok(raw.to_string());
