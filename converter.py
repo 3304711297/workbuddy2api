@@ -418,6 +418,143 @@ def health():
     return {"status": "ok", "authenticated": authenticated}
 
 
+# ---------------------------------------------------------------------------
+# 积分数据源端点（GET /api/usage_summary —— Hermes token-stats 配额看板数据源）
+# 返回结构与桌面端 Rust UsageSummary 完全对齐（uid/nickname/total/remain/used/
+# is_paid_user/packages）；任何失败一律返回 {"error": "..."}，由调用方优雅降级。
+# 无需鉴权：Host 中间件已把全部路由限制在本机回环，与 /health 同一安全边界。
+# ---------------------------------------------------------------------------
+
+_BILLING_URL = f"{BACKEND}/billing/meter/get-user-resource-summary"
+
+# 测试注入点：pytest 通过 monkeypatch 注入 httpx.MockTransport；生产恒为 None
+_BILLING_TRANSPORT_OVERRIDE = None
+
+
+def _accounts_file() -> Path:
+    """accounts.json 路径，与桌面端 Rust local_app_dir() 同源（调用时读环境变量，便于测试）。"""
+    base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+    return Path(base) / "codebuddy2openai" / "accounts.json"
+
+
+def _load_active_session(cfg: dict) -> tuple[str, dict]:
+    """从 accounts.json 结构中取活跃账号会话，返回 (uid, session)。
+
+    结构不符/缺失时抛 ValueError（消息即对外 error 文案）。
+    accounts.json 形如 {"active_uid": "<uid>", "accounts": {"<uid>": {auth:{...}, account:{...}}}}。
+    """
+    active_uid = cfg.get("active_uid") or ""
+    accounts = cfg.get("accounts")
+    if not active_uid or not isinstance(accounts, dict):
+        raise ValueError("accounts.json 缺少 active_uid 或 accounts 结构")
+    session = accounts.get(active_uid)
+    if not isinstance(session, dict):
+        raise ValueError(f"accounts.json 中不存在活跃账号 {active_uid} 的会话")
+    return active_uid, session
+
+
+def _parse_usage_payload(data: dict) -> dict:
+    """解析腾讯计费响应的 data 字段，聚合口径与桌面端 Rust usage_query 完全一致。
+
+    容量为字符串（如 "1000.5"）转 float；缺失/非法按 0.0 计（比 Rust 的仅字符串
+    解析更宽容的数字类型超集，对真实字符串载荷行为一致）。
+    """
+    total = remain = used = 0.0
+    packages = []
+
+    def _cap(entry: dict, key: str) -> float:
+        v = entry.get(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    for p in data.get("Packages") or []:
+        if not isinstance(p, dict):
+            continue
+        pt, pr, pu = (_cap(p, "CycleTotalCapacity"),
+                      _cap(p, "CycleRemainCapacity"),
+                      _cap(p, "CycleUsedCapacity"))
+        total += pt
+        remain += pr
+        used += pu
+        packages.append({
+            "code": p.get("PackageCode") or "",
+            "total": pt,
+            "remain": pr,
+            "used": pu,
+            "unit": p.get("CapacityUnit") or "credits",
+        })
+    return {
+        "total": total,
+        "remain": remain,
+        "used": used,
+        "is_paid_user": bool(data.get("IsPaidUser")),
+        "packages": packages,
+    }
+
+
+async def _fetch_billing_usage(access_token: str, uid: str, *, transport=None) -> dict:
+    """服务端直查腾讯计费接口；返回 UsageSummary 对齐 dict（不含身份字段）或 {"error": ...}。"""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-User-Id": uid,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    use_transport = transport or _BILLING_TRANSPORT_OVERRIDE
+    try:
+        client_kwargs = {"timeout": 15}
+        if use_transport is not None:
+            client_kwargs["transport"] = use_transport
+        async with httpx.AsyncClient(**client_kwargs) as c:
+            r = await c.post(_BILLING_URL, headers=headers, json={})
+    except httpx.HTTPError as e:
+        return {"error": f"计费接口网络失败: {e}"}
+    if r.status_code != 200:
+        return {"error": f"计费接口 HTTP {r.status_code}"}
+    try:
+        body = r.json()
+    except Exception:
+        return {"error": "计费接口响应非 JSON"}
+    if body.get("code") != 0:
+        msg = body.get("msg") or body
+        return {"error": f"积分查询失败: {msg}"}
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return {"error": "积分响应缺少 data 字段"}
+    return _parse_usage_payload(data)
+
+
+@app.get("/api/usage_summary")
+async def api_usage_summary():
+    """当前活跃账号的积分概览（Hermes token-stats 插件对接此端点）。"""
+    try:
+        path = _accounts_file()
+        if not path.is_file():
+            return {"error": f"accounts.json 不存在: {path}"}
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        uid, session = _load_active_session(cfg)
+    except json.JSONDecodeError as e:
+        return {"error": f"accounts.json 解析失败: {e}"}
+    except (OSError, ValueError) as e:
+        return {"error": f"读取活跃账号失败: {e}"}
+
+    auth = session.get("auth") or {}
+    account = session.get("account") or {}
+    token = auth.get("accessToken")
+    if not token:
+        return {"error": "活跃账号缺少 accessToken（请在桌面控制台重新授权或刷新 Token）"}
+    nickname = account.get("nickname") or ""
+
+    summary = await _fetch_billing_usage(token, uid)
+    if "error" in summary:
+        return summary
+    # token 过期时腾讯侧会以 code!=0/HTTP 401 返回，已归一为上面的 error 路径；
+    # 此处不做自动刷新（accounts.json 由桌面端 Rust 侧管理，避免并发写竞争）
+    return {"uid": uid, "nickname": nickname, **summary}
+
+
 @app.get("/v1/models")
 def list_models(authorization: Optional[str] = Header(default=None),
                 x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
@@ -822,6 +959,7 @@ def main():
     sys.stderr.write("   GET  /v1/models\n")
     sys.stderr.write("   POST /v1/chat/completions   (原生 tools/tool_calls，支持流式)\n")
     sys.stderr.write("   GET  /health\n")
+    sys.stderr.write("   GET  /api/usage_summary     (当前账号积分概览，Hermes 配额看板数据源)\n")
     if args.api_key:
         sys.stderr.write("   鉴权已启用（API key 已设置）\n")
     if CONFIG["log_path"]:
