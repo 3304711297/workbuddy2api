@@ -189,6 +189,57 @@ async function invokeTauri(cmd, args = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// 明暗双主题（对标上游 theme.ts 模式）
+// 初始化顺序：localStorage 持久化值 → 否则系统 prefers-color-scheme（默认深色）
+// index.html <head> 内联脚本已在 DOM 渲染前设置 dataset.theme 防闪烁，
+// 此处负责读取当前值、同步按钮选中态，并把原生窗口底色与主题对齐。
+// ---------------------------------------------------------------------------
+const THEME_STORAGE_KEY = 'codebuddy2openai.theme';
+
+// 各主题对应的原生窗口底色（与 CSS --bg-app 保持一致，防原生窗口闪白/闪黑）
+const THEME_NATIVE_BG = {
+  dark: { red: 13, green: 15, blue: 18, alpha: 255 },     // #0d0f12
+  light: { red: 246, green: 247, blue: 245, alpha: 255 }  // #f6f7f5
+};
+
+// 同步原生窗口底色；非 Tauri 环境或 API 缺失时静默失败，绝不影响页面
+function syncNativeWindowBackground(theme) {
+  try {
+    const color = THEME_NATIVE_BG[theme] || THEME_NATIVE_BG.dark;
+    const current = window.__TAURI__?.window?.getCurrent?.();
+    const result = current?.setBackgroundColor?.(color);
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch (e) {
+    // 静默失败：主题切换不依赖原生窗口底色同步
+  }
+}
+
+// 应用主题：设置 html[data-theme]、同步切换按钮选中态，persist 为 true 时持久化
+function applyTheme(theme, persist = false) {
+  const t = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  document.getElementById('btn-theme-light')?.classList.toggle('active', t === 'light');
+  document.getElementById('btn-theme-dark')?.classList.toggle('active', t === 'dark');
+  syncNativeWindowBackground(t);
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, t); } catch (e) { /* 存储不可用时忽略 */ }
+  }
+}
+
+function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem(THEME_STORAGE_KEY); } catch (e) { /* 忽略 */ }
+  const prefersLight = window.matchMedia?.('(prefers-color-scheme: light)')?.matches;
+  const initial = (saved === 'light' || saved === 'dark') ? saved : (prefersLight ? 'light' : 'dark');
+  applyTheme(initial, false); // 初始不写入 localStorage，保留“跟随系统”语义
+
+  document.getElementById('btn-theme-light')?.addEventListener('click', () => applyTheme('light', true));
+  document.getElementById('btn-theme-dark')?.addEventListener('click', () => applyTheme('dark', true));
+}
+
+// ---------------------------------------------------------------------------
 // 页面与选项卡切换
 // ---------------------------------------------------------------------------
 function initTabs() {
@@ -351,7 +402,21 @@ function initTestChat() {
   const tag = document.getElementById('test-status-tag');
   const modelTag = document.getElementById('test-model-tag');
   const latency = document.getElementById('test-latency');
+  const ttftWrap = document.getElementById('test-ttft-wrap');
+  const ttft = document.getElementById('test-ttft');
   const output = document.getElementById('test-response-text');
+
+  // 展示首字时延（契约1：ttft_ms 为数字或 null，null/缺失表示未测得则隐藏该指标）
+  const renderTtft = (value) => {
+    if (!ttftWrap || !ttft) return;
+    const n = Number(value);
+    if (value !== null && value !== undefined && Number.isFinite(n)) {
+      ttft.textContent = `${Math.round(n)} ms`;
+      ttftWrap.classList.remove('hidden');
+    } else {
+      ttftWrap.classList.add('hidden');
+    }
+  };
 
   btn?.addEventListener('click', async () => {
     btn.disabled = true;
@@ -360,6 +425,7 @@ function initTestChat() {
     tag.className = 'badge badge-info';
     tag.textContent = '请求中...';
     latency.textContent = '— ms';
+    renderTtft(null); // 请求开始时隐藏首字指标，避免残留上次结果
     output.textContent = '正在向本地反代发起聊天完成测试...';
 
     try {
@@ -369,6 +435,7 @@ function initTestChat() {
         tag.textContent = '测试通过';
         modelTag.textContent = res.model;
         latency.textContent = `${res.latency_ms} ms`;
+        renderTtft(res.ttft_ms);
         output.textContent = res.response || '(模型返回内容为空)';
         showToast('接口连通测试成功！', 'success');
       } else {
@@ -376,6 +443,7 @@ function initTestChat() {
         tag.textContent = '请求异常';
         modelTag.textContent = res.model;
         latency.textContent = `${res.latency_ms} ms`;
+        renderTtft(res.ttft_ms);
         output.textContent = res.error || '未返回有效结果';
         showToast('测试失败，请检查服务状态', 'error');
       }
@@ -824,7 +892,7 @@ function formatMultiplier(raw) {
   if (!match) return `<span class="badge badge-info mono">${esc(raw)}</span>`;
   const num = parseFloat(match[1]);
   if (num === 0) {
-    return `<span class="badge badge-valid" style="background: rgba(16,185,129,0.2); color: #34d399; font-weight: 700;">免费 (0.00x)</span>`;
+    return `<span class="badge badge-valid" style="background: var(--success-subtle); color: var(--success-bright); font-weight: 700;">免费 (0.00x)</span>`;
   }
   return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span>`;
 }
@@ -872,7 +940,7 @@ function renderModelsTable(list) {
     return `
       <tr>
         <td>
-          <strong class="mono" style="color: #60a5fa; font-size: 13px;">${esc(m.id)}</strong>
+          <strong class="mono" style="color: var(--link); font-size: 13px;">${esc(m.id)}</strong>
           <div class="muted" style="font-size: 11px;">${esc(m.name)}</div>
         </td>
         <td>${creditsBadge}</td>
@@ -893,7 +961,7 @@ function renderFallbackModels() {
   tbody.innerHTML = state.models.map(m => `
     <tr>
       <td>
-        <strong class="mono" style="color: #60a5fa; font-size: 13px;">${esc(m.id)}</strong>
+        <strong class="mono" style="color: var(--link); font-size: 13px;">${esc(m.id)}</strong>
         <div class="muted" style="font-size: 11px;">本地内置模型</div>
       </td>
       <td><span class="muted">—</span></td>
@@ -1180,6 +1248,7 @@ async function loadLogs() {
 function initLogs() {
   const btnRefresh = document.getElementById('btn-refresh-logs');
   const btnClear = document.getElementById('btn-clear-logs');
+  const btnOpenDir = document.getElementById('btn-open-logs-dir');
 
   btnRefresh?.addEventListener('click', () => {
     loadLogs();
@@ -1193,6 +1262,16 @@ function initLogs() {
       showToast('日志已清空', 'info');
     } catch (e) {
       showToast(`清空失败: ${e.message || e}`, 'error');
+    }
+  });
+
+  // 打开应用数据目录的资源管理器窗口（契约2：open_logs_dir 无参数，返回 Promise）
+  btnOpenDir?.addEventListener('click', async () => {
+    try {
+      await invokeTauri('open_logs_dir');
+      showToast('已打开日志目录', 'success');
+    } catch (e) {
+      showToast(`打开日志目录失败: ${e.message || e}`, 'error');
     }
   });
 
@@ -1212,6 +1291,9 @@ window.addEventListener('DOMContentLoaded', () => {
   if (!window.__TAURI__) {
     document.getElementById('env-banner')?.classList.remove('hidden');
   }
+
+  // 主题初始化（dataset.theme 已由 head 内联脚本预设，此处同步按钮态与原生窗口底色）
+  initTheme();
 
   initTabs();
   initServiceControls();

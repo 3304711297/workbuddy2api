@@ -4,6 +4,18 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CodeBuddy2OpenAI 控制台</title>
+  <!-- 防闪烁：DOM 渲染前根据 localStorage / 系统偏好预设主题（默认深色） -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('codebuddy2openai.theme');
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.dataset.theme = t;
+      } catch (e) { /* 存储不可用时保持深色默认 */ }
+    })();
+  </script>
   <link rel="stylesheet" href="./src/style.css" />
 </head>
 <body>
@@ -41,7 +53,7 @@
 
       <!-- 导航项列表 -->
       <nav class="nav-menu">
-        <button class="nav-item active" data-tab="dashboard">
+        <button class="nav-item active" data-tab="dashboard" title="服务看板">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="3" width="7" height="9"/>
             <rect x="14" y="3" width="7" height="5"/>
@@ -51,7 +63,7 @@
           <span>服务看板</span>
         </button>
 
-        <button class="nav-item" data-tab="accounts">
+        <button class="nav-item" data-tab="accounts" title="账号与资产">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
             <circle cx="9" cy="7" r="4"/>
@@ -61,7 +73,7 @@
           <span>账号与资产</span>
         </button>
 
-        <button class="nav-item" data-tab="agents">
+        <button class="nav-item" data-tab="agents" title="Agent 一键接入">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="4" y="4" width="16" height="16" rx="2"/>
             <rect x="9" y="9" width="6" height="6"/>
@@ -77,7 +89,7 @@
           <span>Agent 一键接入</span>
         </button>
 
-        <button class="nav-item" data-tab="models">
+        <button class="nav-item" data-tab="models" title="模型与接口">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="4 17 10 11 4 5"/>
             <line x1="12" y1="19" x2="20" y2="19"/>
@@ -85,7 +97,7 @@
           <span>模型与接口</span>
         </button>
 
-        <button class="nav-item" data-tab="oauth">
+        <button class="nav-item" data-tab="oauth" title="授权新账号">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
             <polyline points="10 17 15 12 10 7"/>
@@ -94,7 +106,7 @@
           <span>授权新账号</span>
         </button>
 
-        <button class="nav-item" data-tab="settings">
+        <button class="nav-item" data-tab="settings" title="服务设置">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -102,7 +114,7 @@
           <span>服务设置</span>
         </button>
 
-        <button class="nav-item" data-tab="logs">
+        <button class="nav-item" data-tab="logs" title="实时日志">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="4 17 10 11 4 5"/>
             <line x1="12" y1="19" x2="20" y2="19"/>
@@ -110,6 +122,21 @@
           <span>实时日志</span>
         </button>
       </nav>
+
+      <!-- 明暗主题切换（选择持久化到 localStorage，由 main.js 接管逻辑） -->
+      <div class="theme-toggle" role="group" aria-label="界面主题切换">
+        <button id="btn-theme-light" class="theme-btn" type="button" aria-label="切换到浅色主题" title="浅色主题">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+          </svg>
+        </button>
+        <button id="btn-theme-dark" class="theme-btn" type="button" aria-label="切换到深色主题" title="深色主题">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+      </div>
     </aside>
 
     <!-- 右侧工作主区 -->
@@ -209,6 +236,8 @@
               <div class="test-status-line">
                 <span id="test-status-tag" class="badge badge-valid">成功</span>
                 <span class="muted">模型: <strong id="test-model-tag" class="mono">glm-5.3-flash</strong></span>
+                <!-- 首字时延（TTFT）：仅在测试结果携带 ttft_ms 时显示，是核心体验指标故用主色突出 -->
+                <span id="test-ttft-wrap" class="muted hidden">首字: <strong id="test-ttft" class="mono">— ms</strong></span>
                 <span class="muted">耗时: <strong id="test-latency" class="mono text-success">— ms</strong></span>
               </div>
               <div id="test-response-text" class="test-output-quote"></div>
@@ -465,13 +494,14 @@ print(response.choices[0].message.content)</code></pre>
             <div class="actions" style="display: flex; gap: 8px;">
               <button id="btn-refresh-logs" class="btn btn-secondary btn-sm">刷新日志</button>
               <button id="btn-clear-logs" class="btn btn-secondary btn-sm">清空日志</button>
+              <button id="btn-open-logs-dir" class="btn btn-secondary btn-sm">打开日志目录</button>
             </div>
           </div>
 
-          <div class="card" style="padding: 0; overflow: hidden; background: #0b0d11;">
-            <div style="background: #151821; padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
-              <span class="mono" style="font-size: 12px; color: var(--text-secondary);">proxy_stdout.log</span>
-              <span id="log-auto-scroll" class="muted" style="font-size: 11px;">自动同步中 (每 2 秒)</span>
+          <div class="card log-console" style="padding: 0; overflow: hidden;">
+            <div class="log-console-header">
+              <span class="mono log-console-path">proxy_stdout.log</span>
+              <span id="log-auto-scroll" class="log-console-hint">自动同步中 (每 2 秒)</span>
             </div>
             <pre id="log-viewer" class="code-block" style="border: none; border-radius: 0; min-height: 420px; max-height: 520px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; padding: 16px; line-height: 1.5; font-size: 12px; color: #a6adbb;"></pre>
           </div>
