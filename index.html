@@ -452,6 +452,17 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="form-group">
               <label class="switch-label">
+                <input id="chk-auto-start" type="checkbox" />
+                <span class="switch-slider"></span>
+                <span class="switch-text">启动应用时自动拉起反代服务</span>
+              </label>
+              <p class="muted field-hint">勾选后每次打开控制台会按上方端口与脱敏设置自动启动服务，无需手动点击「启动服务」。</p>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="form-group">
+              <label class="switch-label">
                 <input id="chk-desensitize" type="checkbox" checked />
                 <span class="switch-slider"></span>
                 <span class="switch-text">启用内容安全脱敏 (--desensitize)</span>

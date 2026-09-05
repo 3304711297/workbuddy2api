@@ -1099,6 +1099,7 @@ function initSettings() {
   const btnSave = document.getElementById('btn-save-port');
   const chkDesensitize = document.getElementById('chk-desensitize');
   const chkDebugConsole = document.getElementById('chk-debug-console');
+  const chkAutoStart = document.getElementById('chk-auto-start');
   const btnOpenLiveConsole = document.getElementById('btn-open-live-console');
   const radioCloseActions = document.querySelectorAll('input[name="close-action"]');
 
@@ -1134,7 +1135,7 @@ function initSettings() {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
       close_action: currentClose,
-      auto_start_proxy: false,
+      auto_start_proxy: chkAutoStart ? chkAutoStart.checked : false,
       show_debug_console: chkDebugConsole ? chkDebugConsole.checked : false,
       port: state.port,
       desensitize: state.desensitize
@@ -1158,6 +1159,12 @@ function initSettings() {
   chkDebugConsole?.addEventListener('change', async (e) => {
     if (await persistSettings()) {
       showToast(e.target.checked ? '已启用：启动服务时显示外部 CMD 调试窗口' : '已恢复默认：静默后台启动（无黑框）', 'success');
+    }
+  });
+
+  chkAutoStart?.addEventListener('change', async (e) => {
+    if (await persistSettings()) {
+      showToast(e.target.checked ? '已启用：下次打开应用自动拉起反代服务' : '已关闭：反代服务需手动启动', 'success');
     }
   });
 
@@ -1222,6 +1229,23 @@ function initSettings() {
         if (typeof cfg.desensitize === 'boolean' && !desensitizeTouched) {
           if (chkDesensitize) chkDesensitize.checked = cfg.desensitize;
           applyDesensitizeToUi(cfg.desensitize);
+        }
+        if (chkAutoStart) {
+          chkAutoStart.checked = Boolean(cfg.auto_start_proxy);
+        }
+        // 自动拉起：应用启动时按持久化设置执行一次（托盘隐藏重开不触发——前端只加载一次；
+        // proxy_start 本身幂等，与首次 checkHealth 的竞态由 800ms 延迟 + state.running 守卫兜底）
+        if (cfg.auto_start_proxy && window.__TAURI__) {
+          setTimeout(async () => {
+            if (state.running) return;
+            try {
+              await invokeTauri('proxy_start', { port: state.port, desensitize: state.desensitize });
+              showToast(`已按设置自动拉起反代服务（:${state.port}）`, 'success');
+              setTimeout(checkHealth, 600);
+            } catch (e) {
+              console.warn('自动拉起反代失败:', e);
+            }
+          }, 800);
         }
       }
     } catch (e) {
