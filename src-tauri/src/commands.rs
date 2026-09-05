@@ -109,7 +109,7 @@ fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-/// %LOCALAPPDATA%（优先环境变量；缺省时从 USERPROFILE 派生；最终回退原路径）
+/// %LOCALAPPDATA%（优先环境变量；缺省时从 USERPROFILE 派生；最终回退系统已知目录，不再硬编码用户目录）
 pub(crate) fn local_appdata() -> PathBuf {
     if let Some(v) = env_nonempty("LOCALAPPDATA") {
         return PathBuf::from(v);
@@ -117,14 +117,16 @@ pub(crate) fn local_appdata() -> PathBuf {
     if let Some(home) = env_nonempty("USERPROFILE") {
         return Path::new(&home).join("AppData\\Local");
     }
-    PathBuf::from("C:\\Users\\<username>\\AppData\\Local")
+    // 通用回退：读取系统已知目录 FOLDERID_LocalAppData；再失败则退到临时目录保证有可写路径
+    dirs::data_local_dir().unwrap_or_else(std::env::temp_dir)
 }
 
-/// 用户主目录（优先 USERPROFILE 环境变量；最终回退原路径）
+/// 用户主目录（优先 USERPROFILE 环境变量 → 系统已知主目录 → 当前工作目录，不再硬编码用户目录）
 fn user_home() -> PathBuf {
     env_nonempty("USERPROFILE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\<username>"))
+        .or_else(|| dirs::home_dir())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
 
 pub(crate) fn local_app_dir() -> PathBuf {
@@ -174,12 +176,13 @@ fn zcode_v2_path() -> PathBuf {
     user_home().join(".zcode\\v2\\config.json")
 }
 
-/// Python 解释器定位：`C2O_PYTHON` 环境变量优先 → 原 .workbuddy 内置解释器（保留现机行为）→ PATH 中的 python
+/// Python 解释器定位：`C2O_PYTHON` 环境变量优先 → 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留现机行为）→ PATH 中的 python
 fn resolve_python_interpreter() -> PathBuf {
     if let Some(p) = env_nonempty("C2O_PYTHON").map(PathBuf::from).filter(|p| p.exists()) {
         return p;
     }
-    let bundled = PathBuf::from("C:/Users/<username>/.workbuddy/binaries/python/envs/default/Scripts/python.exe");
+    // 内置解释器路径从用户主目录派生，等价于原开发机绝对路径但不再硬编码用户名
+    let bundled = user_home().join(".workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe");
     if bundled.exists() {
         return bundled;
     }
@@ -913,9 +916,15 @@ fn remove_zcode() -> Result<String, String> {
 pub fn proxy_start(
     handle: State<'_, ProxyHandle>,
     app: tauri::AppHandle,
-    port: u16,
+    port: Option<u16>,
     desensitize: Option<bool>,
 ) -> Result<String, String> {
+    // 参数缺省（None）时回退到设置值：每次现读磁盘 settings.json，保证与 UI 最新设置一致；
+    // 显式传值时行为不变
+    let cfg = crate::load_app_config();
+    let port = port.unwrap_or(cfg.port);
+    let desensitize = desensitize.unwrap_or(cfg.desensitize);
+
     let mut guard = handle.0.lock().map_err(|e| e.to_string())?;
     if let Some(child) = guard.as_mut() {
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
@@ -925,7 +934,7 @@ pub fn proxy_start(
 
     let python = resolve_python_interpreter();
 
-    // converter.py 定位：`C2O_CONVERTER` 环境变量优先 → 资源目录 → 可执行文件相对定位 → 原开发机路径兜底
+    // converter.py 定位：`C2O_CONVERTER` 环境变量优先 → 资源目录 → 可执行文件目录逐级向上 → 当前工作目录兜底
     let script = match env_nonempty("C2O_CONVERTER")
         .map(PathBuf::from)
         .filter(|p| p.exists())
@@ -940,24 +949,29 @@ pub fn proxy_start(
             if resource_script.exists() {
                 resource_script
             } else {
+                // 通用回退：沿可执行文件所在目录逐级向上查找 converter.py
+                // （覆盖 target/debug 等开发布局与便携安装布局，不再硬编码开发机路径）
                 let exe_dir = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|p| p.to_path_buf()))
                     .unwrap_or_default();
-                let direct_script = exe_dir.join("../../../converter.py");
-                if direct_script.exists() {
-                    direct_script
-                } else {
-                    let desktop_script =
-                        PathBuf::from("C:/Users/<username>/Desktop/codebuddy2openai/converter.py");
-                    if desktop_script.exists() {
-                        desktop_script
-                    } else {
-                        std::env::current_dir()
-                            .map_err(|e| e.to_string())?
-                            .join("converter.py")
-                    }
+                let mut candidates: Vec<PathBuf> = exe_dir
+                    .ancestors()
+                    .take(6)
+                    .map(|dir| dir.join("converter.py"))
+                    .collect();
+                // 最终回退：当前工作目录下的 converter.py（不存在则由启动报错暴露，保持原语义）
+                if let Ok(cwd) = std::env::current_dir() {
+                    candidates.push(cwd.join("converter.py"));
                 }
+                candidates
+                    .into_iter()
+                    .find(|p| p.exists())
+                    .unwrap_or_else(|| {
+                        std::env::current_dir()
+                            .map(|d| d.join("converter.py"))
+                            .unwrap_or_else(|_| PathBuf::from("converter.py"))
+                    })
             }
         }
     };
@@ -966,7 +980,7 @@ pub fn proxy_start(
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.arg(script).arg("--port").arg(port.to_string());
-    if desensitize.unwrap_or(true) {
+    if desensitize {
         cmd.arg("--desensitize");
     }
 
@@ -1087,7 +1101,7 @@ pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Resu
 pub async fn proxy_restart(
     handle: State<'_, ProxyHandle>,
     app: tauri::AppHandle,
-    port: u16,
+    port: Option<u16>,
     desensitize: Option<bool>,
 ) -> Result<String, String> {
     let _ = proxy_stop(handle.clone(), app.clone());

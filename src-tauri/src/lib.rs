@@ -34,6 +34,20 @@ pub struct AppConfig {
     pub close_action: CloseAction,
     pub auto_start_proxy: bool,
     pub show_debug_console: bool,
+    /// 反代监听端口；serde default 保证旧 settings.json 缺字段时反序列化兼容
+    #[serde(default = "default_proxy_port")]
+    pub port: u16,
+    /// 是否对上游响应做脱敏处理；serde default 保证旧 settings.json 缺字段时反序列化兼容
+    #[serde(default = "default_desensitize")]
+    pub desensitize: bool,
+}
+
+fn default_proxy_port() -> u16 {
+    8787
+}
+
+fn default_desensitize() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -42,6 +56,8 @@ impl Default for AppConfig {
             close_action: CloseAction::HideToTray,
             auto_start_proxy: false,
             show_debug_console: false, // 默认为静默不显示窗口
+            port: default_proxy_port(),
+            desensitize: default_desensitize(),
         }
     }
 }
@@ -117,6 +133,15 @@ pub fn run_app() {
     let initial_config = load_app_config();
 
     tauri::Builder::default()
+        // 单实例锁必须最先注册：第二次启动进程会把参数转发给首个实例后自动退出，
+        // 此回调在首个实例内触发，把已存在的主窗口带到前台
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .manage(ProxyHandle(Mutex::new(None)))
         .manage(AppConfigState(Mutex::new(initial_config)))
@@ -177,16 +202,30 @@ pub fn run_app() {
                                 if is_running {
                                     let _ = commands::proxy_stop(handle.clone(), app_handle.clone());
                                 } else {
-                                    let _ = commands::proxy_start(handle.clone(), app_handle.clone(), 8787, Some(true));
+                                    // 每次触发时从磁盘现读 settings.json，确保托盘与 UI 最新设置一致（不用启动时缓存）
+                                    let cfg = load_app_config();
+                                    let _ = commands::proxy_start(
+                                        handle.clone(),
+                                        app_handle.clone(),
+                                        Some(cfg.port),
+                                        Some(cfg.desensitize),
+                                    );
                                 }
                                 update_tray_status(&handle, &status_item_menu, &toggle_item_menu);
                             }
                         }
                         "restart_core" => {
                             if let Some(handle) = proxy_opt {
+                                // 每次触发时从磁盘现读 settings.json，确保托盘与 UI 最新设置一致（不用启动时缓存）
+                                let cfg = load_app_config();
                                 let _ = commands::proxy_stop(handle.clone(), app_handle.clone());
                                 std::thread::sleep(std::time::Duration::from_millis(350));
-                                let _ = commands::proxy_start(handle.clone(), app_handle.clone(), 8787, Some(true));
+                                let _ = commands::proxy_start(
+                                    handle.clone(),
+                                    app_handle.clone(),
+                                    Some(cfg.port),
+                                    Some(cfg.desensitize),
+                                );
                                 update_tray_status(&handle, &status_item_menu, &toggle_item_menu);
                             }
                         }
