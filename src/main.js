@@ -485,6 +485,54 @@ async function loadAgentsStatus() {
   }
 }
 
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function renderZcodeGuide(guide) {
+  const wrap = document.getElementById('zcode-guide');
+  if (!wrap) return;
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const field = (label, value) => `
+    <div class="zguide-field">
+      <span class="zguide-label">${esc(label)}</span>
+      <span class="zguide-value" data-copy="${esc(value)}" title="点击复制">${esc(value)}</span>
+    </div>`;
+  const chips = guide.models
+    .map((m) => `<span class="zguide-chip" data-copy="${esc(m)}" title="点击复制模型名">${esc(m)}</span>`)
+    .join('');
+  const allModels = `<span class="zguide-chip" data-copy="${esc(guide.models.join(', '))}" title="点击复制全部模型名">复制全部模型</span>`;
+  wrap.innerHTML = `
+    <div class="zcode-guide-panel">
+      ${field('Base URL（接口地址）', guide.base_url)}
+      ${field('API 格式（下拉选择）', guide.api_format)}
+      ${field('API Key（密钥）', guide.api_key)}
+      <div class="zguide-field">
+        <span class="zguide-label">模型列表（点击芯片复制模型名）</span>
+        <div class="zguide-chips">${allModels}${chips}</div>
+      </div>
+      <ol class="zguide-steps">${guide.steps.map((s) => `<li>${esc(s.replace(/^\d+\.\s*/, ''))}</li>`).join('')}</ol>
+    </div>`;
+  wrap.hidden = false;
+}
+
 function initAgentActions() {
   document.getElementById('btn-config-hermes')?.addEventListener('click', async () => {
     try {
@@ -509,34 +557,20 @@ function initAgentActions() {
   document.getElementById('btn-config-zcode')?.addEventListener('click', async () => {
     try {
       const raw = await invokeTauri('agent_configure', { agent_type: 'zcode', agentType: 'zcode', port: state.port });
-      const guide = JSON.parse(raw);
-      const lines = [
-        `Base URL: ${guide.base_url}`,
-        `API 格式: ${guide.api_format}`,
-        `API Key:  ${guide.api_key}`,
-        `模型列表: ${guide.models.join(', ')}`,
-        '',
-        '操作步骤:',
-        ...guide.steps,
-        '',
-        `说明: ${guide.note}`,
-      ];
-      const text = lines.join('\n');
-      const wrap = document.getElementById('zcode-guide');
-      const box = document.getElementById('zcode-guide-text');
-      if (box) box.value = text;
-      if (wrap) wrap.style.display = 'block';
-      let copied = false;
-      try {
-        await navigator.clipboard.writeText(text);
-        copied = true;
-      } catch {
-        if (box) { box.focus(); box.select(); copied = document.execCommand('copy'); }
-      }
-      showToast(copied ? '接入配置已复制到剪贴板，请在 ZCode Desktop 模型设置中粘贴' : '配置已生成，请在下方文本框中手动复制', 'success');
+      renderZcodeGuide(JSON.parse(raw));
     } catch (e) {
       showToast(`生成接入配置失败: ${e.message || e}`, 'error');
     }
+  });
+
+  // 引导面板内的值/芯片点击即复制（事件委托）
+  document.getElementById('zcode-guide')?.addEventListener('click', async (ev) => {
+    const el = ev.target.closest('[data-copy]');
+    if (!el) return;
+    const ok = await copyToClipboard(el.dataset.copy);
+    el.classList.add('copied');
+    showToast(ok ? '已复制' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
+    setTimeout(() => el.classList.remove('copied'), 1500);
   });
 
   document.getElementById('btn-remove-zcode')?.addEventListener('click', async () => {

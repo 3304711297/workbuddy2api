@@ -786,3 +786,49 @@ body {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* ZCode 接入引导面板：键值分层、值等宽加粗、点击复制 */
+.zcode-guide-panel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.zguide-field { display: flex; flex-direction: column; gap: 3px; }
+.zguide-label { font-size: 11px; color: var(--text-secondary, #9aa3b2); letter-spacing: 0.5px; }
+.zguide-value {
+  font-family: var(--mono, Consolas, monospace);
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--text-primary, #e8e8e8);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 6px 9px;
+  cursor: pointer;
+  user-select: all;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  word-break: break-all;
+}
+.zguide-value:hover { border-color: var(--primary, #4a8cff); background: rgba(74, 140, 255, 0.08); }
+.zguide-value.copied { border-color: var(--success, #34d399); color: #34d399; }
+.zguide-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.zguide-chip {
+  font-family: var(--mono, Consolas, monospace);
+  font-weight: 700;
+  font-size: 11.5px;
+  color: var(--text-primary, #e8e8e8);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.zguide-chip:hover { border-color: var(--primary, #4a8cff); color: var(--primary, #4a8cff); }
+.zguide-chip.copied { border-color: var(--success, #34d399); color: #34d399; }
+.zguide-steps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary, #b7bfcc); line-height: 1.7; }
