@@ -849,3 +849,41 @@ body {
 .models-table th:nth-child(4), .models-table td:nth-child(4) { white-space: nowrap; }
 .models-table td:nth-child(4) .input { width: 140px; }
 .models-table th:nth-child(6), .models-table td:nth-child(6) { white-space: nowrap; }
+
+/* 模型参数编辑弹窗与行内只读单元格 */
+.cell-edit {
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary, #e8e8e8);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.cell-edit:hover { border-color: var(--primary, #4a8cff); color: var(--primary, #4a8cff); }
+.cell-edit small { font-weight: 400; }
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+.modal-card {
+  width: min(440px, 92vw);
+  background: #161a22;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.18s ease;
+}
+.modal-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.models-table { min-width: 600px; }

@@ -308,11 +308,11 @@
             <table class="data-table models-table">
               <thead>
                 <tr>
-                  <th>模型 ID / 名称</th>
+                  <th>模型</th>
                   <th>计费倍率</th>
                   <th>上下文窗口上限 (Tokens)</th>
                   <th>思考强度 (Reasoning)</th>
-                  <th>标签 / 描述</th>
+                  <th>标签</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -320,6 +320,18 @@
                 <!-- 动态填充 -->
               </tbody>
             </table>
+          </div>
+
+          <!-- 模型参数编辑弹窗（上下文窗口 / 思考强度） -->
+          <div id="model-edit-overlay" class="modal-overlay" hidden>
+            <div class="modal-card">
+              <h3 id="model-edit-title">编辑模型参数</h3>
+              <div id="model-edit-body"></div>
+              <div class="modal-actions">
+                <button id="model-edit-cancel" class="btn btn-secondary btn-sm">取消</button>
+                <button id="model-edit-save" class="btn btn-primary btn-sm">保存</button>
+              </div>
+            </div>
           </div>
 
           <!-- 代码集成示例 -->

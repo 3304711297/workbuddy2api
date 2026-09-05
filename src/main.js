@@ -689,9 +689,12 @@ function formatMultiplier(raw) {
   return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span>`;
 }
 
+let currentModelsList = [];
+
 function renderModelsTable(list) {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
+  currentModelsList = list || [];
 
   if (!list || list.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align: center; padding: 20px;">未获取到模型数据</td></tr>`;
@@ -702,40 +705,29 @@ function renderModelsTable(list) {
     // 纯粹干净的倍率展示（去除无意义的 credits 单词）
     const creditsBadge = formatMultiplier(m.credits);
 
-    // 思考模式配置下拉
-    let effortSelect = '<span class="muted" style="font-size: 11px;">不支持思考</span>';
-    if (m.supports_reasoning) {
-      const currentEffort = m.custom_reasoning_effort || 'default';
-      const options = [];
-      options.push(`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认 (${m.default_effort})</option>`);
-      
-      for (const ef of m.supported_efforts) {
-        options.push(`<option value="${ef}" ${currentEffort === ef ? 'selected' : ''}>强度: ${ef}</option>`);
-      }
-      if (m.can_disable_thinking) {
-        options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
-      }
-      effortSelect = `
-        <select class="input mono" style="padding: 3px 6px; font-size: 11px; width: 130px;" id="effort-${m.id}">
-          ${options.join('')}
-        </select>
-      `;
-    }
+    // 思考强度：行内只读展示，点击弹出编辑弹窗
+    const effortText = !m.supports_reasoning
+      ? ''
+      : m.custom_reasoning_effort === 'disable'
+        ? '已关闭思考'
+        : (m.custom_reasoning_effort && m.custom_reasoning_effort !== 'default')
+          ? `强度: ${m.custom_reasoning_effort}`
+          : `默认 (${m.default_effort})`;
+    const effortCell = m.supports_reasoning
+      ? `<button class="cell-edit" id="effort-cell-${m.id}" onclick="openModelEdit('${m.id}')" title="点击修改思考强度">${effortText}</button>`
+      : '<span class="muted" style="font-size: 11px;">不支持思考</span>';
 
-    // 上下文限制输入
+    // 上下文限制：行内只读展示，点击弹出编辑弹窗
     const defaultCtx = m.max_input_tokens;
     const currentCtx = m.custom_context_window || defaultCtx;
-    const ctxInput = `
-      <div style="display: flex; align-items: center; gap: 4px;">
-        <input type="number" class="input mono" style="padding: 3px 6px; font-size: 11px; width: 100px;" 
-          id="ctx-${m.id}" value="${currentCtx}" min="1024" max="${defaultCtx}" step="1024" />
-        <small class="muted" style="font-size: 10px;">/ ${Math.round(defaultCtx/1000)}k</small>
-      </div>
+    const ctxCell = `
+      <button class="cell-edit" id="ctx-cell-${m.id}" onclick="openModelEdit('${m.id}')" title="点击修改上下文窗口">
+        ${currentCtx} <small class="muted">/ ${Math.round(defaultCtx/1000)}k</small>
+      </button>
     `;
 
-    // 标签与描述
+    // 标签（描述已按需求移除）
     const tagsHtml = m.tags.map(t => `<span class="badge badge-info" style="font-size: 10px; margin-right: 3px;">${t}</span>`).join('');
-    const descHtml = m.description ? `<div class="muted truncate" style="font-size: 11px; max-width: 220px; margin-top: 3px;" title="${m.description}">${m.description}</div>` : '';
 
     return `
       <tr>
@@ -744,15 +736,10 @@ function renderModelsTable(list) {
           <div class="muted" style="font-size: 11px;">${m.name}</div>
         </td>
         <td>${creditsBadge}</td>
-        <td>${ctxInput}</td>
-        <td>${effortSelect}</td>
-        <td>
-          <div>${tagsHtml}</div>
-          ${descHtml}
-        </td>
-        <td>
-          <button class="btn btn-secondary btn-sm" onclick="saveModelConfig('${m.id}')" style="padding: 3px 8px; font-size: 11px;">保存</button>
-        </td>
+        <td>${ctxCell}</td>
+        <td>${effortCell}</td>
+        <td><div>${tagsHtml}</div></td>
+        <td></td>
       </tr>
     `;
   }).join('');
@@ -787,15 +774,88 @@ window.saveModelConfig = async (modelId) => {
       reasoningEffort: effortVal && effortVal !== 'default' ? effortVal : null
     });
     showToast(res, 'success');
+    updateModelCells(modelId);
+    closeModelEdit();
   } catch (e) {
     showToast(`保存失败: ${e.message || e}`, 'error');
   }
 };
 
+function updateModelCells(modelId) {
+  const ctxInput = document.getElementById(`ctx-${modelId}`);
+  const effortSelect = document.getElementById(`effort-${modelId}`);
+  const m = currentModelsList.find((x) => x.id === modelId);
+  const ctxCell = document.getElementById(`ctx-cell-${modelId}`);
+  if (ctxCell && ctxInput && m) {
+    ctxCell.innerHTML = `${ctxInput.value} <small class="muted">/ ${Math.round(m.max_input_tokens / 1000)}k</small>`;
+    m.custom_context_window = parseInt(ctxInput.value, 10);
+  }
+  const eCell = document.getElementById(`effort-cell-${modelId}`);
+  if (eCell && effortSelect && m) {
+    const v = effortSelect.value;
+    eCell.textContent = v === 'disable' ? '已关闭思考'
+      : v === 'default' ? `默认 (${m.default_effort})`
+      : `强度: ${v}`;
+    m.custom_reasoning_effort = v === 'default' ? null : v;
+  }
+}
+
+window.openModelEdit = (modelId) => {
+  const m = currentModelsList.find((x) => x.id === modelId);
+  if (!m) return;
+  const defaultCtx = m.max_input_tokens;
+  const currentCtx = m.custom_context_window || defaultCtx;
+  let html = `
+    <div class="zguide-field">
+      <span class="zguide-label">上下文窗口上限 (Tokens) · 上限 ${Math.round(defaultCtx / 1000)}k</span>
+      <input type="number" class="input mono" style="width: 100%;" id="ctx-${modelId}"
+        value="${currentCtx}" min="1024" max="${defaultCtx}" step="1024" />
+    </div>`;
+  if (m.supports_reasoning) {
+    const currentEffort = m.custom_reasoning_effort || 'default';
+    const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认 (${m.default_effort})</option>`];
+    for (const ef of m.supported_efforts) {
+      options.push(`<option value="${ef}" ${currentEffort === ef ? 'selected' : ''}>强度: ${ef}</option>`);
+    }
+    if (m.can_disable_thinking) {
+      options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
+    }
+    html += `
+      <div class="zguide-field" style="margin-top: 12px;">
+        <span class="zguide-label">思考强度 (Reasoning)</span>
+        <select class="input mono" style="width: 100%;" id="effort-${modelId}">${options.join('')}</select>
+      </div>`;
+  } else {
+    html += '<p class="muted" style="font-size: 12px; margin-top: 12px;">该模型不支持思考强度调节</p>';
+  }
+  document.getElementById('model-edit-title').textContent = `编辑 ${m.id}（${m.name}）`;
+  document.getElementById('model-edit-body').innerHTML = html;
+  document.getElementById('model-edit-save').dataset.model = modelId;
+  document.getElementById('model-edit-overlay').hidden = false;
+};
+
+function closeModelEdit() {
+  const overlay = document.getElementById('model-edit-overlay');
+  if (overlay) overlay.hidden = true;
+}
+
 function initModelsAndCopy() {
   document.getElementById('btn-refresh-models')?.addEventListener('click', () => {
     loadModelsMatrix();
     showToast('已从云端同步模型列表', 'info');
+  });
+
+  // 模型参数编辑弹窗
+  document.getElementById('model-edit-save')?.addEventListener('click', (e) => {
+    const id = e.currentTarget.dataset.model;
+    if (id) saveModelConfig(id);
+  });
+  document.getElementById('model-edit-cancel')?.addEventListener('click', closeModelEdit);
+  document.getElementById('model-edit-overlay')?.addEventListener('click', (e) => {
+    if (e.target.id === 'model-edit-overlay') closeModelEdit();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !document.getElementById('model-edit-overlay')?.hidden) closeModelEdit();
   });
 
   // 复制按钮事件代理
