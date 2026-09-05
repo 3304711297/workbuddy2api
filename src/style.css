@@ -887,3 +887,6 @@ body {
 .modal-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .models-table { min-width: 560px; }
+
+/* hidden 属性会被 .modal-overlay 的 display:flex 覆盖，必须显式压回 */
+.modal-overlay[hidden] { display: none !important; }
