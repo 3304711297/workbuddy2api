@@ -121,6 +121,15 @@
           </svg>
           <span>实时日志</span>
         </button>
+
+        <button class="nav-item" data-tab="usage" title="用量统计">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          <span>用量统计</span>
+        </button>
       </nav>
 
       <!-- 明暗主题切换（选择持久化到 localStorage，由 main.js 接管逻辑） -->
@@ -136,6 +145,12 @@
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
           </svg>
         </button>
+      </div>
+
+      <!-- 版本更新检查入口（轻量：只检查并跳转发布页，不做自动更新） -->
+      <div id="update-entry" class="update-entry" role="button" tabindex="0" title="检查更新">
+        <span id="update-dot" class="update-dot" hidden></span>
+        <span id="update-entry-text">检查更新</span>
       </div>
     </aside>
 
@@ -504,6 +519,59 @@ print(response.choices[0].message.content)</code></pre>
               <span id="log-auto-scroll" class="log-console-hint">自动同步中 (每 2 秒)</span>
             </div>
             <pre id="log-viewer" class="code-block" style="border: none; border-radius: 0; min-height: 420px; max-height: 520px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; padding: 16px; line-height: 1.5; font-size: 12px; color: #a6adbb;"></pre>
+          </div>
+        </section>
+
+        <!-- 8. 用量统计页面 (Usage) -->
+        <section id="panel-usage" class="panel-page">
+          <div class="section-title-row">
+            <div>
+              <h2>用量统计</h2>
+              <p class="muted">本地请求统计（自本版本起记录），TPS 仅统计成功且含首字时延的样本</p>
+            </div>
+            <div class="actions" style="display: flex; gap: 8px; align-items: center;">
+              <span id="usage-refresh-time" class="muted mono" style="font-size: 12px;">—</span>
+              <button id="btn-refresh-usage" class="btn btn-secondary btn-sm">刷新</button>
+            </div>
+          </div>
+
+          <div class="usage-cards">
+            <div class="card usage-stat-card">
+              <span class="metric-label">今日请求</span>
+              <span id="usage-today-requests" class="metric-value mono">—</span>
+              <span id="usage-today-sub" class="muted usage-sub">成功 — · 失败 —</span>
+            </div>
+            <div class="card usage-stat-card">
+              <span class="metric-label">今日 Tokens</span>
+              <span id="usage-today-tokens" class="metric-value mono">—</span>
+              <span id="usage-today-tokens-sub" class="muted usage-sub">输入 — · 输出 —</span>
+            </div>
+            <div class="card usage-stat-card">
+              <span class="metric-label">累计请求</span>
+              <span id="usage-total-requests" class="metric-value mono">—</span>
+              <span id="usage-total-sub" class="muted usage-sub">成功 — · 失败 —</span>
+            </div>
+            <div class="card usage-stat-card">
+              <span class="metric-label">生成速度 TPS</span>
+              <span id="usage-tps" class="metric-value mono">—</span>
+              <span id="usage-tps-sub" class="muted usage-sub">— 个样本</span>
+            </div>
+            <div class="card usage-stat-card">
+              <span class="metric-label">平均时延</span>
+              <span id="usage-avg-latency" class="metric-value mono">—</span>
+              <span class="muted usage-sub">全部请求</span>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top: 16px;">
+            <div class="card-header-flex">
+              <h3 class="card-title">最近 48 小时请求趋势</h3>
+              <span class="muted" style="font-size: 12px;">本地时区 · 每小时一桶</span>
+            </div>
+            <div id="usage-chart-wrap" class="usage-chart-wrap">
+              <svg id="usage-chart" viewBox="0 0 960 180" preserveAspectRatio="none" role="img" aria-label="最近48小时请求趋势图"></svg>
+            </div>
+            <div id="usage-chart-axis" class="usage-chart-axis mono"></div>
           </div>
         </section>
 
