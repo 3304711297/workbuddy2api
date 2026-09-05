@@ -187,7 +187,8 @@ class CredentialManager:
 # ---------------------------------------------------------------------------
 
 def _model_settings_file() -> str:
-    base = os.environ.get("LOCALAPPDATA", r"C:\Users\<username>\AppData\Local")
+    # %LOCALAPPDATA% 优先，缺省时从用户主目录派生（避免硬编码具体用户路径）
+    base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
     d = os.path.join(base, "codebuddy2openai")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "model_settings.json")

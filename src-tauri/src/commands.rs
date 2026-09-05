@@ -87,13 +87,35 @@ pub struct TestChatResult {
 }
 
 // ---------------------------------------------------------------------------
-// 辅助路径函数
+// 路径与环境变量解析工具（禁止在业务代码里硬编码开发机绝对路径）
+// 约定：环境变量覆盖 → 通用派生路径 → 原路径作最终回退（保证既有环境行为不变）
 // ---------------------------------------------------------------------------
 
-fn local_app_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
-    let p = Path::new(&base).join("codebuddy2openai");
+/// 读取环境变量，未设置或为空时返回 None
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// %LOCALAPPDATA%（优先环境变量；缺省时从 USERPROFILE 派生；最终回退原路径）
+pub(crate) fn local_appdata() -> PathBuf {
+    if let Some(v) = env_nonempty("LOCALAPPDATA") {
+        return PathBuf::from(v);
+    }
+    if let Some(home) = env_nonempty("USERPROFILE") {
+        return Path::new(&home).join("AppData\\Local");
+    }
+    PathBuf::from("C:\\Users\\<username>\\AppData\\Local")
+}
+
+/// 用户主目录（优先 USERPROFILE 环境变量；最终回退原路径）
+fn user_home() -> PathBuf {
+    env_nonempty("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\<username>"))
+}
+
+pub(crate) fn local_app_dir() -> PathBuf {
+    let p = local_appdata().join("codebuddy2openai");
     let _ = std::fs::create_dir_all(&p);
     p
 }
@@ -103,33 +125,52 @@ fn accounts_db_path() -> PathBuf {
 }
 
 fn desktop_auth_info_path() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
-    Path::new(&base).join("CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info")
+    local_appdata().join("CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info")
 }
 
-fn hermes_config_path() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .unwrap_or_else(|_| "C:\\Users\\<username>".into());
-    let user_p = Path::new(&home).join(".hermes\\config.yaml");
-    if user_p.exists() {
-        return user_p;
+/// Hermes 配置文件候选列表：
+/// 1. `HERMES_HOME` 环境变量（hermes 本身使用的约定）
+/// 2. %LOCALAPPDATA%\hermes\config.yaml（原默认）
+/// 3. %USERPROFILE%\.hermes\config.yaml（原备选）
+fn hermes_config_candidates() -> Vec<PathBuf> {
+    let mut list = Vec::new();
+    if let Some(home) = env_nonempty("HERMES_HOME") {
+        list.push(PathBuf::from(home).join("config.yaml"));
     }
-    let base = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
-    Path::new(&base).join("hermes\\config.yaml")
+    list.push(local_appdata().join("hermes\\config.yaml"));
+    list.push(user_home().join(".hermes\\config.yaml"));
+    list
+}
+
+/// 解析当前实际生效的 Hermes 配置文件路径
+fn resolve_hermes_config() -> PathBuf {
+    let candidates = hermes_config_candidates();
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        // 全部不存在时保持原行为：回退到 %LOCALAPPDATA% 默认路径
+        .unwrap_or_else(|| local_appdata().join("hermes\\config.yaml"))
 }
 
 fn zcode_cli_path() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .unwrap_or_else(|_| "C:\\Users\\<username>".into());
-    Path::new(&home).join(".zcode\\cli\\config.json")
+    user_home().join(".zcode\\cli\\config.json")
 }
 
 fn zcode_v2_path() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .unwrap_or_else(|_| "C:\\Users\\<username>".into());
-    Path::new(&home).join(".zcode\\v2\\config.json")
+    user_home().join(".zcode\\v2\\config.json")
+}
+
+/// Python 解释器定位：`C2O_PYTHON` 环境变量优先 → 原 .workbuddy 内置解释器（保留现机行为）→ PATH 中的 python
+fn resolve_python_interpreter() -> PathBuf {
+    if let Some(p) = env_nonempty("C2O_PYTHON").map(PathBuf::from).filter(|p| p.exists()) {
+        return p;
+    }
+    let bundled = PathBuf::from("C:/Users/<username>/.workbuddy/binaries/python/envs/default/Scripts/python.exe");
+    if bundled.exists() {
+        return bundled;
+    }
+    PathBuf::from("python")
 }
 
 // ---------------------------------------------------------------------------
@@ -633,14 +674,8 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
 
 #[tauri::command]
 pub fn agent_detect() -> Result<AgentStatus, String> {
-    // Hermes 真实配置文件在 %LOCALAPPDATA%\hermes\config.yaml
-    let mut hermes_p = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
-    if !hermes_p.exists() {
-        let alt = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
-        if alt.exists() {
-            hermes_p = alt;
-        }
-    }
+    // Hermes 真实配置文件：HERMES_HOME 环境变量优先 → %LOCALAPPDATA%\hermes → %USERPROFILE%\.hermes
+    let hermes_p = resolve_hermes_config();
     let hermes_installed = hermes_p.exists();
     let mut hermes_configured = false;
     if hermes_installed {
@@ -689,13 +724,7 @@ pub fn agent_remove(agent_type: String) -> Result<String, String> {
 }
 
 fn configure_hermes(port: u16) -> Result<String, String> {
-    let mut p = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
-    if !p.exists() {
-        let alt = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
-        if alt.exists() {
-            p = alt;
-        }
-    }
+    let p = resolve_hermes_config();
     if !p.exists() {
         return Err(format!("Hermes 配置文件未找到: {}", p.display()));
     }
@@ -789,13 +818,7 @@ workbuddy-hy4:
 }
 
 fn remove_hermes() -> Result<String, String> {
-    let mut p = PathBuf::from("C:\\Users\\<username>\\AppData\\Local\\hermes\\config.yaml");
-    if !p.exists() {
-        let alt = PathBuf::from("C:\\Users\\<username>\\.hermes\\config.yaml");
-        if alt.exists() {
-            p = alt;
-        }
-    }
+    let p = resolve_hermes_config();
     if !p.exists() { return Ok("文件不存在".into()); }
     let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     let mut val: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| e.to_string())?;
@@ -909,32 +932,41 @@ pub fn proxy_start(
         }
     }
 
-    let python = std::path::PathBuf::from(
-        "C:/Users/<username>/.workbuddy/binaries/python/envs/default/Scripts/python.exe",
-    );
-    let resource_script = app
-        .path()
-        .resource_dir()
-        .map_err(|e| e.to_string())?
-        .join("converter.py");
-    let script = if resource_script.exists() {
-        resource_script
-    } else {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_default();
-        let direct_script = exe_dir.join("../../../converter.py");
-        if direct_script.exists() {
-            direct_script
-        } else {
-            let desktop_script = PathBuf::from("C:/Users/<username>/Desktop/codebuddy2openai/converter.py");
-            if desktop_script.exists() {
-                desktop_script
+    let python = resolve_python_interpreter();
+
+    // converter.py 定位：`C2O_CONVERTER` 环境变量优先 → 资源目录 → 可执行文件相对定位 → 原开发机路径兜底
+    let script = match env_nonempty("C2O_CONVERTER")
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+    {
+        Some(p) => p,
+        None => {
+            let resource_script = app
+                .path()
+                .resource_dir()
+                .map_err(|e| e.to_string())?
+                .join("converter.py");
+            if resource_script.exists() {
+                resource_script
             } else {
-                std::env::current_dir()
-                    .map_err(|e| e.to_string())?
-                    .join("converter.py")
+                let exe_dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                    .unwrap_or_default();
+                let direct_script = exe_dir.join("../../../converter.py");
+                if direct_script.exists() {
+                    direct_script
+                } else {
+                    let desktop_script =
+                        PathBuf::from("C:/Users/<username>/Desktop/codebuddy2openai/converter.py");
+                    if desktop_script.exists() {
+                        desktop_script
+                    } else {
+                        std::env::current_dir()
+                            .map_err(|e| e.to_string())?
+                            .join("converter.py")
+                    }
+                }
             }
         }
     };
@@ -989,10 +1021,7 @@ pub fn proxy_start(
 }
 
 fn log_file_path() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
-    let dir = Path::new(&base).join("codebuddy2openai");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = local_app_dir();
     dir.join("proxy_stdout.log")
 }
 

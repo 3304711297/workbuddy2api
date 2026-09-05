@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Mutex;
 use tauri::{
@@ -49,10 +49,8 @@ impl Default for AppConfig {
 pub struct AppConfigState(pub Mutex<AppConfig>);
 
 fn config_file_path() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| "C:\\Users\\<username>\\AppData\\Local".into());
-    let dir = Path::new(&base).join("codebuddy2openai");
-    let _ = std::fs::create_dir_all(&dir);
+    // 复用 commands 的路径工具：LOCALAPPDATA 环境变量优先，避免硬编码用户目录
+    let dir = commands::local_app_dir();
     dir.join("settings.json")
 }
 
