@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Child;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -63,6 +64,79 @@ impl Default for AppConfig {
 }
 
 pub struct AppConfigState(pub Mutex<AppConfig>);
+
+// ---------------------------------------------------------------------------
+// 窗口尺寸记忆（对标上游 MainWindowSizeState 的简化版）
+// 独立存储于 window.json，避免与 AppConfig 契约纠缠；记录的是逻辑尺寸
+// ---------------------------------------------------------------------------
+
+/// 主窗口尺寸状态：latest 保存最近的逻辑尺寸，gen 为事件代数（用于 500ms 去抖判断）
+pub struct WindowSizeState {
+    latest: Mutex<(f64, f64)>,
+    gen: AtomicU64,
+}
+
+impl Default for WindowSizeState {
+    fn default() -> Self {
+        Self {
+            latest: Mutex::new((0.0, 0.0)),
+            gen: AtomicU64::new(0),
+        }
+    }
+}
+
+fn window_state_path() -> PathBuf {
+    // 复用 commands 的路径工具：%LOCALAPPDATA%\codebuddy2openai
+    commands::local_app_dir().join("window.json")
+}
+
+/// 写入窗口逻辑尺寸；宽高 < 200 时不写（最小化/过渡态尺寸不落盘）。
+/// 先写临时文件再 rename 原子替换，避免写入中途被读到半截内容。
+fn save_window_size(width: f64, height: f64) {
+    if width < 200.0 || height < 200.0 {
+        return;
+    }
+    let path = window_state_path();
+    let tmp = path.with_extension("json.tmp");
+    let payload = serde_json::json!({ "width": width, "height": height });
+    if let Ok(raw) = serde_json::to_string_pretty(&payload) {
+        if std::fs::write(&tmp, raw).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// 读取记忆的窗口逻辑尺寸；值 ≥ 400×300 才返回，读取失败静默跳过
+fn load_window_size() -> Option<(f64, f64)> {
+    let raw = std::fs::read_to_string(window_state_path()).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let w = val.get("width").and_then(|v| v.as_f64())?;
+    let h = val.get("height").and_then(|v| v.as_f64())?;
+    if w >= 400.0 && h >= 300.0 {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
+/// 事件去抖：记录最新逻辑尺寸并推进事件代数，500ms 内无新事件才由最后一个线程落盘
+fn track_window_resize(app: &tauri::AppHandle, logical_w: f64, logical_h: f64) {
+    let state = app.state::<WindowSizeState>();
+    if let Ok(mut latest) = state.latest.lock() {
+        *latest = (logical_w, logical_h);
+    }
+    let my_gen = state.gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // 仅当代数未被更新（500ms 内没有新事件）时才写盘，天然丢弃拖拽过程中的中间态
+        let st = app.state::<WindowSizeState>();
+        if st.gen.load(Ordering::SeqCst) == my_gen {
+            let (w, h) = st.latest.lock().map(|v| *v).unwrap_or((0.0, 0.0));
+            save_window_size(w, h);
+        }
+    });
+}
 
 fn config_file_path() -> PathBuf {
     // 复用 commands 的路径工具：LOCALAPPDATA 环境变量优先，避免硬编码用户目录
@@ -145,6 +219,7 @@ pub fn run_app() {
         .plugin(tauri_plugin_shell::init())
         .manage(ProxyHandle(Mutex::new(None)))
         .manage(AppConfigState(Mutex::new(initial_config)))
+        .manage(WindowSizeState::default())
         .setup(|app| {
             // 系统托盘右键菜单（完全对齐代理内核标准交互）
             let open_item = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
@@ -266,9 +341,43 @@ pub fn run_app() {
                 })
                 .build(app)?;
 
+            // 窗口在 setup 前已按 tauri.conf.json 创建，此处恢复上次记忆的逻辑尺寸
+            // （≥ 400×300 才生效；读取失败/无记录时保持配置默认值，静默跳过）
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some((w, h)) = load_window_size() {
+                    let _ = window.set_size(tauri::LogicalSize::new(w, h));
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
+            // —— 主窗口尺寸记忆：逻辑尺寸 = 物理尺寸 ÷ 缩放系数，500ms 去抖后写 window.json ——
+            if window.label() == "main" {
+                let (phys, scale) = match event {
+                    WindowEvent::Resized(size) => (
+                        (size.width as f64, size.height as f64),
+                        window.scale_factor().unwrap_or(1.0),
+                    ),
+                    // DPI 变化（跨显示器拖动）时用新物理尺寸 + 新缩放系数换算
+                    WindowEvent::ScaleFactorChanged {
+                        scale_factor,
+                        new_inner_size,
+                        ..
+                    } => (
+                        (
+                            new_inner_size.width as f64,
+                            new_inner_size.height as f64,
+                        ),
+                        *scale_factor,
+                    ),
+                    _ => ((0.0, 0.0), 0.0),
+                };
+                if scale > 0.0 && phys.0 > 0.0 && phys.1 > 0.0 {
+                    track_window_resize(window.app_handle(), phys.0 / scale, phys.1 / scale);
+                }
+            }
+
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let config = if let Some(st) = app.try_state::<AppConfigState>() {
@@ -320,7 +429,9 @@ pub fn run_app() {
             commands::proxy_stop,
             commands::proxy_restart,
             commands::proxy_health,
-            commands::proxy_test_chat
+            commands::proxy_test_chat,
+            // 日志目录打开（前端 invoke）
+            commands::open_logs_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

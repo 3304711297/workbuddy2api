@@ -5,6 +5,7 @@
 //! 4. Agent 一键检测与配置写入 (agent_detect/agent_configure/agent_remove)
 
 use crate::ProxyHandle;
+use futures_util::StreamExt; // 流式读取 SSE 字节块（配合 reqwest "stream" feature）
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
@@ -96,6 +97,8 @@ pub struct TestChatResult {
     pub model: String,
     pub response: String,
     pub latency_ms: u64,
+    /// 首字时延（毫秒）：请求发出到第一个非空 delta.content 的耗时；None 序列化为 null 表示未测得
+    pub ttft_ms: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -1000,6 +1003,11 @@ pub fn proxy_start(
         }
     }
 
+    // 旧进程句柄已在此处关闭（上方 already-running 检查排除了运行中状态），
+    // 启动新子进程前做日志轮转：超过 1MB 的旧日志整体改名为 .1，避免无限增长；
+    // rename 失败（文件被占用）静默跳过，不影响本次启动
+    rotate_proxy_log_if_oversized();
+
     // 重定向标准输出与错误输出到本地日志文件，供控制台实时查看
     let log_path = log_file_path();
     let log_file = std::fs::OpenOptions::new()
@@ -1028,6 +1036,20 @@ pub fn proxy_start(
 fn log_file_path() -> PathBuf {
     let dir = local_app_dir();
     dir.join("proxy_stdout.log")
+}
+
+/// 日志轮转：proxy_stdout.log 超过 1MB 时整体重命名为 proxy_stdout.log.1（覆盖旧备份）。
+/// 只允许在反代子进程确定未运行（旧句柄已关闭）的时机调用，进程运行中绝不截断/移动；
+/// rename 失败（Windows 文件占用等）时静默跳过，不阻断启动/停止流程。
+fn rotate_proxy_log_if_oversized() {
+    const ROTATE_THRESHOLD_BYTES: u64 = 1024 * 1024;
+    let log = log_file_path();
+    if let Ok(meta) = std::fs::metadata(&log) {
+        if meta.len() > ROTATE_THRESHOLD_BYTES {
+            let backup = log.with_file_name("proxy_stdout.log.1");
+            let _ = std::fs::rename(&log, &backup);
+        }
+    }
 }
 
 #[tauri::command]
@@ -1061,6 +1083,18 @@ pub fn proxy_clear_logs() -> Result<String, String> {
     Ok("日志已清空".into())
 }
 
+/// 打开应用数据目录（%LOCALAPPDATA%\codebuddy2openai，即日志文件所在目录）。
+/// 目录不存在时先创建（local_app_dir 内部已保证），再用资源管理器打开；失败返回错误信息。
+#[tauri::command]
+pub fn open_logs_dir() -> Result<(), String> {
+    let dir = local_app_dir();
+    Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| format!("打开日志目录失败: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Result<String, String> {
     let mut guard = handle.0.lock().map_err(|e| e.to_string())?;
@@ -1085,6 +1119,12 @@ pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Resu
                 "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*converter.py*' -and $_.Name -eq 'python.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
             ])
             .output();
+    }
+
+    // 成功停止后同样轮转一次日志：子进程已退出、兜底清理也已等待完毕，
+    // 此时文件不再被写入；失败（占用未释放）静默跳过，下次启动时会再次尝试
+    if stopped {
+        rotate_proxy_log_if_oversized();
     }
 
     use tauri::Emitter;
@@ -1122,17 +1162,22 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
     let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
     let start = std::time::Instant::now();
 
+    // 30s 总超时：reqwest 客户端级 timeout 覆盖「发起连接 → 响应体读取完毕」全过程，
+    // 流式读取中途挂起同样会在 30s 处触发 Err，无需单独的读超时
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
+    // 对标上游 provider_health.rs 的流式判首包思路：发 stream:true 请求逐块解析 SSE，
+    // 第一个非空 delta.content 到达的时刻即为 TTFT（首字时延）
     let payload = serde_json::json!({
         "model": target_model,
         "messages": [
             {"role": "user", "content": "Ping: 请仅回答 PONG"}
         ],
         "max_tokens": 100,
+        "stream": true,
         "chat_template_kwargs": {"enable_thinking": false}
     });
 
@@ -1144,36 +1189,110 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
                 model: target_model,
                 response: String::new(),
                 latency_ms: start.elapsed().as_millis() as u64,
+                ttft_ms: None,
                 error: Some(e.to_string()),
             });
         }
     };
+
+    // 非 2xx：按原有「错误体提取」思路取响应体前 300 字符作为错误信息，整体判失败
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        let snippet: String = body_text.chars().take(300).collect();
+        return Ok(TestChatResult {
+            success: false,
+            model: target_model,
+            response: String::new(),
+            latency_ms: start.elapsed().as_millis() as u64,
+            ttft_ms: None,
+            error: Some(format!("HTTP {status}: {snippet}")),
+        });
+    }
+
+    // 逐块读取 SSE：按行解析 data: 帧。响应摘要截断上限，防止异常上游撑爆内存
+    const MAX_SUMMARY_CHARS: usize = 4096;
+    let mut stream = std::pin::pin!(resp.bytes_stream());
+    let mut buf: Vec<u8> = Vec::new();
+    let mut response_acc = String::new();
+    let mut ttft_ms: Option<u64> = None;
+    let mut stream_err: Option<String> = None;
+    let mut done = false;
+
+    while !done {
+        let chunk = match stream.as_mut().next().await {
+            Some(Ok(c)) => c,
+            // 网络错误/30s 超时：中断读取，走失败路径（ttft 未测得则返回 None）
+            Some(Err(e)) => {
+                stream_err = Some(e.to_string());
+                break;
+            }
+            // 流自然结束（服务器关闭连接，可能未发 [DONE]）同样视为完成
+            None => break,
+        };
+        buf.extend_from_slice(&chunk);
+
+        // 只解析完整行：末尾不完整的行留待下一个 chunk 拼接，避免 UTF-8 多字节字符被截断
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            // 跳过空行（SSE 事件分隔）与注释行（':' 开头）
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+            // "data:" 前缀行为数据帧；event:/id:/retry: 等其他字段行忽略
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim(); // 兼容 "data:{...}" 与 "data: {...}" 两种写法
+            if data == "[DONE]" {
+                done = true;
+                break;
+            }
+            // 单帧 JSON 解析异常只跳过该帧，不判整体失败
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            // 只取 choices[0].delta.content；空内容（如 role 帧）与 reasoning_content 均不计 TTFT
+            let delta = val
+                .pointer("/choices/0/delta/content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if delta.is_empty() {
+                continue;
+            }
+            if ttft_ms.is_none() {
+                ttft_ms = Some(start.elapsed().as_millis() as u64);
+            }
+            response_acc.push_str(delta);
+            if response_acc.chars().count() >= MAX_SUMMARY_CHARS {
+                done = true;
+                break;
+            }
+        }
+    }
 
     let latency_ms = start.elapsed().as_millis() as u64;
-    let body: serde_json::Value = match resp.json().await {
-        Ok(b) => b,
-        Err(e) => {
-            return Ok(TestChatResult {
-                success: false,
-                model: target_model,
-                response: String::new(),
-                latency_ms,
-                error: Some(e.to_string()),
-            });
-        }
-    };
 
-    let content = body
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    // 失败路径：与原行为一致，success:false + 错误信息、response 置空、ttft_ms 返回 None
+    if let Some(err) = stream_err {
+        return Ok(TestChatResult {
+            success: false,
+            model: target_model,
+            response: String::new(),
+            latency_ms,
+            ttft_ms: None,
+            error: Some(err),
+        });
+    }
 
     Ok(TestChatResult {
-        success: !content.is_empty(),
+        success: !response_acc.is_empty(),
         model: target_model,
-        response: content,
+        response: response_acc,
         latency_ms,
+        ttft_ms,
         error: None,
     })
 }

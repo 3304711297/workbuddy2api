@@ -524,6 +524,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "dirs",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",

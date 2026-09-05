@@ -13,7 +13,10 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13.4", features = ["json"] }
+# stream: 启用 Response::bytes_stream() 逐块读取 SSE（TTFT 首字时延探测）
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
+# StreamExt：驱动 bytes_stream 的迭代（futures-util 已在 reqwest 依赖树中，不引入新包）
+futures-util = "0.3"
 serde_yaml = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["time"] }
