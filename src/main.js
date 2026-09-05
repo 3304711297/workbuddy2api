@@ -667,7 +667,7 @@ function initOAuth() {
 async function loadModelsMatrix() {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px;"><span class="spinner"></span> 正在同步全量模型与计费倍率数据...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 24px;"><span class="spinner"></span> 正在同步全量模型与计费倍率数据...</td></tr>`;
 
   try {
     const list = await invokeTauri('models_fetch_all');
@@ -697,7 +697,7 @@ function renderModelsTable(list) {
   currentModelsList = list || [];
 
   if (!list || list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align: center; padding: 20px;">未获取到模型数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="muted" style="text-align: center; padding: 20px;">未获取到模型数据</td></tr>`;
     return;
   }
 
@@ -739,7 +739,6 @@ function renderModelsTable(list) {
         <td>${ctxCell}</td>
         <td>${effortCell}</td>
         <td><div>${tagsHtml}</div></td>
-        <td></td>
       </tr>
     `;
   }).join('');

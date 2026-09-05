@@ -886,4 +886,4 @@ body {
 }
 .modal-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-.models-table { min-width: 600px; }
+.models-table { min-width: 560px; }
