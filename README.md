@@ -33,7 +33,8 @@
 
 ---
 
-## 📐 系统架构与工作流
+<details>
+<summary><h2>📐 系统架构与工作流（点击展开）</h2></summary>
 
 ```mermaid
 flowchart TD
@@ -73,6 +74,8 @@ flowchart TD
     Server --> Converter
     Converter -->|原生 Bearer Token 转发| Copilot
 ```
+
+</details>
 
 ---
 
