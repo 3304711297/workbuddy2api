@@ -27,6 +27,11 @@ const state = {
   ]
 };
 
+// 工具函数：HTML 转义（所有 innerHTML 动态插值统一使用，防 XSS 注入）
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 // 工具函数：Toast 消息
 function showToast(msg, type = 'info') {
   const container = document.getElementById('toast-container');
@@ -40,6 +45,124 @@ function showToast(msg, type = 'info') {
     t.style.transform = 'translateY(10px)';
     setTimeout(() => t.remove(), 200);
   }, 3000);
+}
+
+// ---------------------------------------------------------------------------
+// 全局错误兜底：未捕获异常与 Promise 拒绝统一弹窗展示（单例面板，重复触发仅更新内容）
+// ---------------------------------------------------------------------------
+let errorOverlayEl = null;
+
+// 归一化错误详情：Error 取堆栈，普通对象取 JSON，其余转字符串
+function formatErrorDetail(prefix, detail) {
+  let text = '';
+  if (detail instanceof Error) {
+    text = detail.stack || `${detail.name}: ${detail.message}`;
+  } else if (detail && typeof detail === 'object') {
+    try { text = JSON.stringify(detail, null, 2); } catch { text = Object.prototype.toString.call(detail); }
+  } else if (detail != null && detail !== '') {
+    text = String(detail);
+  }
+  if (!text) text = '未知错误（无详细信息）';
+  return prefix ? `${prefix}\n\n${text}` : text;
+}
+
+function showUncaughtError(detailText) {
+  const full = String(detailText ?? '');
+  // 完整信息始终输出到控制台，面板内最多展示 2000 字符
+  console.error('[未捕获错误]', full);
+  const display = full.length > 2000
+    ? `${full.slice(0, 2000)}\n...（内容过长已截断，完整信息见控制台）`
+    : full;
+
+  const mount = () => {
+    if (!errorOverlayEl) {
+      errorOverlayEl = document.createElement('div');
+      errorOverlayEl.className = 'modal-overlay error-overlay';
+      errorOverlayEl.innerHTML = `
+        <div class="modal-card error-card">
+          <h3 class="error-title">应用发生未捕获错误</h3>
+          <pre class="error-detail mono"></pre>
+          <div class="modal-actions">
+            <button class="btn btn-secondary btn-sm" data-act="ignore">忽略</button>
+            <button class="btn btn-primary btn-sm" data-act="reload">重新加载</button>
+          </div>
+        </div>`;
+      document.body.appendChild(errorOverlayEl);
+      errorOverlayEl.addEventListener('click', (e) => {
+        const act = e.target.closest('[data-act]')?.dataset.act;
+        if (act === 'ignore') errorOverlayEl.hidden = true;
+        if (act === 'reload') location.reload();
+      });
+    }
+    // 用 textContent 填充错误文本，避免二次注入；重复触发只更新内容不堆叠
+    errorOverlayEl.querySelector('.error-detail').textContent = display;
+    errorOverlayEl.hidden = false;
+  };
+  if (document.body) mount();
+  else document.addEventListener('DOMContentLoaded', mount, { once: true });
+}
+
+// 尽早注册监听（模块加载即生效，不等 DOMContentLoaded）
+(function initGlobalErrorHandler() {
+  window.addEventListener('error', (e) => {
+    const src = e.filename ? `${e.filename}:${e.lineno || 0}:${e.colno || 0}` : '';
+    showUncaughtError(formatErrorDetail(src, e.error ?? e.message ?? ''));
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    showUncaughtError(formatErrorDetail('未处理的 Promise 拒绝', e.reason ?? ''));
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// 自定义确认弹窗（Promise 风格，替代原生 window.confirm）
+// 复用 model-edit-overlay 的遮罩模式：hidden 属性控制显隐，Esc / 点遮罩取消
+// ---------------------------------------------------------------------------
+let confirmState = null; // 当前待决确认 { resolve }
+
+function showConfirm({ title = '确认操作', message = '', confirmText = '确定', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('confirm-overlay');
+    const titleEl = document.getElementById('confirm-title');
+    const msgEl = document.getElementById('confirm-message');
+    const okBtn = document.getElementById('confirm-ok');
+    // 弹窗 DOM 缺失时兜底走原生确认，保证调用方流程不中断
+    if (!overlay || !titleEl || !msgEl || !okBtn) {
+      resolve(window.confirm(message));
+      return;
+    }
+    // 若已有待确认弹窗，先以“取消”结算旧的 Promise，避免悬挂
+    if (confirmState) confirmState.resolve(false);
+    confirmState = { resolve };
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+    okBtn.textContent = confirmText;
+    okBtn.className = danger ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+    overlay.hidden = false;
+  });
+}
+
+function settleConfirm(result) {
+  const overlay = document.getElementById('confirm-overlay');
+  if (overlay) overlay.hidden = true;
+  if (confirmState) {
+    confirmState.resolve(result);
+    confirmState = null;
+  }
+}
+
+function initConfirmDialog() {
+  const overlay = document.getElementById('confirm-overlay');
+  if (!overlay) return;
+  document.getElementById('confirm-ok')?.addEventListener('click', () => settleConfirm(true));
+  document.getElementById('confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
+  // 点遮罩取消（仅当点击目标为遮罩本身）
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) settleConfirm(false);
+  });
+  // Esc 取消
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !overlay.hidden) settleConfirm(false);
+  });
 }
 
 // 安全打开外部浏览器
@@ -288,7 +411,7 @@ async function loadAccountsData() {
     renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData);
     renderAccountsGrid(acctList);
   } catch (e) {
-    container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${e.message || e}</div>`;
+    container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${esc(e.message || e)}</div>`;
   }
 }
 
@@ -322,8 +445,8 @@ function renderActiveAccountAndUsage(acct, usage) {
 
     const pkgRows = (usage.packages || []).map(p => `
       <div class="pkg-item">
-        <span class="mono muted">${p.code || '默认资源包'}</span>
-        <span><strong>${Math.round(p.remain)}</strong> / ${Math.round(p.total)} <small class="muted">${p.unit}</small></span>
+        <span class="mono muted">${esc(p.code || '默认资源包')}</span>
+        <span><strong>${Math.round(p.remain)}</strong> / ${Math.round(p.total)} <small class="muted">${esc(p.unit)}</small></span>
       </div>
     `).join('');
 
@@ -358,17 +481,17 @@ function renderActiveAccountAndUsage(acct, usage) {
   container.innerHTML = `
     <div class="account-card-active">
       <div class="account-profile-header">
-        <div class="avatar-circle">${firstLetter}</div>
+        <div class="avatar-circle">${esc(firstLetter)}</div>
         <div class="account-titles">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="account-nickname">${acct.nickname || '未命名'}</span>
+            <span class="account-nickname">${esc(acct.nickname || '未命名')}</span>
             <span class="badge ${badgeClass}">${badgeText}</span>
             <span class="badge badge-running" style="font-size: 10px;">当前活跃</span>
           </div>
           <div class="account-sub-info">
-            <span>UID: <strong class="mono">${acct.uid}</strong></span>
-            ${acct.phone_number ? `<span>手机: <strong class="mono">${acct.phone_number}</strong></span>` : ''}
-            <span>到期时间: <strong class="mono">${expStr}</strong></span>
+            <span>UID: <strong class="mono">${esc(acct.uid)}</strong></span>
+            ${acct.phone_number ? `<span>手机: <strong class="mono">${esc(acct.phone_number)}</strong></span>` : ''}
+            <span>到期时间: <strong class="mono">${esc(expStr)}</strong></span>
           </div>
         </div>
         <div style="display: flex; gap: 8px;">
@@ -403,16 +526,28 @@ function renderAccountsGrid(list) {
   grid.innerHTML = list.map(a => `
     <div class="account-item-card ${a.is_active ? 'is-active' : ''}">
       <div class="account-item-header">
-        <strong>${a.nickname || '未命名'}</strong>
-        ${a.is_active ? '<span class="badge badge-running">使用中</span>' : `<button class="btn btn-secondary btn-sm" onclick="switchAccount('${a.uid}')">设为活跃</button>`}
+        <strong>${esc(a.nickname || '未命名')}</strong>
+        ${a.is_active ? '<span class="badge badge-running">使用中</span>' : `<button class="btn btn-secondary btn-sm" data-act="switch" data-uid="${esc(a.uid)}">设为活跃</button>`}
       </div>
-      <div class="mono muted" style="font-size: 11px;">${a.uid}</div>
+      <div class="mono muted" style="font-size: 11px;">${esc(a.uid)}</div>
       <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 4px;">
         <span class="${a.token_expired ? 'text-danger' : 'text-success'}">${a.token_expired ? '已过期' : '凭据有效'}</span>
-        ${!a.is_active ? `<button class="btn btn-danger btn-sm" onclick="deleteAccount('${a.uid}')" style="padding: 2px 6px;">删除</button>` : ''}
+        ${!a.is_active ? `<button class="btn btn-danger btn-sm" data-act="delete" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">删除</button>` : ''}
       </div>
     </div>
   `).join('');
+}
+
+// 账号卡片按钮事件委托（data-act + data-uid，替代 inline onclick 的字符串拼接注入风险）
+function initAccountsDelegation() {
+  const grid = document.getElementById('accounts-list');
+  if (!grid) return;
+  grid.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || !btn.dataset.uid) return;
+    if (btn.dataset.act === 'switch') window.switchAccount(btn.dataset.uid);
+    if (btn.dataset.act === 'delete') window.deleteAccount(btn.dataset.uid);
+  });
 }
 
 window.switchAccount = async (uid) => {
@@ -427,7 +562,13 @@ window.switchAccount = async (uid) => {
 };
 
 window.deleteAccount = async (uid) => {
-  if (!confirm('确定要删除该账号的本地凭据吗？')) return;
+  const ok = await showConfirm({
+    title: '删除账号',
+    message: '确定要删除该账号的本地凭据吗？',
+    confirmText: '删除',
+    danger: true
+  });
+  if (!ok) return;
   try {
     await invokeTauri('accounts_delete', { uid });
     showToast('已删除指定账号', 'info');
@@ -509,7 +650,6 @@ async function copyToClipboard(text) {
 function renderZcodeGuide(guide) {
   const wrap = document.getElementById('zcode-guide');
   if (!wrap) return;
-  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const field = (label, value) => `
     <div class="zguide-field">
       <span class="zguide-label">${esc(label)}</span>
@@ -536,7 +676,7 @@ function renderZcodeGuide(guide) {
 function initAgentActions() {
   document.getElementById('btn-config-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agent_type: 'hermes', agentType: 'hermes', port: state.port });
+      const res = await invokeTauri('agent_configure', { agent_type: 'hermes', port: state.port });
       showToast(res, 'success');
       loadAgentsStatus();
     } catch (e) {
@@ -546,7 +686,7 @@ function initAgentActions() {
 
   document.getElementById('btn-remove-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agent_type: 'hermes', agentType: 'hermes' });
+      const res = await invokeTauri('agent_remove', { agent_type: 'hermes' });
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
@@ -556,7 +696,7 @@ function initAgentActions() {
 
   document.getElementById('btn-config-zcode')?.addEventListener('click', async () => {
     try {
-      const raw = await invokeTauri('agent_configure', { agent_type: 'zcode', agentType: 'zcode', port: state.port });
+      const raw = await invokeTauri('agent_configure', { agent_type: 'zcode', port: state.port });
       renderZcodeGuide(JSON.parse(raw));
     } catch (e) {
       showToast(`生成接入配置失败: ${e.message || e}`, 'error');
@@ -575,7 +715,7 @@ function initAgentActions() {
 
   document.getElementById('btn-remove-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agent_type: 'zcode', agentType: 'zcode' });
+      const res = await invokeTauri('agent_remove', { agent_type: 'zcode' });
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {
@@ -681,7 +821,7 @@ async function loadModelsMatrix() {
 function formatMultiplier(raw) {
   if (!raw || raw === '—') return '<span class="muted">—</span>';
   const match = String(raw).match(/(\d+(?:\.\d+)?)/);
-  if (!match) return `<span class="badge badge-info mono">${raw}</span>`;
+  if (!match) return `<span class="badge badge-info mono">${esc(raw)}</span>`;
   const num = parseFloat(match[1]);
   if (num === 0) {
     return `<span class="badge badge-valid" style="background: rgba(16,185,129,0.2); color: #34d399; font-weight: 700;">免费 (0.00x)</span>`;
@@ -714,26 +854,26 @@ function renderModelsTable(list) {
           ? `强度: ${m.custom_reasoning_effort}`
           : `默认 (${m.default_effort})`;
     const effortCell = m.supports_reasoning
-      ? `<button class="cell-edit" id="effort-cell-${m.id}" onclick="openModelEdit('${m.id}')" title="点击修改思考强度">${effortText}</button>`
+      ? `<button class="cell-edit" id="effort-cell-${esc(m.id)}" data-edit-model="${esc(m.id)}" title="点击修改思考强度">${esc(effortText)}</button>`
       : '<span class="muted" style="font-size: 11px;">不支持思考</span>';
 
     // 上下文限制：行内只读展示，点击弹出编辑弹窗
     const defaultCtx = m.max_input_tokens;
     const currentCtx = m.custom_context_window || defaultCtx;
     const ctxCell = `
-      <button class="cell-edit" id="ctx-cell-${m.id}" onclick="openModelEdit('${m.id}')" title="点击修改上下文窗口">
-        ${currentCtx} <small class="muted">/ ${Math.round(defaultCtx/1000)}k</small>
+      <button class="cell-edit" id="ctx-cell-${esc(m.id)}" data-edit-model="${esc(m.id)}" title="点击修改上下文窗口">
+        ${esc(currentCtx)} <small class="muted">/ ${Math.round(defaultCtx/1000)}k</small>
       </button>
     `;
 
     // 标签（描述已按需求移除）
-    const tagsHtml = m.tags.map(t => `<span class="badge badge-info" style="font-size: 10px; margin-right: 3px;">${t}</span>`).join('');
+    const tagsHtml = m.tags.map(t => `<span class="badge badge-info" style="font-size: 10px; margin-right: 3px;">${esc(t)}</span>`).join('');
 
     return `
       <tr>
         <td>
-          <strong class="mono" style="color: #60a5fa; font-size: 13px;">${m.id}</strong>
-          <div class="muted" style="font-size: 11px;">${m.name}</div>
+          <strong class="mono" style="color: #60a5fa; font-size: 13px;">${esc(m.id)}</strong>
+          <div class="muted" style="font-size: 11px;">${esc(m.name)}</div>
         </td>
         <td>${creditsBadge}</td>
         <td>
@@ -746,17 +886,19 @@ function renderModelsTable(list) {
   }).join('');
 }
 
+// 降级展示：models_fetch_all 拉取失败时使用本地内置模型数据（与主表格保持同 4 列结构）
 function renderFallbackModels() {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
   tbody.innerHTML = state.models.map(m => `
     <tr>
-      <td><strong class="mono" style="color: #60a5fa;">${m.id}</strong></td>
-      <td><span class="badge badge-info">标准倍率</span></td>
-      <td><span class="mono">${m.ctx}</span></td>
-      <td><span class="muted">默认</span></td>
-      <td>${m.tags.map(t => `<span class="badge badge-info" style="margin-right:4px;">${t}</span>`).join('')}</td>
+      <td>
+        <strong class="mono" style="color: #60a5fa; font-size: 13px;">${esc(m.id)}</strong>
+        <div class="muted" style="font-size: 11px;">本地内置模型</div>
+      </td>
       <td><span class="muted">—</span></td>
+      <td><span class="mono">${esc(m.ctx)}</span></td>
+      <td>${m.tags.map(t => `<span class="badge badge-info" style="font-size: 10px; margin-right: 3px;">${esc(t)}</span>`).join('')}</td>
     </tr>
   `).join('');
 }
@@ -788,7 +930,7 @@ function updateModelCells(modelId) {
   const m = currentModelsList.find((x) => x.id === modelId);
   const ctxCell = document.getElementById(`ctx-cell-${modelId}`);
   if (ctxCell && ctxInput && m) {
-    ctxCell.innerHTML = `${ctxInput.value} <small class="muted">/ ${Math.round(m.max_input_tokens / 1000)}k</small>`;
+    ctxCell.innerHTML = `${esc(ctxInput.value)} <small class="muted">/ ${Math.round(m.max_input_tokens / 1000)}k</small>`;
     m.custom_context_window = parseInt(ctxInput.value, 10);
   }
   const eCell = document.getElementById(`effort-cell-${modelId}`);
@@ -809,14 +951,14 @@ window.openModelEdit = (modelId) => {
   let html = `
     <div class="zguide-field">
       <span class="zguide-label">上下文窗口上限 (Tokens) · 上限 ${Math.round(defaultCtx / 1000)}k</span>
-      <input type="number" class="input mono" style="width: 100%;" id="ctx-${modelId}"
-        value="${currentCtx}" min="1024" max="${defaultCtx}" step="1024" />
+      <input type="number" class="input mono" style="width: 100%;" id="ctx-${esc(modelId)}"
+        value="${esc(currentCtx)}" min="1024" max="${esc(defaultCtx)}" step="1024" />
     </div>`;
   if (m.supports_reasoning) {
     const currentEffort = m.custom_reasoning_effort || 'default';
-    const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认 (${m.default_effort})</option>`];
+    const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认 (${esc(m.default_effort)})</option>`];
     for (const ef of m.supported_efforts) {
-      options.push(`<option value="${ef}" ${currentEffort === ef ? 'selected' : ''}>强度: ${ef}</option>`);
+      options.push(`<option value="${esc(ef)}" ${currentEffort === ef ? 'selected' : ''}>强度: ${esc(ef)}</option>`);
     }
     if (m.can_disable_thinking) {
       options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
@@ -824,7 +966,7 @@ window.openModelEdit = (modelId) => {
     html += `
       <div class="zguide-field" style="margin-top: 12px;">
         <span class="zguide-label">思考强度 (Reasoning)</span>
-        <select class="input mono" style="width: 100%;" id="effort-${modelId}">${options.join('')}</select>
+        <select class="input mono" style="width: 100%;" id="effort-${esc(modelId)}">${options.join('')}</select>
       </div>`;
   } else {
     html += '<p class="muted" style="font-size: 12px; margin-top: 12px;">该模型不支持思考强度调节</p>';
@@ -859,6 +1001,12 @@ function initModelsAndCopy() {
     if (e.key === 'Escape' && !document.getElementById('model-edit-overlay')?.hidden) closeModelEdit();
   });
 
+  // 模型表格行内编辑按钮事件委托（data-edit-model，替代 inline onclick 字符串拼接注入风险）
+  document.getElementById('models-table-body')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-edit-model]');
+    if (btn) window.openModelEdit(btn.dataset.editModel);
+  });
+
   // 复制按钮事件代理
   document.querySelectorAll('[data-copy]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -884,7 +1032,102 @@ function initSettings() {
   const btnOpenLiveConsole = document.getElementById('btn-open-live-console');
   const radioCloseActions = document.querySelectorAll('input[name="close-action"]');
 
-  // 读取后端配置
+  // 用户是否已手动改动（防止异步加载的持久化配置覆盖用户正在编辑的值）
+  let portTouched = false;
+  let desensitizeTouched = false;
+  // 最近一次持久化到后端的端口值（用于保存时判断端口是否变化）
+  let savedPort = state.port;
+
+  // 端口 → 内存 state 与看板/侧边栏/端点联动展示
+  const applyPortToUi = (val) => {
+    state.port = val;
+    const dashPort = document.getElementById('dash-port');
+    if (dashPort) dashPort.textContent = String(val);
+    const sideBadge = document.getElementById('side-port-badge');
+    if (sideBadge) sideBadge.textContent = `:${val}`;
+    const endpoint = document.getElementById('endpoint-url');
+    if (endpoint) endpoint.value = `http://127.0.0.1:${val}/v1`;
+  };
+
+  // 脱敏开关 → 内存 state 与看板联动展示
+  const applyDesensitizeToUi = (val) => {
+    state.desensitize = val;
+    const txt = document.getElementById('dash-desensitize');
+    if (txt) {
+      txt.textContent = val ? '已启用' : '已禁用';
+      txt.className = val ? 'metric-value text-success' : 'metric-value muted';
+    }
+  };
+
+  // 统一构造完整设置对象（契约：save_app_settings 接收含 port/desensitize 的完整对象）
+  const buildSettingsPayload = () => {
+    const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
+    return {
+      close_action: currentClose,
+      auto_start_proxy: false,
+      show_debug_console: chkDebugConsole ? chkDebugConsole.checked : false,
+      port: state.port,
+      desensitize: state.desensitize
+    };
+  };
+
+  const persistSettings = async () => {
+    try {
+      await invokeTauri('save_app_settings', { settings: buildSettingsPayload() });
+      return true;
+    } catch (err) {
+      showToast(`保存设置失败: ${err.message || err}`, 'error');
+      return false;
+    }
+  };
+
+  // 用户手动改动追踪（先于异步配置加载绑定）
+  inputPort?.addEventListener('input', () => { portTouched = true; });
+  chkDesensitize?.addEventListener('change', () => { desensitizeTouched = true; });
+
+  chkDebugConsole?.addEventListener('change', async (e) => {
+    if (await persistSettings()) {
+      showToast(e.target.checked ? '已启用：启动服务时显示外部 CMD 调试窗口' : '已恢复默认：静默后台启动（无黑框）', 'success');
+    }
+  });
+
+  radioCloseActions.forEach(r => {
+    r.addEventListener('change', async () => {
+      if (r.checked) {
+        if (await persistSettings()) {
+          showToast(r.value === 'hide_to_tray' ? '已设置为：关闭窗口时最小化到系统托盘' : '已设置为：关闭窗口时停止服务并退出', 'success');
+        }
+      }
+    });
+  });
+
+  btnSave?.addEventListener('click', async () => {
+    const val = parseInt(inputPort.value, 10);
+    if (val >= 1024 && val <= 65535) {
+      const portChanged = val !== savedPort;
+      applyPortToUi(val);
+      if (await persistSettings()) {
+        savedPort = val;
+        // 服务运行中且端口有变化时不自动重启，仅提示用户手动重启生效
+        if (state.running && portChanged) {
+          showToast('端口已保存，重启服务后生效', 'info');
+        } else {
+          showToast(`端口已保存为 ${val}，请重启服务生效`, 'info');
+        }
+      }
+    } else {
+      showToast('端口范围必须在 1024-65535 之间', 'error');
+    }
+  });
+
+  chkDesensitize?.addEventListener('change', async (e) => {
+    applyDesensitizeToUi(e.target.checked);
+    if (await persistSettings()) {
+      showToast('脱敏设置已保存', 'success');
+    }
+  });
+
+  // 读取后端配置（放最后：先绑定监听，异步返回后不覆盖用户已手动改动的值）
   (async () => {
     try {
       const cfg = await invokeTauri('get_app_settings');
@@ -897,68 +1140,24 @@ function initSettings() {
         if (chkDebugConsole) {
           chkDebugConsole.checked = Boolean(cfg.show_debug_console);
         }
+        // 契约新增字段：port / desensitize（缺失或非法时保持前端默认值）
+        const cfgPort = Number(cfg.port);
+        if (Number.isFinite(cfgPort) && cfgPort >= 1024 && cfgPort <= 65535) {
+          savedPort = cfgPort;
+          if (!portTouched) {
+            if (inputPort) inputPort.value = String(cfgPort);
+            applyPortToUi(cfgPort);
+          }
+        }
+        if (typeof cfg.desensitize === 'boolean' && !desensitizeTouched) {
+          if (chkDesensitize) chkDesensitize.checked = cfg.desensitize;
+          applyDesensitizeToUi(cfg.desensitize);
+        }
       }
     } catch (e) {
       console.warn('获取设置失败:', e);
     }
   })();
-
-  chkDebugConsole?.addEventListener('change', async (e) => {
-    try {
-      const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
-      await invokeTauri('save_app_settings', {
-        settings: {
-          close_action: currentClose,
-          auto_start_proxy: false,
-          show_debug_console: e.target.checked
-        }
-      });
-      showToast(e.target.checked ? '已启用：启动服务时显示外部 CMD 调试窗口' : '已恢复默认：静默后台启动（无黑框）', 'success');
-    } catch (err) {
-      showToast(`保存设置失败: ${err.message || err}`, 'error');
-    }
-  });
-
-  radioCloseActions.forEach(r => {
-    r.addEventListener('change', async () => {
-      if (r.checked) {
-        try {
-          await invokeTauri('save_app_settings', {
-            settings: {
-              close_action: r.value,
-              auto_start_proxy: false,
-              show_debug_console: chkDebugConsole ? chkDebugConsole.checked : false
-            }
-          });
-          showToast(r.value === 'hide_to_tray' ? '已设置为：关闭窗口时最小化到系统托盘' : '已设置为：关闭窗口时停止服务并退出', 'success');
-        } catch (e) {
-          showToast(`保存设置失败: ${e.message || e}`, 'error');
-        }
-      }
-    });
-  });
-
-  btnSave?.addEventListener('click', () => {
-    const val = parseInt(inputPort.value, 10);
-    if (val >= 1024 && val <= 65535) {
-      state.port = val;
-      document.getElementById('dash-port').textContent = val;
-      document.getElementById('side-port-badge').textContent = `:${val}`;
-      document.getElementById('endpoint-url').value = `http://127.0.0.1:${val}/v1`;
-      showToast(`端口已保存为 ${val}，请重启服务生效`, 'info');
-    } else {
-      showToast('端口范围必须在 1024-65535 之间', 'error');
-    }
-  });
-
-  chkDesensitize?.addEventListener('change', (e) => {
-    state.desensitize = e.target.checked;
-    const txt = document.getElementById('dash-desensitize');
-    if (txt) {
-      txt.textContent = state.desensitize ? '已启用' : '已禁用';
-      txt.className = state.desensitize ? 'metric-value text-success' : 'metric-value muted';
-    }
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1221,8 @@ window.addEventListener('DOMContentLoaded', () => {
   initModelsAndCopy();
   initSettings();
   initLogs();
+  initConfirmDialog();
+  initAccountsDelegation();
 
   // 监听 Tauri 事件广播（托盘启动/停止/重启时即时响应）
   if (window.__TAURI__?.event?.listen) {

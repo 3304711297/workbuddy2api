@@ -481,6 +481,18 @@ print(response.choices[0].message.content)</code></pre>
     </main>
   </div>
 
+  <!-- 通用确认弹窗（Promise 风格，替代原生 confirm；遮罩模式与 model-edit-overlay 一致） -->
+  <div id="confirm-overlay" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3 id="confirm-title">确认操作</h3>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="btn btn-secondary btn-sm">取消</button>
+        <button id="confirm-ok" class="btn btn-primary btn-sm">确定</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 全局 Toast 提示容器 -->
   <div id="toast-container" class="toast-container"></div>
 

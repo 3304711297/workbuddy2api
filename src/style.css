@@ -801,7 +801,7 @@ body {
 .zguide-field { display: flex; flex-direction: column; gap: 3px; }
 .zguide-label { font-size: 11px; color: var(--text-secondary, #9aa3b2); letter-spacing: 0.5px; }
 .zguide-value {
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono, Consolas, monospace);
   font-weight: 700;
   font-size: 12.5px;
   color: var(--text-primary, #e8e8e8);
@@ -818,7 +818,7 @@ body {
 .zguide-value.copied { border-color: var(--success, #34d399); color: #34d399; }
 .zguide-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .zguide-chip {
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono, Consolas, monospace);
   font-weight: 700;
   font-size: 11.5px;
   color: var(--text-primary, #e8e8e8);
@@ -839,7 +839,6 @@ body {
 .section-title-row .btn { flex-shrink: 0; white-space: nowrap; }
 .section-title-row > div:first-child { min-width: 0; }
 
-.models-table { min-width: 740px; }
 .models-table th { white-space: nowrap; }
 .models-table th:nth-child(2), .models-table td:nth-child(2) { text-align: center; white-space: nowrap; }
 .models-table td:nth-child(1) { white-space: nowrap; }
@@ -848,7 +847,6 @@ body {
 .models-table td:nth-child(3) .input { width: 108px; }
 .models-table th:nth-child(4), .models-table td:nth-child(4) { white-space: nowrap; }
 .models-table td:nth-child(4) .input { width: 140px; }
-.models-table th:nth-child(6), .models-table td:nth-child(6) { white-space: nowrap; }
 
 /* 模型参数编辑弹窗与行内只读单元格 */
 .cell-edit {
@@ -892,3 +890,31 @@ body {
 
 /* hidden 属性会被 .modal-overlay 的 display:flex 覆盖，必须显式压回 */
 .modal-overlay[hidden] { display: none !important; }
+
+/* 确认弹窗正文 */
+.confirm-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* 全局未捕获错误兜底面板（与现有深色弹窗风格一致，置顶于所有层级之上） */
+.error-overlay { z-index: 4000; }
+.error-card { width: min(560px, 92vw); }
+.error-card .error-title { color: var(--danger); }
+.error-detail {
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  color: #f87171;
+  background: #0f1117;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0 0 4px;
+}
