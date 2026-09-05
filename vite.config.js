@@ -11,5 +11,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      // cargo 编译会写 src-tauri/target 下的 exe，Windows 上文件被锁会让 chokidar 报 EBUSY 崩溃
+      ignored: ['**/src-tauri/target/**'],
+    },
   },
 });
