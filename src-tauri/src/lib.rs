@@ -431,7 +431,10 @@ pub fn run_app() {
             commands::proxy_health,
             commands::proxy_test_chat,
             // 日志目录打开（前端 invoke）
-            commands::open_logs_dir
+            commands::open_logs_dir,
+            // 用量统计聚合与版本更新检查（前端 invoke）
+            commands::usage_summary,
+            commands::check_app_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

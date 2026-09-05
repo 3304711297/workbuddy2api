@@ -263,6 +263,7 @@ PASSTHROUGH_BODY_KEYS = {
 
 app = FastAPI(title="codebuddy2openai", version="2.0")
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
+                "usage_log": None,
                 "desensitize": False}  # cred: CredentialManager | None
 
 
@@ -331,6 +332,55 @@ def _log(msg: str):
 def _truncate(s: str, n: int = 80) -> str:
     s = str(s).replace("\n", " ").strip()
     return s[:n] + ("…" if len(s) > n else "")
+
+
+# ---------------------------------------------------------------------------
+# 用量统计（--usage-log / 环境变量 CODEBUDDY2OPENAI_USAGE_LOG）
+# 每个聊天请求（流式与非流式）完成时追加一行 JSONL，供桌面端 usage_summary 聚合。
+# 铁律：统计写盘整体 try/except 静默失败，任何异常不得影响请求本身的响应。
+# ---------------------------------------------------------------------------
+
+_USAGE_LOCK = threading.Lock()
+
+
+def _usage_int(v) -> int | None:
+    """token 数规范化：可转 int 的返回 int，缺失/非法一律 None（契约允许 null）。"""
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_usage(model: str, ok: bool, t0: float, *,
+                  input_tokens=None, output_tokens=None,
+                  ttft_ms=None, error=None):
+    """向 CONFIG['usage_log'] 追加一行用量统计（JSONL，append 模式，每行写完即落盘）。
+
+    行格式：{"ts": <epoch毫秒>, "model": str, "ok": bool, "input_tokens": int|null,
+             "output_tokens": int|null, "latency_ms": int, "ttft_ms": int|null,
+             "error": str|null}
+    未启用 --usage-log 时直接丢弃；写入任何异常一律静默吞掉，绝不影响请求响应。
+    """
+    path = CONFIG.get("usage_log")
+    if not path:
+        return
+    try:
+        rec = {
+            "ts": int(time.time() * 1000),
+            "model": model,
+            "ok": bool(ok),
+            "input_tokens": _usage_int(input_tokens),
+            "output_tokens": _usage_int(output_tokens),
+            "latency_ms": int((time.time() - t0) * 1000) if t0 else 0,
+            "ttft_ms": _usage_int(ttft_ms),
+            "error": (_truncate(str(error), 200) if error else None),
+        }
+        with _USAGE_LOCK:  # 并发请求下保证逐行完整追加
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                f.flush()  # 每行写完立即刷出，读取方（桌面端）可立即看到
+    except Exception:
+        pass  # 统计失败不影响主流程
 
 
 def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
@@ -463,13 +513,26 @@ async def chat_completions(request: Request,
                     _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
                     _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}")
                     raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
-                collected = await _collect_stream(r)
-    except HTTPException:
+                collected, ttft_ms = await _collect_stream(r, t0)
+    except HTTPException as e:
+        # 上游错误（非 200 等）：记一条失败统计（ok=false）后原样抛出，不改变既有错误语义
+        _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
         raise
     except httpx.HTTPError as e:
         _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
+        _record_usage(model_name, False, t0, error=f"upstream error: {e}")
         raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
+    except Exception as e:
+        # 兜底：未预期异常同样记失败统计，再原样抛出
+        _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
+        raise
     _log_finish(model_name, t0, collected, rid)
+    # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
+    _u = collected.get("usage") or {}
+    _record_usage(model_name, True, t0,
+                  input_tokens=_u.get("prompt_tokens"),
+                  output_tokens=_u.get("completion_tokens"),
+                  ttft_ms=ttft_ms)
     return JSONResponse(content=collected)
 
 
@@ -508,12 +571,15 @@ def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
     _log(f"{prefix}── RESPONSE BODY ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
 
 
-async def _collect_stream(response: httpx.Response) -> dict:
+async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[dict, int | None]:
     """消费后端的 OpenAI SSE 流，聚合成单个非流式 chat.completion 对象。
 
     合并所有 chunk 的 delta（content / tool_calls），并取 usage / finish_reason。
+    返回 (聚合结果, ttft_ms)：ttft_ms 为首个含内容 delta 到达时刻距 t0 的毫秒数
+    （t0 为 0 或全程无内容时为 None），供用量统计复用。
     """
     content_parts: list[str] = []
+    ttft_ms: int | None = None
     # tool_calls: index -> {id, name, arguments(分片拼接)}
     tool_calls: dict[int, dict] = {}
     model: str | None = None
@@ -539,6 +605,8 @@ async def _collect_stream(response: httpx.Response) -> dict:
                 finish_reason = choice["finish_reason"]
             delta = choice.get("delta") or {}
             if delta.get("content"):
+                if ttft_ms is None and t0:
+                    ttft_ms = int((time.time() - t0) * 1000)  # 首个含内容 chunk 即 TTFT
                 content_parts.append(delta["content"])
             for tc in delta.get("tool_calls") or []:
                 idx = tc.get("index", 0)
@@ -571,7 +639,7 @@ async def _collect_stream(response: httpx.Response) -> dict:
         "choices": [{"index": 0, "message": message,
                      "finish_reason": finish_reason or "stop"}],
         "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    }
+    }, ttft_ms
 
 
 def _safe_err_raw(raw: bytes, status: int) -> dict:
@@ -592,12 +660,14 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     tool_names: list[str] = []
     usage: dict = {}
     saw_filter = False
+    ttft_ms: int | None = None   # 首个含内容 chunk 距 t0 的毫秒数（TTFT）
+    err_msg: str | None = None   # 上游错误摘要（None 表示流正常结束）
     buf = b""
     raw_parts: list[bytes] = []   # 累积完整原始 SSE
     prefix = f"[{rid}] " if rid else ""
 
     def _feed(chunk: bytes):
-        nonlocal finish_reason, saw_filter, buf
+        nonlocal finish_reason, saw_filter, buf, ttft_ms
         # 行缓冲解析：把累计的 chunk 按 data: 行切出来统计
         buf += chunk
         while b"\n" in buf:
@@ -617,7 +687,11 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             for ch in obj.get("choices") or []:
                 if ch.get("finish_reason"):
                     finish_reason = ch["finish_reason"]
-                for tc in (ch.get("delta") or {}).get("tool_calls") or []:
+                delta = ch.get("delta") or {}
+                # 首个含内容的 delta 即 TTFT（与桌面端 test_chat 的口径一致）
+                if ttft_ms is None and t0 and delta.get("content"):
+                    ttft_ms = int((time.time() - t0) * 1000)
+                for tc in delta.get("tool_calls") or []:
                     nm = (tc.get("function") or {}).get("name")
                     if nm:
                         tool_names.append(nm)
@@ -636,6 +710,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                     err = await r.aread()
                     _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err.decode('utf-8','replace'),200)}")
                     _log(f"{prefix}── ERROR BODY ──\n{err.decode('utf-8','replace')}")
+                    # 上游错误：先记一条失败统计（tokens 未知填 null）再返回错误事件
+                    _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
                     yield _err_event(err, r.status_code)
                     return
                 async for chunk in r.aiter_bytes():
@@ -645,6 +721,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                         yield chunk
     except httpx.HTTPError as e:
         _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+        err_msg = f"upstream error: {e}"
         yield _err_event(str(e).encode(), 502)
 
     # 流结束：输出完成日志
@@ -655,6 +732,12 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整原始 SSE（后端返回的全部内容）
     _log(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
+    # 用量统计：正常结束 ok=true；上游错误 ok=false（失败也记一行）。
+    # _record_usage 内部整体 try/except 静默失败，绝不影响已返回的流式响应。
+    _record_usage(model_name, ok=(err_msg is None), t0=t0,
+                  input_tokens=usage.get("prompt_tokens"),
+                  output_tokens=usage.get("completion_tokens"),
+                  ttft_ms=ttft_ms, error=err_msg)
 
 
 def _safe_err(r: httpx.Response) -> dict:
@@ -712,6 +795,10 @@ def main():
     ap.add_argument("--log", default=None, metavar="PATH",
                     help="开启日志并写到该文件（如 --log converter.log 或 --log /tmp/cb.log）。"
                          "不传则不记日志。")
+    ap.add_argument("--usage-log", default=None, metavar="PATH",
+                    help="开启用量统计：每个聊天请求（流式/非流式）完成后向该文件追加一行 JSONL"
+                         "（ts/model/ok/input_tokens/output_tokens/latency_ms/ttft_ms/error）。"
+                         "不传则不记录。")
     ap.add_argument("--desensitize", action="store_true",
                     help="启用脱敏：对 system 消息里的合规模板敏感词（DoS/exploit/credential 等）"
                          "插入零宽空格，缓解被后端内容审核误拦。默认关闭。")
@@ -722,6 +809,9 @@ def main():
     CONFIG["desensitize"] = args.desensitize
     # --log 直接指定文件路径即开启；不传则不记
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
+    # --usage-log 指定统计文件即开启；环境变量 CODEBUDDY2OPENAI_USAGE_LOG 同样生效
+    # （与 --log / CODEBUDDY2OPENAI_LOG 风格一致）
+    CONFIG["usage_log"] = args.usage_log if args.usage_log else os.environ.get("CODEBUDDY2OPENAI_USAGE_LOG")
     af = find_auth_file()
     CONFIG["cred"] = CredentialManager(af) if af else None
 
@@ -736,6 +826,8 @@ def main():
         sys.stderr.write("   鉴权已启用（API key 已设置）\n")
     if CONFIG["log_path"]:
         sys.stderr.write(f"   日志      : {CONFIG['log_path']}\n")
+    if CONFIG["usage_log"]:
+        sys.stderr.write(f"   用量统计  : {CONFIG['usage_log']}\n")
     if args.desensitize:
         sys.stderr.write("   脱敏      : 已启用（system 合规词零宽处理）\n")
     sys.stderr.write("按 Ctrl+C 退出。\n\n")

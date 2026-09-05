@@ -986,6 +986,10 @@ pub fn proxy_start(
     if desensitize {
         cmd.arg("--desensitize");
     }
+    // 用量统计：每次聊天请求完成后由 converter 向该文件追加一行 JSONL，供 usage_summary 聚合
+    let usage_dir = local_app_dir().join("usage");
+    let _ = std::fs::create_dir_all(&usage_dir);
+    cmd.arg("--usage-log").arg(usage_dir.join("usage.jsonl"));
 
     // Windows 平台静默模式设置：如果不开启 debug console，则彻底隐藏黑框
     let show_console = if let Some(cfg_state) = app.try_state::<crate::AppConfigState>() {
@@ -1295,4 +1299,325 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
         ttft_ms,
         error: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 用量统计（usage_summary）：聚合 converter 每请求写出的 JSONL 用量文件
+// ---------------------------------------------------------------------------
+
+/// 用量统计文件路径：%LOCALAPPDATA%\codebuddy2openai\usage\usage.jsonl（proxy_start 传给 converter）
+fn usage_log_path() -> PathBuf {
+    local_app_dir().join("usage").join("usage.jsonl")
+}
+
+/// 单行用量记录（与 converter.py `_record_usage` 的 JSONL 字段一一对应）
+#[derive(Deserialize, Debug)]
+struct UsageRecord {
+    ts: i64,
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    input_tokens: Option<i64>,
+    #[serde(default)]
+    output_tokens: Option<i64>,
+    #[serde(default)]
+    latency_ms: i64,
+    #[serde(default)]
+    ttft_ms: Option<i64>,
+}
+
+/// 读取用量文件字节内容；超过 10MB 时只读末尾 10MB 并丢弃首个不完整行（避免解析半行）。
+/// 文件不存在 / 读取失败返回空（聚合结果即全零结构，符合前端契约）。
+fn read_usage_tail() -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(usage_log_path()) else {
+        return Vec::new();
+    };
+    const MAX: u64 = 10 * 1024 * 1024;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut buf = Vec::with_capacity(len.min(MAX) as usize);
+    if len > MAX {
+        if f.seek(SeekFrom::End(-(MAX as i64))).is_err() || f.read_to_end(&mut buf).is_err() {
+            return Vec::new();
+        }
+        // 从下一个换行符起取（起点极可能落在某行中间）
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            buf.drain(..=pos);
+        } else {
+            buf.clear();
+        }
+    } else if f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    buf
+}
+
+/// 聚合用量记录（纯函数，便于单测）：
+/// - today 按「本地今日零点」epoch 毫秒（local_midnight_ms）切分；
+/// - hourly 按 UTC 整点分桶（前端按本地时区渲染标签），固定最近 48 个含空桶；
+/// - TPS = Σ输出tokens×1000 / Σ(latency−ttft)，仅统计 ok 且 ttft 有效的样本。
+fn aggregate_usage(records: &[UsageRecord], now_utc_ms: i64, local_midnight_ms: i64) -> serde_json::Value {
+    let (mut t_req, mut t_ok, mut t_fail, mut t_in, mut t_out) = (0i64, 0i64, 0i64, 0i64, 0i64);
+    let (mut d_req, mut d_ok, mut d_fail, mut d_in, mut d_out) = (0i64, 0i64, 0i64, 0i64, 0i64);
+    let mut lat_sum = 0i64;
+    let mut tps_out_sum = 0i64;
+    let mut tps_dur_sum = 0i64;
+    let mut tps_samples = 0i64;
+
+    const HOUR_MS: i64 = 3_600_000;
+    let cur_bucket = now_utc_ms.div_euclid(HOUR_MS);
+    let mut buckets = vec![0i64; 48];          // 每桶请求数
+    let mut bucket_out = vec![0i64; 48];       // 每桶输出 tokens
+
+    for r in records {
+        t_req += 1;
+        if r.ok { t_ok += 1 } else { t_fail += 1 }
+        let i = r.input_tokens.unwrap_or(0);
+        let o = r.output_tokens.unwrap_or(0);
+        t_in += i;
+        t_out += o;
+        lat_sum += r.latency_ms;
+        if r.ok
+            && r.ttft_ms.is_some()
+            && r.latency_ms > r.ttft_ms.unwrap()
+            && r.output_tokens.is_some()
+        {
+            tps_out_sum += o;
+            tps_dur_sum += r.latency_ms - r.ttft_ms.unwrap();
+            tps_samples += 1;
+        }
+        if r.ts >= local_midnight_ms {
+            d_req += 1;
+            if r.ok { d_ok += 1 } else { d_fail += 1 }
+            d_in += i;
+            d_out += o;
+        }
+        // 最近 48 个整点桶内的记录才进趋势图
+        let bucket = r.ts.div_euclid(HOUR_MS);
+        if bucket > cur_bucket - 48 && bucket <= cur_bucket {
+            let idx = (bucket - (cur_bucket - 47)) as usize;
+            buckets[idx] += 1;
+            bucket_out[idx] += o;
+        }
+    }
+
+    let hourly: Vec<serde_json::Value> = (0..48)
+        .map(|i| {
+            serde_json::json!({
+                "ts": (cur_bucket - 47 + i) * HOUR_MS,
+                "requests": buckets[i as usize],
+                "output_tokens": bucket_out[i as usize],
+            })
+        })
+        .collect();
+
+    let tps = if tps_dur_sum > 0 { tps_out_sum as f64 * 1000.0 / tps_dur_sum as f64 } else { 0.0 };
+    let avg_latency = if t_req > 0 { lat_sum / t_req } else { 0 };
+
+    serde_json::json!({
+        "today": {
+            "requests": d_req, "ok": d_ok, "failed": d_fail,
+            "input_tokens": d_in, "output_tokens": d_out,
+        },
+        "overall": {
+            "requests": t_req, "ok": t_ok, "failed": t_fail,
+            "input_tokens": t_in, "output_tokens": t_out,
+            "avg_latency_ms": avg_latency, "tps": tps, "tps_samples": tps_samples,
+        },
+        "hourly": hourly,
+    })
+}
+
+#[tauri::command]
+pub fn usage_summary() -> Result<serde_json::Value, String> {
+    let bytes = read_usage_tail();
+    let text = String::from_utf8_lossy(&bytes);
+    let records: Vec<UsageRecord> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    let now_utc_ms = chrono::Utc::now().timestamp_millis();
+    // 本地今日零点的 epoch 毫秒（用 naive 日期重建本地时间，避免直接减 offset 的歧义）
+    let local_midnight_ms = {
+        use chrono::{Datelike, Local, TimeZone};
+        let d = Local::now().date_naive();
+        Local::with_ymd_and_hms(&Local, d.year(), d.month(), d.day(), 0, 0, 0)
+            .single()
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(0)
+    };
+    Ok(aggregate_usage(&records, now_utc_ms, local_midnight_ms))
+}
+
+// ---------------------------------------------------------------------------
+// 更新检查（check_app_update）：轻量查询 GitHub Release，不做自动更新
+// ---------------------------------------------------------------------------
+
+/// 更新检查结果（前端契约：失败不打断流程，返回 update_available=false + error 描述）
+#[derive(Serialize)]
+pub struct AppUpdateInfo {
+    current: String,
+    latest: Option<String>,
+    update_available: bool,
+    release_url: Option<String>,
+    error: Option<String>,
+}
+
+/// 版本比较：去 v 前缀后按 '.' 分段数值比较，段数不齐以 0 补齐
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |v: &str| -> Vec<u64> {
+        v.trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (parse(a), parse(b));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        match x.cmp(&y) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+const RELEASE_API: &str = "https://api.github.com/repos/3304711297/codebuddy2openai/releases/latest";
+
+/// 拉取最新 release 元数据；proxy 传 Some 时走显式代理
+async fn fetch_latest_release(proxy: Option<&str>) -> Result<serde_json::Value, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent("codebuddy2openai-gui")
+        .timeout(Duration::from_secs(10));
+    if let Some(p) = proxy {
+        builder = builder.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?);
+    }
+    let resp = builder
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(RELEASE_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    // 先直连（reqwest 默认吃环境变量代理），失败再走本机回退代理 127.0.0.1:3067（用户环境惯例）
+    let payload = match fetch_latest_release(None).await {
+        Ok(v) => Ok(v),
+        Err(_) => fetch_latest_release(Some("http://127.0.0.1:3067")).await,
+    };
+    Ok(match payload {
+        Ok(v) => {
+            let tag = v
+                .get("tag_name")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let release_url = v
+                .get("html_url")
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_string());
+            if tag.is_empty() {
+                AppUpdateInfo {
+                    current,
+                    latest: None,
+                    update_available: false,
+                    release_url,
+                    error: Some("release 数据缺少 tag_name".into()),
+                }
+            } else {
+                let latest = tag.trim_start_matches('v').to_string();
+                let update_available = version_cmp(&latest, &current) == std::cmp::Ordering::Greater;
+                AppUpdateInfo {
+                    current,
+                    latest: Some(latest),
+                    update_available,
+                    release_url,
+                    error: None,
+                }
+            }
+        }
+        Err(e) => AppUpdateInfo {
+            current,
+            latest: None,
+            update_available: false,
+            release_url: None,
+            error: Some(e),
+        },
+    })
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    fn rec(ts: i64, ok: bool, out: Option<i64>, latency: i64, ttft: Option<i64>) -> UsageRecord {
+        UsageRecord {
+            ts,
+            ok,
+            input_tokens: Some(10),
+            output_tokens: out,
+            latency_ms: latency,
+            ttft_ms: ttft,
+        }
+    }
+
+    #[test]
+    fn tps_buckets_and_today_split() {
+        let now: i64 = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+        let cur_hour_bucket = now.div_euclid(3_600_000);
+        let h0 = cur_hour_bucket * 3_600_000;
+        let records = vec![
+            rec(h0, true, Some(100), 1_000, Some(200)),               // 有效样本: dur 800ms
+            rec(h0, true, Some(50), 500, None),                       // ttft 缺失 → 不计 TPS
+            rec(h0, false, Some(999), 100, Some(10)),                 // 失败 → 不计 TPS
+            rec(h0 - 3_600_000, true, Some(300), 2_000, Some(500)),   // 上一小时: dur 1500ms
+        ];
+        // local_midnight = h0 → 全部计入 today
+        let v = aggregate_usage(&records, now, h0);
+        let overall = &v["overall"];
+        assert_eq!(overall["requests"], 4);
+        assert_eq!(overall["ok"], 3);
+        assert_eq!(overall["failed"], 1);
+        assert_eq!(overall["tps_samples"], 2);
+        // TPS = (100+300)*1000 / (800+1500) ≈ 173.91
+        let tps = overall["tps"].as_f64().unwrap();
+        assert!((tps - 400_000.0 / 2_300.0).abs() < 0.01, "tps={tps}");
+        let avg = overall["avg_latency_ms"].as_i64().unwrap();
+        assert_eq!(avg, (1_000 + 500 + 100 + 2_000) / 4);
+        let hourly = v["hourly"].as_array().unwrap();
+        assert_eq!(hourly.len(), 48);
+        assert_eq!(hourly[47]["ts"].as_i64().unwrap(), h0);
+        assert_eq!(hourly[47]["requests"], 3);
+        assert_eq!(hourly[47]["output_tokens"], 100 + 50 + 999); // 失败行 tokens 仍计入总量（不进 TPS）
+        assert_eq!(hourly[46]["ts"].as_i64().unwrap(), h0 - 3_600_000);
+        assert_eq!(hourly[46]["output_tokens"], 300);
+        assert_eq!(hourly[0]["requests"], 0); // 空桶零填充
+        assert_eq!(v["today"]["requests"], 3); // 上一小时记录（ts < h0=local_midnight）不算今天
+
+        // local_midnight 晚于该记录 → 不计 today，仍计 overall
+        let v2 = aggregate_usage(&records[..1], now, h0 + 1);
+        assert_eq!(v2["today"]["requests"], 0);
+        assert_eq!(v2["overall"]["requests"], 1);
+    }
+
+    #[test]
+    fn version_compare() {
+        use std::cmp::Ordering;
+        assert_eq!(version_cmp("0.2.1", "0.2.0"), Ordering::Greater);
+        assert_eq!(version_cmp("v0.2.10", "0.2.9"), Ordering::Greater);
+        assert_eq!(version_cmp("0.2.0", "0.2.0"), Ordering::Equal);
+        assert_eq!(version_cmp("0.1.9", "0.2.0"), Ordering::Less);
+        assert_eq!(version_cmp("0.2", "0.2.0"), Ordering::Equal); // 段数不齐补 0
+    }
 }
