@@ -22,8 +22,10 @@ codebuddy2openai — 把 CodeBuddy / WorkBuddy 的订阅暴露成标准 OpenAI �
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -66,9 +68,35 @@ def auth_dirs() -> list[Path]:
     return [xdg / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
 
 
+def _accounts_file() -> Path:
+    """accounts.json 路径，与桌面端 Rust local_app_dir() 同源（调用时读环境变量，便于测试）。"""
+    base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+    return Path(base) / "codebuddy2openai" / "accounts.json"
+
+
+def _load_active_session(cfg: dict) -> tuple[str, dict]:
+    """从 accounts.json 结构中取活跃账号会话，返回 (uid, session)。
+
+    结构不符/缺失时抛 ValueError（消息即对外 error 文案）。
+    accounts.json 形如 {"active_uid": "<uid>", "accounts": {"<uid>": {auth:{...}, account:{...}}}}。
+    """
+    active_uid = cfg.get("active_uid") or ""
+    accounts = cfg.get("accounts")
+    if not active_uid or not isinstance(accounts, dict):
+        raise ValueError("accounts.json 缺少 active_uid 或 accounts 结构")
+    session = accounts.get(active_uid)
+    if not isinstance(session, dict):
+        raise ValueError(f"accounts.json 中不存在活跃账号 {active_uid} 的会话")
+    return active_uid, session
+
+
 def find_auth_file() -> Path | None:
+    # 优先使用桌面客户端同步维护的 workbuddy-desktop.info
     for d in auth_dirs():
         if d.is_dir():
+            desktop_info = d / "workbuddy-desktop.info"
+            if desktop_info.is_file():
+                return desktop_info
             for f in sorted(d.glob("*.info")):
                 return f
     return None
@@ -79,7 +107,7 @@ def find_auth_file() -> Path | None:
 # ---------------------------------------------------------------------------
 
 class CredentialManager:
-    """从 auth 文件读取凭据；token 临近过期时自动刷新并回写。"""
+    """从 auth 文件或 accounts.json 读取凭据；token 临近过期时自动刷新并回写。"""
 
     def __init__(self, path: Path):
         self.path = path
@@ -88,15 +116,35 @@ class CredentialManager:
         self._mtime: float = 0.0
 
     def _read_raw(self) -> dict:
+        # 优先从 accounts.json 读取当前活跃会话（与桌面端多账号状态无缝对齐）
+        try:
+            acc_path = _accounts_file()
+            if acc_path.is_file():
+                cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+                _, session = _load_active_session(cfg)
+                if session and isinstance(session, dict):
+                    return session
+        except Exception:
+            pass
+        # 回退：从 .info 凭据文件读取
         with open(self.path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     def _load_if_stale(self):
-        """若文件 mtime 变了（外部刷新过），重新加载缓存。"""
+        """若 accounts.json 或 auth 文件 mtime 变了（外部刷新或切换账号），重新加载缓存。"""
+        mtimes = []
         try:
-            mt = self.path.stat().st_mtime
+            acc_path = _accounts_file()
+            if acc_path.is_file():
+                mtimes.append(acc_path.stat().st_mtime)
         except OSError:
-            return
+            pass
+        try:
+            if self.path and self.path.is_file():
+                mtimes.append(self.path.stat().st_mtime)
+        except OSError:
+            pass
+        mt = max(mtimes) if mtimes else 0.0
         if self._cached is None or mt != self._mtime:
             self._cached = self._read_raw()
             self._mtime = mt
@@ -106,6 +154,13 @@ class CredentialManager:
         if self._cached is None:
             raise RuntimeError(f"无法读取 auth 文件：{self.path}")
         return self._cached
+
+    def get_active_session(self) -> dict:
+        """获取当前活跃会话字典（包含 auth 与 account 节点）。"""
+        with self._lock:
+            if self._is_expired():
+                self._refresh()
+            return self._session()
 
     def _is_expired(self) -> bool:
         s = self._session()
@@ -140,12 +195,36 @@ class CredentialManager:
             new_auth["refreshExpiresAt"] = int(time.time() * 1000) + new_auth["refreshExpiresIn"] * 1000
         s["auth"] = new_auth
         # 原子写回
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(s, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+        if self.path:
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(s, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+
+        # 同步回写 accounts.json 中的活跃账号
+        try:
+            acc_path = _accounts_file()
+            if acc_path.is_file():
+                cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+                active_uid = cfg.get("active_uid")
+                if active_uid and active_uid in cfg.get("accounts", {}):
+                    cfg["accounts"][active_uid]["auth"] = new_auth
+                    tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
+                    with open(tmp_acc, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_acc, acc_path)
+        except Exception:
+            pass
+
         self._cached = s
-        self._mtime = self.path.stat().st_mtime
+        mtimes = [self.path.stat().st_mtime] if self.path and self.path.is_file() else []
+        try:
+            acc_p = _accounts_file()
+            if acc_p.is_file():
+                mtimes.append(acc_p.stat().st_mtime)
+        except OSError:
+            pass
+        self._mtime = max(mtimes) if mtimes else 0.0
 
     def _build_headers_from(self, auth: dict, account: dict) -> dict:
         domain = auth.get("domain") or DEFAULT_DOMAIN
@@ -262,8 +341,9 @@ PASSTHROUGH_BODY_KEYS = {
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="codebuddy2openai", version="2.0")
-CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
-                "usage_log": None,
+CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
+                "cred": None, "log_path": None, "log_level": "info",
+                "usage_log": None, "unsafe_expose": False,
                 "desensitize": False}  # cred: CredentialManager | None
 
 
@@ -273,6 +353,17 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
 
 # 仅允许本机回环主机名（Host 头可带端口后缀，IPv6 允许方括号形式）
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _is_loopback_host(host: str) -> bool:
+    """判定是否为本机回环主机名或 IP。"""
+    h = (host or "").strip().lower()
+    if h in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
 def _extract_hostname(host_header: str) -> str:
@@ -287,19 +378,22 @@ def _extract_hostname(host_header: str) -> str:
 
 
 class LocalHostOnlyMiddleware(BaseHTTPMiddleware):
-    """校验 Host 头，拒绝非本机回环地址的请求，防 DNS rebinding。
+    """校验 Host 头，防 DNS rebinding。
 
+    当绑定在回环地址时强制限制 Host 必须为回环主机名（防浏览器端 DNS rebinding 攻击）。
     对 /health 与 /v1/* 全部生效；GUI/CLI 正常用法 Host 均为本机回环，无行为变化。
     """
 
     async def dispatch(self, request: Request, call_next):
-        host_header = request.headers.get("host") or ""
-        if _extract_hostname(host_header) not in _ALLOWED_HOSTS:
-            return JSONResponse(
-                status_code=403,
-                content={"error": {"message": f"forbidden host: {host_header}",
-                                   "type": "invalid_host"}},
-            )
+        bind_host = CONFIG.get("host", "127.0.0.1")
+        if _is_loopback_host(bind_host):
+            host_header = request.headers.get("host") or ""
+            if _extract_hostname(host_header) not in _ALLOWED_HOSTS:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": {"message": f"forbidden host: {host_header}",
+                                       "type": "invalid_host"}},
+                )
         return await call_next(request)
 
 
@@ -313,12 +407,33 @@ app.add_middleware(LocalHostOnlyMiddleware)
 _LOG_LOCK = threading.Lock()
 
 
-def _log(msg: str):
-    """写一行日志到 CONFIG['log_path'] 指定的文件（追加，带时间戳）。未设置则丢弃。"""
+def _sanitize_log_text(text: str) -> str:
+    """脱敏日志中的 Token、密钥和敏感认证头。"""
+    text = re.sub(r'(Bearer\s+)[A-Za-z0-9_\-\.]{8,}', r'\1***', text)
+    text = re.sub(
+        r'("?(?:accessToken|refreshToken|token|api[_-]?key|password)"?\s*:\s*")[^"]+(")',
+        r'\1***\2',
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
+def _log(msg: str, level: str = "info"):
+    """写一行日志到 CONFIG['log_path'] 指定的文件（追加，带时间戳）。
+
+    支持 info / debug / trace 三级过滤与敏感字段自动脱敏。
+    未设置 log_path 则直接丢弃。
+    """
     path = CONFIG.get("log_path")
     if not path:
         return
-    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
+    current_level = (CONFIG.get("log_level") or "info").lower()
+    level_order = {"info": 1, "debug": 2, "trace": 3}
+    if level_order.get(level.lower(), 1) > level_order.get(current_level, 1):
+        return
+    clean_msg = _sanitize_log_text(msg)
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [{level.upper()}] {clean_msg}\n"
     try:
         with _LOG_LOCK:
             with open(path, "a", encoding="utf-8") as f:
@@ -384,13 +499,14 @@ def _record_usage(model: str, ok: bool, t0: float, *,
 
 
 def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
-    key = CONFIG["api_key"]
+    key = CONFIG.get("api_key")
     if not key:
         return
     token = ""
-    if authorization and authorization.startswith("Bearer "):
+    # 若直接以 Python 函数调用（未走 FastAPI 依赖注入），参数默认值可能为 Header 对象
+    if authorization and isinstance(authorization, str) and authorization.startswith("Bearer "):
         token = authorization[7:].strip()
-    if not token and x_api_key:
+    if not token and x_api_key and isinstance(x_api_key, str):
         token = x_api_key
     if token != key:
         raise HTTPException(status_code=401, detail={"error": {"message": "invalid api key", "type": "auth_error"}})
@@ -422,35 +538,12 @@ def health():
 # 积分数据源端点（GET /api/usage_summary —— Hermes token-stats 配额看板数据源）
 # 返回结构与桌面端 Rust UsageSummary 完全对齐（uid/nickname/total/remain/used/
 # is_paid_user/packages）；任何失败一律返回 {"error": "..."}，由调用方优雅降级。
-# 无需鉴权：Host 中间件已把全部路由限制在本机回环，与 /health 同一安全边界。
 # ---------------------------------------------------------------------------
 
 _BILLING_URL = f"{BACKEND}/billing/meter/get-user-resource-summary"
 
 # 测试注入点：pytest 通过 monkeypatch 注入 httpx.MockTransport；生产恒为 None
 _BILLING_TRANSPORT_OVERRIDE = None
-
-
-def _accounts_file() -> Path:
-    """accounts.json 路径，与桌面端 Rust local_app_dir() 同源（调用时读环境变量，便于测试）。"""
-    base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-    return Path(base) / "codebuddy2openai" / "accounts.json"
-
-
-def _load_active_session(cfg: dict) -> tuple[str, dict]:
-    """从 accounts.json 结构中取活跃账号会话，返回 (uid, session)。
-
-    结构不符/缺失时抛 ValueError（消息即对外 error 文案）。
-    accounts.json 形如 {"active_uid": "<uid>", "accounts": {"<uid>": {auth:{...}, account:{...}}}}。
-    """
-    active_uid = cfg.get("active_uid") or ""
-    accounts = cfg.get("accounts")
-    if not active_uid or not isinstance(accounts, dict):
-        raise ValueError("accounts.json 缺少 active_uid 或 accounts 结构")
-    session = accounts.get(active_uid)
-    if not isinstance(session, dict):
-        raise ValueError(f"accounts.json 中不存在活跃账号 {active_uid} 的会话")
-    return active_uid, session
 
 
 def _parse_usage_payload(data: dict) -> dict:
@@ -527,31 +620,52 @@ async def _fetch_billing_usage(access_token: str, uid: str, *, transport=None) -
 
 
 @app.get("/api/usage_summary")
-async def api_usage_summary():
+async def api_usage_summary(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key"),
+):
     """当前活跃账号的积分概览（Hermes token-stats 插件对接此端点）。"""
-    try:
-        path = _accounts_file()
-        if not path.is_file():
-            return {"error": f"accounts.json 不存在: {path}"}
-        cfg = json.loads(path.read_text(encoding="utf-8"))
-        uid, session = _load_active_session(cfg)
-    except json.JSONDecodeError as e:
-        return {"error": f"accounts.json 解析失败: {e}"}
-    except (OSError, ValueError) as e:
-        return {"error": f"读取活跃账号失败: {e}"}
+    _check_auth(authorization, x_api_key)
 
-    auth = session.get("auth") or {}
-    account = session.get("account") or {}
-    token = auth.get("accessToken")
+    token = ""
+    uid = ""
+    nickname = ""
+
+    cred = CONFIG.get("cred")
+    if cred is not None:
+        try:
+            session = cred.get_active_session()
+            auth = session.get("auth") or {}
+            account = session.get("account") or {}
+            token = auth.get("accessToken") or ""
+            uid = account.get("uid") or ""
+            nickname = account.get("nickname") or ""
+        except Exception as e:
+            return {"error": f"读取活跃凭据失败: {e}"}
+
     if not token:
-        return {"error": "活跃账号缺少 accessToken（请在桌面控制台重新授权或刷新 Token）"}
-    nickname = account.get("nickname") or ""
+        try:
+            path = _accounts_file()
+            if not path.is_file():
+                return {"error": f"accounts.json 不存在: {path}"}
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            uid, session = _load_active_session(cfg)
+        except json.JSONDecodeError as e:
+            return {"error": f"accounts.json 解析失败: {e}"}
+        except (OSError, ValueError) as e:
+            return {"error": f"读取活跃账号失败: {e}"}
+
+        auth = session.get("auth") or {}
+        account = session.get("account") or {}
+        token = auth.get("accessToken")
+        if not token:
+            return {"error": "活跃账号缺少 accessToken（请在桌面控制台重新授权或刷新 Token）"}
+        nickname = account.get("nickname") or ""
 
     summary = await _fetch_billing_usage(token, uid)
     if "error" in summary:
         return summary
-    # token 过期时腾讯侧会以 code!=0/HTTP 401 返回，已归一为上面的 error 路径；
-    # 此处不做自动刷新（accounts.json 由桌面端 Rust 侧管理，避免并发写竞争）
+    # token 过期时腾讯侧会以 code!=0/HTTP 401 返回，已归一为上面的 error 路径
     return {"uid": uid, "nickname": nickname, **summary}
 
 
@@ -628,7 +742,7 @@ async def chat_completions(request: Request,
          + (f" | tools={tool_names}" if tool_names else "")
          + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
     # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）
-    _log(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}")
+    _log(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}", level="trace")
 
     headers = cred.get_headers()
     url = f"{BACKEND}/v2/chat/completions"
@@ -648,7 +762,7 @@ async def chat_completions(request: Request,
                 if r.status_code != 200:
                     raw = await r.aread()
                     _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-                    _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}")
+                    _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}", level="debug")
                     raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
                 collected, ttft_ms = await _collect_stream(r, t0)
     except HTTPException as e:
@@ -705,7 +819,7 @@ def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
          + (f" | tool_calls={tc_names}" if tc_names else "")
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整响应体
-    _log(f"{prefix}── RESPONSE BODY ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
+    _log(f"{prefix}── RESPONSE BODY ──\n{json.dumps(result, ensure_ascii=False, indent=2)}", level="trace")
 
 
 async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[dict, int | None]:
@@ -846,7 +960,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                 if r.status_code != 200:
                     err = await r.aread()
                     _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err.decode('utf-8','replace'),200)}")
-                    _log(f"{prefix}── ERROR BODY ──\n{err.decode('utf-8','replace')}")
+                    _log(f"{prefix}── ERROR BODY ──\n{err.decode('utf-8','replace')}", level="debug")
                     # 上游错误：先记一条失败统计（tokens 未知填 null）再返回错误事件
                     _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
                     yield _err_event(err, r.status_code)
@@ -868,7 +982,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
          + (f" | tool_calls={tool_names}" if tool_names else "")
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整原始 SSE（后端返回的全部内容）
-    _log(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
+    _log(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}", level="trace")
     # 用量统计：正常结束 ok=true；上游错误 ok=false（失败也记一行）。
     # _record_usage 内部整体 try/except 静默失败，绝不影响已返回的流式响应。
     _record_usage(model_name, ok=(err_msg is None), t0=t0,
@@ -928,10 +1042,16 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--api-key", default=os.environ.get("CODEBUDDY2OPENAI_KEY", ""),
-                    help="可选：要求客户端携带的 API key（默认不校验）")
+                    help="可选：要求客户端携带的 API key（非回环监听时强制要求，回环默认不校验）")
+    ap.add_argument("--unsafe-expose", action="store_true",
+                    help="当监听非回环地址（如 0.0.0.0）且未设置 --api-key 时，显式确认以无鉴权方式向网络暴露服务（高风险）")
     ap.add_argument("--log", default=None, metavar="PATH",
                     help="开启日志并写到该文件（如 --log converter.log 或 --log /tmp/cb.log）。"
                          "不传则不记日志。")
+    ap.add_argument("--log-level", default=os.environ.get("CODEBUDDY2OPENAI_LOG_LEVEL", "info"),
+                    choices=["info", "debug", "trace"],
+                    help="日志详细级别：info（默认，仅记录请求摘要与耗时，不落盘 prompt/response 正文）；"
+                         "debug（含错误响应详情）；trace（完整记录请求体与响应流，自动脱敏 Token/Key）。")
     ap.add_argument("--usage-log", default=None, metavar="PATH",
                     help="开启用量统计：每个聊天请求（流式/非流式）完成后向该文件追加一行 JSONL"
                          "（ts/model/ok/input_tokens/output_tokens/latency_ms/ttft_ms/error）。"
@@ -942,12 +1062,28 @@ def main():
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     args = ap.parse_args()
 
+    # 安全边界校验：非回环地址绑定必须具备访问鉴权
+    if not _is_loopback_host(args.host):
+        if not args.api_key and not args.unsafe_expose:
+            sys.stderr.write(
+                f"\n[安全拒绝] 服务绑定至非回环地址 (http://{args.host}:{args.port}) 时，"
+                "必须配置 --api-key（或环境变量 CODEBUDDY2OPENAI_KEY）进行访问鉴权。\n"
+                "若在受信任的隔离网络环境中确实需要无鉴权暴露，请显式指定 --unsafe-expose 启动参数。\n\n"
+            )
+            sys.exit(1)
+        elif not args.api_key and args.unsafe_expose:
+            sys.stderr.write(
+                f"\n[安全警告] ⚠️ 服务已通过 --unsafe-expose 以无鉴权方式暴露至网络 (http://{args.host}:{args.port})！"
+                "网络内任意客户端均可直接消耗您的账号额度。\n\n"
+            )
+
+    CONFIG["host"] = args.host
+    CONFIG["port"] = args.port
     CONFIG["api_key"] = args.api_key
+    CONFIG["unsafe_expose"] = args.unsafe_expose
     CONFIG["desensitize"] = args.desensitize
-    # --log 直接指定文件路径即开启；不传则不记
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
-    # --usage-log 指定统计文件即开启；环境变量 CODEBUDDY2OPENAI_USAGE_LOG 同样生效
-    # （与 --log / CODEBUDDY2OPENAI_LOG 风格一致）
+    CONFIG["log_level"] = args.log_level
     CONFIG["usage_log"] = args.usage_log if args.usage_log else os.environ.get("CODEBUDDY2OPENAI_USAGE_LOG")
     af = find_auth_file()
     CONFIG["cred"] = CredentialManager(af) if af else None
@@ -962,8 +1098,10 @@ def main():
     sys.stderr.write("   GET  /api/usage_summary     (当前账号积分概览，Hermes 配额看板数据源)\n")
     if args.api_key:
         sys.stderr.write("   鉴权已启用（API key 已设置）\n")
+    elif not _is_loopback_host(args.host) and args.unsafe_expose:
+        sys.stderr.write("   ⚠️ 警告：非回环暴露且无鉴权 (--unsafe-expose)\n")
     if CONFIG["log_path"]:
-        sys.stderr.write(f"   日志      : {CONFIG['log_path']}\n")
+        sys.stderr.write(f"   日志      : {CONFIG['log_path']} (级别: {CONFIG['log_level']})\n")
     if CONFIG["usage_log"]:
         sys.stderr.write(f"   用量统计  : {CONFIG['usage_log']}\n")
     if args.desensitize:

@@ -189,3 +189,32 @@ def test_parse_usage_payload_number_capacity_superset():
     assert res["used"] == 0.0
     assert res["packages"][0]["unit"] == "credits"  # 缺 CapacityUnit 回退默认值
     assert res["packages"][0]["code"] == ""
+
+
+# ---------------------------------------------------------------------------
+# 鉴权对齐：配置 api_key 时 /api/usage_summary 必须严格鉴权
+# ---------------------------------------------------------------------------
+
+def test_usage_endpoint_auth_enforced_when_api_key_set(fake_localappdata, monkeypatch):
+    _write_accounts(fake_localappdata, _valid_accounts_cfg())
+    monkeypatch.setattr(converter, "_BILLING_TRANSPORT_OVERRIDE", _mock_backend(_OK_PAYLOAD))
+    monkeypatch.setitem(converter.CONFIG, "api_key", "secret_key_123")
+
+    # 1. 未携带 Key → 401
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_usage_summary())
+    assert exc_info.value.status_code == 401
+
+    # 2. 携带错误 Key → 401
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(api_usage_summary(authorization="Bearer wrong_key"))
+    assert exc_info.value.status_code == 401
+
+    # 3. 携带正确 Bearer Token → 成功
+    res_bearer = asyncio.run(api_usage_summary(authorization="Bearer secret_key_123"))
+    assert res_bearer["uid"] == "u1"
+
+    # 4. 携带正确 X-Api-Key → 成功
+    res_x = asyncio.run(api_usage_summary(x_api_key="secret_key_123"))
+    assert res_x["uid"] == "u1"

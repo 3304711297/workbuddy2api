@@ -127,3 +127,91 @@ def test_record_usage_failsafe_on_bad_path(monkeypatch):
         r"Z:\__no_such_dir__\usage.jsonl",
     )
     converter._record_usage("glm-5.3", True, 0.0)  # 不应抛异常
+
+
+# ---------------------------------------------------------------------------
+# 安全与网络边界：回环主机检测
+# ---------------------------------------------------------------------------
+
+def test_is_loopback_host():
+    assert converter._is_loopback_host("127.0.0.1") is True
+    assert converter._is_loopback_host("localhost") is True
+    assert converter._is_loopback_host("::1") is True
+    assert converter._is_loopback_host("127.0.1.1") is True
+    assert converter._is_loopback_host("0.0.0.0") is False
+    assert converter._is_loopback_host("::") is False
+    assert converter._is_loopback_host("192.168.1.100") is False
+    assert converter._is_loopback_host("example.com") is False
+    assert converter._is_loopback_host("") is False
+
+
+# ---------------------------------------------------------------------------
+# 日志脱敏与分级过滤
+# ---------------------------------------------------------------------------
+
+def test_sanitize_log_text():
+    raw = 'Authorization: Bearer sk-1234567890abcdef and token: "eyJhbGciOiJIUzI1NiJ9.test"'
+    clean = converter._sanitize_log_text(raw)
+    assert "Bearer ***" in clean
+    assert "sk-1234567890abcdef" not in clean
+    assert 'token: "***"' in clean
+
+
+def test_log_levels_filter(tmp_path, monkeypatch):
+    log_file = tmp_path / "test.log"
+    monkeypatch.setitem(converter.CONFIG, "log_path", str(log_file))
+
+    # 1. 默认 info 级别：忽略 debug 和 trace
+    monkeypatch.setitem(converter.CONFIG, "log_level", "info")
+    converter._log("info msg", level="info")
+    converter._log("debug msg", level="debug")
+    converter._log("trace msg", level="trace")
+
+    lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert "[INFO] info msg" in lines[0]
+
+    # 2. trace 级别：全量捕获
+    log_file.unlink()
+    monkeypatch.setitem(converter.CONFIG, "log_level", "trace")
+    converter._log("info msg", level="info")
+    converter._log("debug msg", level="debug")
+    converter._log("trace msg", level="trace")
+
+    lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3
+    assert any("[INFO] info msg" in l for l in lines)
+    assert any("[DEBUG] debug msg" in l for l in lines)
+    assert any("[TRACE] trace msg" in l for l in lines)
+
+
+# ---------------------------------------------------------------------------
+# 凭据统一：CredentialManager 优先读取 accounts.json 活跃账号
+# ---------------------------------------------------------------------------
+
+def test_credential_manager_reads_accounts_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    acc_dir = tmp_path / "codebuddy2openai"
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    acc_file = acc_dir / "accounts.json"
+    acc_file.write_text(json.dumps({
+        "active_uid": "user_unified",
+        "accounts": {
+            "user_unified": {
+                "auth": {"accessToken": "token_from_accounts", "expiresAt": 9999999999999},
+                "account": {"uid": "user_unified", "nickname": "Unified User"}
+            }
+        }
+    }, ensure_ascii=False), encoding="utf-8")
+
+    dummy_info = tmp_path / "dummy.info"
+    dummy_info.write_text(json.dumps({
+        "auth": {"accessToken": "stale_token", "expiresAt": 9999999999999},
+        "account": {"uid": "stale_user"}
+    }), encoding="utf-8")
+
+    cm = converter.CredentialManager(dummy_info)
+    session = cm.get_active_session()
+    assert session["account"]["uid"] == "user_unified"
+    assert session["auth"]["accessToken"] == "token_from_accounts"
+    assert cm.summary()["uid"] == "user_unified"
