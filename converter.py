@@ -169,39 +169,45 @@ class CredentialManager:
         return time.time() * 1000 >= (expires_at - 60_000)
 
     def _save_tokens(self, arg1: dict, arg2: dict | None = None):
-        """明确 accounts.json 为真源，.info 为兼容镜像。写 accounts.json 失败时记录明确日志，不再直接 pass 掩盖错误。"""
+        """明确 accounts.json 为真源，.info 为兼容镜像。
+        若 accounts.json 存在，必须成功写回；写失败时中止提交流程，防止脏状态。
+        """
         if arg2 is not None:
             s, new_auth = arg1, arg2
         else:
             new_auth = arg1
             s = self._session()
-        s["auth"] = new_auth
+        s_candidate = dict(s)
+        s_candidate["auth"] = new_auth
 
-        # 1. 明确 accounts.json 为真源：优先回写 accounts.json 中的活跃账号
-        try:
-            acc_path = _accounts_file()
-            if acc_path.is_file():
+        # 1. 明确 accounts.json 为真源：若 accounts.json 存在，必须成功写回，失败抛异常阻断提交
+        acc_path = _accounts_file()
+        if acc_path.is_file():
+            try:
                 cfg = json.loads(acc_path.read_text(encoding="utf-8"))
                 active_uid = cfg.get("active_uid")
-                if active_uid and active_uid in cfg.get("accounts", {}):
-                    cfg["accounts"][active_uid]["auth"] = new_auth
-                    tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
-                    with open(tmp_acc, "w", encoding="utf-8") as f:
-                        json.dump(cfg, f, ensure_ascii=False, indent=2)
-                    os.replace(tmp_acc, acc_path)
-        except Exception as e:
-            _log(f"写入 accounts.json 失败：{e}")
+                if not active_uid or active_uid not in cfg.get("accounts", {}):
+                    raise ValueError(f"accounts.json 缺少 active_uid 或活跃账号 {active_uid} 不存在")
+                cfg["accounts"][active_uid]["auth"] = new_auth
+                tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
+                with open(tmp_acc, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_acc, acc_path)
+            except Exception as e:
+                _log(f"写入 accounts.json 失败：{e}")
+                raise RuntimeError(f"写入真源 accounts.json 失败：{e}") from e
 
         # 2. .info 为兼容镜像：回写单文件凭据
         if self.path:
             try:
                 tmp = self.path.with_suffix(self.path.suffix + ".tmp")
                 with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(s, f, ensure_ascii=False, indent=2)
+                    json.dump(s_candidate, f, ensure_ascii=False, indent=2)
                 os.replace(tmp, self.path)
             except Exception as e:
                 _log(f"写入 .info 兼容镜像失败：{e}", level="debug")
 
+        s["auth"] = new_auth
         self._cached = s
         mtimes = [self.path.stat().st_mtime] if self.path and self.path.is_file() else []
         try:
@@ -342,7 +348,7 @@ DEFAULT_MODELS = [
 
 _MODELS_URL = f"{BACKEND}/v2/enterprises/personal/models"
 _MODELS_TRANSPORT_OVERRIDE = None
-_MODELS_CACHE: dict = {"models": [], "expires_at": 0.0}
+_MODELS_CACHE: dict[str, dict] = {}  # uid -> {"models": list[str], "expires_at": float}
 
 
 def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None = None, custom_models: list[str] | None = None) -> list[str]:
@@ -365,11 +371,9 @@ def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None 
 
 
 async def _fetch_remote_models(*, transport=None) -> list[str]:
-    """尝试从云端获取动态模型列表，失败时优雅降级返回缓存或空列表。"""
+    """尝试从云端获取动态模型列表，按 UID 隔离缓存，失败时优雅降级返回缓存或空列表。"""
     global _MODELS_CACHE
     now = time.time()
-    if _MODELS_CACHE["models"] and now < _MODELS_CACHE["expires_at"]:
-        return list(_MODELS_CACHE["models"])
 
     token = ""
     uid = ""
@@ -394,13 +398,19 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
         except Exception:
             pass
 
+    cache_key = str(uid).strip() or "default"
+    cached = _MODELS_CACHE.get(cache_key, {})
+    cached_models = cached.get("models") or []
+    if cached_models and now < cached.get("expires_at", 0.0):
+        return list(cached_models)
+
     use_transport = transport or _MODELS_TRANSPORT_OVERRIDE
     if not token and use_transport is None:
-        return list(_MODELS_CACHE["models"])
+        return list(cached_models)
 
     headers = {
         "Authorization": f"Bearer {token}" if token else "",
-        "X-User-Id": uid,
+        "X-User-Id": str(uid),
         "User-Agent": USER_AGENT,
     }
     try:
@@ -420,12 +430,12 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                         if mid and mid != "hunyuan-image-v3.0":
                             models.append(str(mid))
                 if models:
-                    _MODELS_CACHE = {"models": models, "expires_at": now + 60.0}
+                    _MODELS_CACHE[cache_key] = {"models": models, "expires_at": now + 60.0}
                     return list(models)
     except Exception:
         pass
 
-    return list(_MODELS_CACHE["models"])
+    return list((_MODELS_CACHE.get(cache_key) or {}).get("models") or [])
 
 
 # 后端请求体里出现过的额外字段（透传时若客户端给了就保留）

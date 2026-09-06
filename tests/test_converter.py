@@ -1,3 +1,4 @@
+import pytest
 """converter.py 纯逻辑单测：模型映射 / Host 校验 / 用量统计写盘 / 透传契约。
 
 只测无网络副作用的函数；导入 converter 不启动服务（uvicorn.run 仅在 __main__）。
@@ -316,7 +317,7 @@ def test_credential_manager_save_tokens_accounts_json_as_source_of_truth(tmp_pat
     assert updated_info["auth"]["accessToken"] == "new_refreshed_token"
 
 
-def test_credential_manager_save_tokens_logs_on_accounts_failure(tmp_path, monkeypatch):
+def test_credential_manager_save_tokens_fails_and_aborts_commit_on_accounts_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     acc_dir = tmp_path / "codebuddy2openai"
     acc_dir.mkdir(parents=True, exist_ok=True)
@@ -333,10 +334,16 @@ def test_credential_manager_save_tokens_logs_on_accounts_failure(tmp_path, monke
     monkeypatch.setitem(converter.CONFIG, "log_path", str(log_file))
 
     cm = converter.CredentialManager(info_file)
-    cm._save_tokens({"accessToken": "new_token"})
+    with pytest.raises(RuntimeError, match="写入真源 accounts.json 失败"):
+        cm._save_tokens({"accessToken": "new_token"})
 
+    # 日志记录失败告警
     log_content = log_file.read_text(encoding="utf-8")
     assert "写入 accounts.json 失败" in log_content
+
+    # 兼容镜像 .info 绝不提前提交新 Token（保持原子性）
+    info_content = json.loads(info_file.read_text(encoding="utf-8"))
+    assert info_content["auth"]["accessToken"] == "old_token"
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +395,7 @@ def test_list_models_dynamic_merge(tmp_path, monkeypatch):
         })
 
     monkeypatch.setattr(converter, "_MODELS_TRANSPORT_OVERRIDE", httpx.MockTransport(handler))
-    monkeypatch.setattr(converter, "_MODELS_CACHE", {"models": [], "expires_at": 0.0})
+    monkeypatch.setattr(converter, "_MODELS_CACHE", {})
 
     res = asyncio.run(converter.list_models())
     ids = [item["id"] for item in res["data"]]
@@ -396,3 +403,51 @@ def test_list_models_dynamic_merge(tmp_path, monkeypatch):
     assert "cloud-new-model" in ids
     assert "custom-finetuned-model" in ids
     assert "hunyuan-image-v3.0" not in ids
+
+
+def test_models_cache_uid_isolation(tmp_path, monkeypatch):
+    """验证动态模型缓存按 UID 严格隔离，不同账号不串读模型矩阵。"""
+    import asyncio
+    import httpx
+    monkeypatch.setattr(converter, "_MODELS_CACHE", {})
+
+    def handler(request: httpx.Request):
+        uid = request.headers.get("X-User-Id", "")
+        if uid == "user_a":
+            models = [{"id": "model-for-a"}]
+        elif uid == "user_b":
+            models = [{"id": "model-for-b"}]
+        else:
+            models = [{"id": "model-default"}]
+        return httpx.Response(200, json={
+            "code": 0,
+            "data": {"models": models}
+        })
+
+    mock_transport = httpx.MockTransport(handler)
+
+    class DummyCred:
+        def __init__(self, uid):
+            self.uid = uid
+        def get_active_session(self):
+            return {
+                "auth": {"accessToken": f"token_{self.uid}"},
+                "account": {"uid": self.uid}
+            }
+
+    # 1. 账号 A 获取模型并缓存
+    monkeypatch.setitem(converter.CONFIG, "cred", DummyCred("user_a"))
+    res_a = asyncio.run(converter._fetch_remote_models(transport=mock_transport))
+    assert res_a == ["model-for-a"]
+    assert "user_a" in converter._MODELS_CACHE
+
+    # 2. 立即切换到账号 B，获取模型并缓存，不应命中账号 A 的缓存
+    monkeypatch.setitem(converter.CONFIG, "cred", DummyCred("user_b"))
+    res_b = asyncio.run(converter._fetch_remote_models(transport=mock_transport))
+    assert res_b == ["model-for-b"]
+    assert "user_b" in converter._MODELS_CACHE
+
+    # 3. 再次读取账号 A，应命中账号 A 的独立缓存（即使 handler 被禁用）
+    monkeypatch.setitem(converter.CONFIG, "cred", DummyCred("user_a"))
+    res_a_cached = asyncio.run(converter._fetch_remote_models(transport=None))
+    assert res_a_cached == ["model-for-a"]
