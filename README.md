@@ -97,7 +97,7 @@ src-tauri/target/release/codebuddy2openai.exe
 ### 方式二：本地构建与源码调试
 
 #### 环境要求
-- Node.js 18+ 与 npm
+- Node.js 24+ 与 npm
 - Rust 1.77+ 与 Cargo
 - Python 3.10+（需安装依赖 `httpx fastapi uvicorn[standard]`）
 

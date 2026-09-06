@@ -138,11 +138,43 @@ def test_is_loopback_host():
     assert converter._is_loopback_host("localhost") is True
     assert converter._is_loopback_host("::1") is True
     assert converter._is_loopback_host("127.0.1.1") is True
+    assert converter._is_loopback_host("127.0.0.2") is True
+    assert converter._is_loopback_host("127.1.2.3") is True
     assert converter._is_loopback_host("0.0.0.0") is False
     assert converter._is_loopback_host("::") is False
     assert converter._is_loopback_host("192.168.1.100") is False
     assert converter._is_loopback_host("example.com") is False
     assert converter._is_loopback_host("") is False
+
+
+def test_localhost_only_middleware_allows_loopback_ips():
+    from starlette.testclient import TestClient
+    client = TestClient(converter.app)
+
+    # 合法回环 IP 均应放行通过（不应被 403 拒绝）
+    loopback_hosts = [
+        "127.0.0.1:8787",
+        "127.0.0.2:8787",
+        "127.0.1.1:8787",
+        "127.1.2.3:8787",
+        "localhost:8787",
+        "[::1]:8787",
+    ]
+    for h in loopback_hosts:
+        res = client.get("/health", headers={"Host": h})
+        assert res.status_code == 200, f"Host {h} 应被放行，实际状态码: {res.status_code}"
+
+    # 非回环 Host 必须被拦截并返回 403
+    forbidden_hosts = [
+        "evil.com:8787",
+        "192.168.1.100:8787",
+        "0.0.0.0:8787",
+        "example.org",
+    ]
+    for h in forbidden_hosts:
+        res = client.get("/health", headers={"Host": h})
+        assert res.status_code == 403, f"Host {h} 应被拦截，实际状态码: {res.status_code}"
+        assert res.json()["error"]["type"] == "invalid_host"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +217,39 @@ def test_log_levels_filter(tmp_path, monkeypatch):
     assert any("[TRACE] trace msg" in l for l in lines)
 
 
+def test_last_user_privacy_logging(tmp_path, monkeypatch):
+    log_file = tmp_path / "test.log"
+    monkeypatch.setitem(converter.CONFIG, "log_path", str(log_file))
+
+    rid = "req1"
+    model_name = "auto"
+    client_wants_stream = True
+    messages = [{"role": "user", "content": "SUPER_SECRET_USER_MESSAGE"}]
+    last_user = converter._last_user_text(messages)
+    tool_names = []
+
+    # 1. 默认 info 级别：不记录 last_user 敏感对话
+    monkeypatch.setitem(converter.CONFIG, "log_level", "info")
+    converter._log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}" + (f" | tools={tool_names}" if tool_names else ""))
+    if last_user:
+        converter._log(f"[{rid}] last_user={converter._truncate(last_user, 60)!r}", level="debug")
+
+    content_info = log_file.read_text(encoding="utf-8")
+    assert "SUPER_SECRET_USER_MESSAGE" not in content_info
+    assert "▶ REQUEST auto" in content_info
+
+    # 2. debug 级别：记录 last_user
+    log_file.unlink()
+    monkeypatch.setitem(converter.CONFIG, "log_level", "debug")
+    converter._log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}" + (f" | tools={tool_names}" if tool_names else ""))
+    if last_user:
+        converter._log(f"[{rid}] last_user={converter._truncate(last_user, 60)!r}", level="debug")
+
+    content_debug = log_file.read_text(encoding="utf-8")
+    assert "SUPER_SECRET_USER_MESSAGE" in content_debug
+    assert "[DEBUG]" in content_debug
+
+
 # ---------------------------------------------------------------------------
 # 凭据统一：CredentialManager 优先读取 accounts.json 活跃账号
 # ---------------------------------------------------------------------------
@@ -215,3 +280,119 @@ def test_credential_manager_reads_accounts_json(tmp_path, monkeypatch):
     assert session["account"]["uid"] == "user_unified"
     assert session["auth"]["accessToken"] == "token_from_accounts"
     assert cm.summary()["uid"] == "user_unified"
+
+
+def test_credential_manager_save_tokens_accounts_json_as_source_of_truth(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    acc_dir = tmp_path / "codebuddy2openai"
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    acc_file = acc_dir / "accounts.json"
+    acc_file.write_text(json.dumps({
+        "active_uid": "user1",
+        "accounts": {
+            "user1": {
+                "auth": {"accessToken": "old_token", "expiresAt": 1000},
+                "account": {"uid": "user1", "nickname": "User 1"}
+            }
+        }
+    }, ensure_ascii=False), encoding="utf-8")
+
+    info_file = tmp_path / "test.info"
+    info_file.write_text(json.dumps({
+        "auth": {"accessToken": "old_token", "expiresAt": 1000},
+        "account": {"uid": "user1"}
+    }), encoding="utf-8")
+
+    cm = converter.CredentialManager(info_file)
+    new_auth = {"accessToken": "new_refreshed_token", "expiresAt": 9999999999}
+    cm._save_tokens(new_auth)
+
+    # 验证 accounts.json 真源更新
+    updated_acc = json.loads(acc_file.read_text(encoding="utf-8"))
+    assert updated_acc["accounts"]["user1"]["auth"]["accessToken"] == "new_refreshed_token"
+
+    # 验证 .info 兼容镜像同步更新
+    updated_info = json.loads(info_file.read_text(encoding="utf-8"))
+    assert updated_info["auth"]["accessToken"] == "new_refreshed_token"
+
+
+def test_credential_manager_save_tokens_logs_on_accounts_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    acc_dir = tmp_path / "codebuddy2openai"
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    acc_file = acc_dir / "accounts.json"
+    acc_file.write_text("invalid json content", encoding="utf-8")
+
+    info_file = tmp_path / "test.info"
+    info_file.write_text(json.dumps({
+        "auth": {"accessToken": "old_token"},
+        "account": {"uid": "user1"}
+    }), encoding="utf-8")
+
+    log_file = tmp_path / "test.log"
+    monkeypatch.setitem(converter.CONFIG, "log_path", str(log_file))
+
+    cm = converter.CredentialManager(info_file)
+    cm._save_tokens({"accessToken": "new_token"})
+
+    log_content = log_file.read_text(encoding="utf-8")
+    assert "写入 accounts.json 失败" in log_content
+
+
+# ---------------------------------------------------------------------------
+# /v1/models 动态获取与合并
+# ---------------------------------------------------------------------------
+
+def test_merge_model_ids():
+    static = ["auto", "hy4-preview", "kimi-k3"]
+    dynamic = ["hy4-preview", "deepseek-v3", "glm-5"]
+    custom = ["my-custom-model", "kimi-k3"]
+    merged = converter._merge_model_ids(static, dynamic, custom)
+    assert merged == ["auto", "hy4-preview", "kimi-k3", "deepseek-v3", "glm-5", "my-custom-model"]
+
+
+def test_list_models_dynamic_merge(tmp_path, monkeypatch):
+    import asyncio
+    import httpx
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    acc_dir = tmp_path / "codebuddy2openai"
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    acc_file = acc_dir / "accounts.json"
+    acc_file.write_text(json.dumps({
+        "active_uid": "u1",
+        "accounts": {
+            "u1": {
+                "auth": {"accessToken": "tok_123"},
+                "account": {"uid": "u1"}
+            }
+        }
+    }), encoding="utf-8")
+
+    settings_file = acc_dir / "model_settings.json"
+    settings_file.write_text(json.dumps({
+        "custom-finetuned-model": {"context_window": 32000}
+    }), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v2/enterprises/personal/models"
+        assert request.headers["Authorization"] == "Bearer tok_123"
+        return httpx.Response(200, json={
+            "code": 0,
+            "data": {
+                "models": [
+                    {"id": "hy4-preview"},
+                    {"id": "cloud-new-model"},
+                    {"id": "hunyuan-image-v3.0"},
+                ]
+            }
+        })
+
+    monkeypatch.setattr(converter, "_MODELS_TRANSPORT_OVERRIDE", httpx.MockTransport(handler))
+    monkeypatch.setattr(converter, "_MODELS_CACHE", {"models": [], "expires_at": 0.0})
+
+    res = asyncio.run(converter.list_models())
+    ids = [item["id"] for item in res["data"]]
+    assert "auto" in ids
+    assert "cloud-new-model" in ids
+    assert "custom-finetuned-model" in ids
+    assert "hunyuan-image-v3.0" not in ids

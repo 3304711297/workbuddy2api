@@ -168,6 +168,50 @@ class CredentialManager:
         # 提前 60s 判定过期
         return time.time() * 1000 >= (expires_at - 60_000)
 
+    def _save_tokens(self, arg1: dict, arg2: dict | None = None):
+        """明确 accounts.json 为真源，.info 为兼容镜像。写 accounts.json 失败时记录明确日志，不再直接 pass 掩盖错误。"""
+        if arg2 is not None:
+            s, new_auth = arg1, arg2
+        else:
+            new_auth = arg1
+            s = self._session()
+        s["auth"] = new_auth
+
+        # 1. 明确 accounts.json 为真源：优先回写 accounts.json 中的活跃账号
+        try:
+            acc_path = _accounts_file()
+            if acc_path.is_file():
+                cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+                active_uid = cfg.get("active_uid")
+                if active_uid and active_uid in cfg.get("accounts", {}):
+                    cfg["accounts"][active_uid]["auth"] = new_auth
+                    tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
+                    with open(tmp_acc, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_acc, acc_path)
+        except Exception as e:
+            _log(f"写入 accounts.json 失败：{e}")
+
+        # 2. .info 为兼容镜像：回写单文件凭据
+        if self.path:
+            try:
+                tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(s, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+            except Exception as e:
+                _log(f"写入 .info 兼容镜像失败：{e}", level="debug")
+
+        self._cached = s
+        mtimes = [self.path.stat().st_mtime] if self.path and self.path.is_file() else []
+        try:
+            acc_p = _accounts_file()
+            if acc_p.is_file():
+                mtimes.append(acc_p.stat().st_mtime)
+        except OSError:
+            pass
+        self._mtime = max(mtimes) if mtimes else 0.0
+
     def _refresh(self):
         """调后端刷新 token，写回 auth 文件与缓存。"""
         s = self._session()
@@ -193,38 +237,7 @@ class CredentialManager:
             new_auth["expiresAt"] = int(time.time() * 1000) + new_auth["expiresIn"] * 1000
         if not new_auth.get("refreshExpiresAt") and new_auth.get("refreshExpiresIn"):
             new_auth["refreshExpiresAt"] = int(time.time() * 1000) + new_auth["refreshExpiresIn"] * 1000
-        s["auth"] = new_auth
-        # 原子写回
-        if self.path:
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(s, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
-
-        # 同步回写 accounts.json 中的活跃账号
-        try:
-            acc_path = _accounts_file()
-            if acc_path.is_file():
-                cfg = json.loads(acc_path.read_text(encoding="utf-8"))
-                active_uid = cfg.get("active_uid")
-                if active_uid and active_uid in cfg.get("accounts", {}):
-                    cfg["accounts"][active_uid]["auth"] = new_auth
-                    tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
-                    with open(tmp_acc, "w", encoding="utf-8") as f:
-                        json.dump(cfg, f, ensure_ascii=False, indent=2)
-                    os.replace(tmp_acc, acc_path)
-        except Exception:
-            pass
-
-        self._cached = s
-        mtimes = [self.path.stat().st_mtime] if self.path and self.path.is_file() else []
-        try:
-            acc_p = _accounts_file()
-            if acc_p.is_file():
-                mtimes.append(acc_p.stat().st_mtime)
-        except OSError:
-            pass
-        self._mtime = max(mtimes) if mtimes else 0.0
+        self._save_tokens(s, new_auth)
 
     def _build_headers_from(self, auth: dict, account: dict) -> dict:
         domain = auth.get("domain") or DEFAULT_DOMAIN
@@ -327,6 +340,94 @@ DEFAULT_MODELS = [
     "default",
 ]
 
+_MODELS_URL = f"{BACKEND}/v2/enterprises/personal/models"
+_MODELS_TRANSPORT_OVERRIDE = None
+_MODELS_CACHE: dict = {"models": [], "expires_at": 0.0}
+
+
+def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None = None, custom_models: list[str] | None = None) -> list[str]:
+    """合并静态基础模型、动态云端模型与用户自定义配置模型，去重并保持顺序。"""
+    seen = set()
+    result = []
+    for m in static_models or []:
+        if m and m not in seen:
+            seen.add(m)
+            result.append(m)
+    for m in dynamic_models or []:
+        if m and m not in seen:
+            seen.add(m)
+            result.append(m)
+    for m in custom_models or []:
+        if m and m not in seen:
+            seen.add(m)
+            result.append(m)
+    return result
+
+
+async def _fetch_remote_models(*, transport=None) -> list[str]:
+    """尝试从云端获取动态模型列表，失败时优雅降级返回缓存或空列表。"""
+    global _MODELS_CACHE
+    now = time.time()
+    if _MODELS_CACHE["models"] and now < _MODELS_CACHE["expires_at"]:
+        return list(_MODELS_CACHE["models"])
+
+    token = ""
+    uid = ""
+    cred = CONFIG.get("cred")
+    if cred is not None:
+        try:
+            session = cred.get_active_session()
+            auth = session.get("auth") or {}
+            account = session.get("account") or {}
+            token = auth.get("accessToken") or ""
+            uid = account.get("uid") or ""
+        except Exception:
+            pass
+    if not token:
+        try:
+            path = _accounts_file()
+            if path.is_file():
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+                uid, session = _load_active_session(cfg)
+                auth = session.get("auth") or {}
+                token = auth.get("accessToken") or ""
+        except Exception:
+            pass
+
+    use_transport = transport or _MODELS_TRANSPORT_OVERRIDE
+    if not token and use_transport is None:
+        return list(_MODELS_CACHE["models"])
+
+    headers = {
+        "Authorization": f"Bearer {token}" if token else "",
+        "X-User-Id": uid,
+        "User-Agent": USER_AGENT,
+    }
+    try:
+        client_kwargs = {"timeout": 10}
+        if use_transport is not None:
+            client_kwargs["transport"] = use_transport
+        async with httpx.AsyncClient(**client_kwargs) as c:
+            r = await c.get(_MODELS_URL, headers=headers)
+        if r.status_code == 200:
+            body = r.json()
+            if body.get("code") == 0 and isinstance(body.get("data"), dict):
+                raw_models = body["data"].get("models") or []
+                models = []
+                for m in raw_models:
+                    if isinstance(m, dict):
+                        mid = m.get("id")
+                        if mid and mid != "hunyuan-image-v3.0":
+                            models.append(str(mid))
+                if models:
+                    _MODELS_CACHE = {"models": models, "expires_at": now + 60.0}
+                    return list(models)
+    except Exception:
+        pass
+
+    return list(_MODELS_CACHE["models"])
+
+
 # 后端请求体里出现过的额外字段（透传时若客户端给了就保留）
 PASSTHROUGH_BODY_KEYS = {
     "model", "messages", "tools", "tool_choice", "temperature",
@@ -388,7 +489,7 @@ class LocalHostOnlyMiddleware(BaseHTTPMiddleware):
         bind_host = CONFIG.get("host", "127.0.0.1")
         if _is_loopback_host(bind_host):
             host_header = request.headers.get("host") or ""
-            if _extract_hostname(host_header) not in _ALLOWED_HOSTS:
+            if not _is_loopback_host(_extract_hostname(host_header)):
                 return JSONResponse(
                     status_code=403,
                     content={"error": {"message": f"forbidden host: {host_header}",
@@ -670,11 +771,14 @@ async def api_usage_summary(
 
 
 @app.get("/v1/models")
-def list_models(authorization: Optional[str] = Header(default=None),
-                x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+async def list_models(authorization: Optional[str] = Header(default=None),
+                     x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
     _check_auth(authorization, x_api_key)
+    dynamic_models = await _fetch_remote_models()
+    custom_models = list(_load_model_settings().keys())
+    all_models = _merge_model_ids(DEFAULT_MODELS, dynamic_models, custom_models)
     data = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "codebuddy"}
-            for m in DEFAULT_MODELS]
+            for m in all_models]
     return {"object": "list", "data": data}
 
 
@@ -738,9 +842,9 @@ async def chat_completions(request: Request,
                   if isinstance(t, dict)]
     last_user = _last_user_text(messages)
     rid = os.urandom(4).hex()
-    _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}"
-         + (f" | tools={tool_names}" if tool_names else "")
-         + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
+    _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}" + (f" | tools={tool_names}" if tool_names else ""))
+    if last_user:
+        _log(f"[{rid}] last_user={_truncate(last_user, 60)!r}", level="debug")
     # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）
     _log(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}", level="trace")
 
