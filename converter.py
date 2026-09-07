@@ -22,6 +22,7 @@ codebuddy2openai — 把 CodeBuddy / WorkBuddy 的订阅暴露成标准 OpenAI �
 from __future__ import annotations
 
 import argparse
+import asyncio
 import ipaddress
 import json
 import os
@@ -53,8 +54,51 @@ DEFAULT_DOMAIN = "www.codebuddy.cn"
 USER_AGENT = "codebuddy2openai/2.0"
 
 # ---------------------------------------------------------------------------
-# 平台相关：定位 auth 目录
+# 平台相关：定位 auth 目录与 WSL 宿主穿透
 # ---------------------------------------------------------------------------
+
+def _is_wsl() -> bool:
+    """检测当前是否运行在 WSL (Windows Subsystem for Linux) 环境下。"""
+    if sys.platform != "linux":
+        return False
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        proc_ver = Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
+        return "microsoft" in proc_ver or "wsl" in proc_ver
+    except Exception:
+        return False
+
+
+def _wsl_win_local_appdata() -> list[Path]:
+    """在 WSL 下探测宿主 Windows 的 AppData/Local 候选目录。"""
+    results: list[Path] = []
+    users_root = Path("/mnt/c/Users")
+    if not users_root.is_dir():
+        return results
+
+    # 1. 优先尝试与当前 Linux 用户名同名的 Windows 用户目录
+    import getpass
+    try:
+        cur_user = getpass.getuser()
+        c = users_root / cur_user / "AppData" / "Local"
+        if c.is_dir():
+            results.append(c)
+    except Exception:
+        pass
+
+    # 2. 遍历 /mnt/c/Users，排除 Windows 默认非用户目录
+    ignore = {"public", "default", "default user", "all users", "desktop.ini"}
+    try:
+        for entry in users_root.iterdir():
+            if entry.name.lower() not in ignore and not entry.name.startswith("."):
+                local = entry / "AppData" / "Local"
+                if local.is_dir() and local not in results:
+                    results.append(local)
+    except Exception:
+        pass
+    return results
+
 
 def auth_dirs() -> list[Path]:
     home = Path.home()
@@ -65,13 +109,39 @@ def auth_dirs() -> list[Path]:
         local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
         return [local / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
     xdg = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-    return [xdg / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
+    dirs = [xdg / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
+
+    # WSL 环境或显式开启 --wsl：自动追加宿主 Windows 桌面端的凭据目录
+    if _is_wsl() or CONFIG.get("wsl"):
+        for win_local in _wsl_win_local_appdata():
+            candidate = win_local / "CodeBuddyExtension" / "Data" / "Public" / "auth"
+            if candidate not in dirs:
+                dirs.append(candidate)
+
+    return dirs
 
 
 def _accounts_file() -> Path:
     """accounts.json 路径，与桌面端 Rust local_app_dir() 同源（调用时读环境变量，便于测试）。"""
-    base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-    return Path(base) / "codebuddy2openai" / "accounts.json"
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "codebuddy2openai" / "accounts.json"
+    if sys.platform == "win32":
+        return Path.home() / "AppData" / "Local" / "codebuddy2openai" / "accounts.json"
+
+    # Linux / WSL
+    local_acc = Path.home() / ".local" / "share" / "codebuddy2openai" / "accounts.json"
+    if local_acc.is_file():
+        return local_acc
+
+    # WSL 穿透：读取 Windows 宿主已保存的桌面端多账号状态
+    if _is_wsl() or CONFIG.get("wsl"):
+        for win_local in _wsl_win_local_appdata():
+            candidate = win_local / "codebuddy2openai" / "accounts.json"
+            if candidate.is_file():
+                return candidate
+
+    return local_acc
 
 
 def _load_active_session(cfg: dict) -> tuple[str, dict]:
@@ -455,7 +525,8 @@ app = FastAPI(title="codebuddy2openai", version="2.0")
 CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
                 "usage_log": None, "unsafe_expose": False,
-                "desensitize": False}  # cred: CredentialManager | None
+                "desensitize": False, "wsl": False,
+                "repair_stream_tools": True}  # cred: CredentialManager | None
 
 
 # ---------------------------------------------------------------------------
@@ -862,9 +933,19 @@ async def chat_completions(request: Request,
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
-    if client_wants_stream:
+    has_tools = bool(payload.get("tools"))
+    need_tool_repair = client_wants_stream and has_tools and CONFIG.get("repair_stream_tools", True)
+
+    if client_wants_stream and not need_tool_repair:
         return StreamingResponse(
             _stream_upstream(url, headers, body, model_name, t0, rid),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if client_wants_stream and need_tool_repair:
+        return StreamingResponse(
+            _safe_stream_upstream(url, headers, body, model_name, t0, rid),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1005,6 +1086,170 @@ async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[di
                      "finish_reason": finish_reason or "stop"}],
         "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }, ttft_ms
+
+
+def _validate_tool_calls(tool_calls: list[dict] | None) -> tuple[bool, str]:
+    """校验聚合后的 tool_calls 是否完整无损。返回 (is_valid, error_reason)。"""
+    if not tool_calls:
+        return True, ""
+    for i, tc in enumerate(tool_calls):
+        if not isinstance(tc, dict):
+            return False, f"tool_calls[{i}] 不是 dict"
+        fn = tc.get("function") or {}
+        name = fn.get("name")
+        if not name or not str(name).strip():
+            return False, f"tool_calls[{i}].name 为空或缺失"
+        args = fn.get("arguments", "")
+        # 腾讯后端流式损坏典型表现：空字符串或乱码分片导致的残缺 JSON
+        if args is not None and str(args).strip():
+            try:
+                json.loads(args)
+            except Exception as exc:
+                return False, f"tool_calls[{i}].arguments 不是有效 JSON ({exc}): {args[:100]!r}"
+    return True, ""
+
+
+async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: float = 0.0,
+                                  rid: str = "", ttft_ms: int | None = None):
+    """将聚合校验后的完整响应转换为标准 OpenAI SSE 流，供客户端消费。"""
+    cid = collected.get("id") or ("chatcmpl-" + os.urandom(12).hex())
+    created = collected.get("created") or int(time.time())
+    model = collected.get("model") or model_name
+    choices = collected.get("choices") or []
+    choice = choices[0] if choices else {}
+    msg = choice.get("message") or {}
+    role = msg.get("role", "assistant")
+    content = msg.get("content")
+    tool_calls = msg.get("tool_calls")
+    finish_reason = choice.get("finish_reason") or ("tool_calls" if tool_calls else "stop")
+    usage = collected.get("usage")
+
+    # 1. 发送带 role 的首包（若有 tool_calls，带出初始结构）
+    if tool_calls:
+        for idx, tc in enumerate(tool_calls):
+            fn = tc.get("function") or {}
+            first_chunk = {
+                "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": role if idx == 0 else None,
+                        "tool_calls": [{
+                            "index": idx,
+                            "id": tc.get("id"),
+                            "type": tc.get("type", "function"),
+                            "function": {"name": fn.get("name"), "arguments": ""},
+                        }],
+                    },
+                    "finish_reason": None,
+                }],
+            }
+            yield f"data: {json.dumps(first_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+
+            # 切片输出 arguments，让客户端体验如同原生流式
+            raw_args = fn.get("arguments") or ""
+            chunk_size = 32
+            for j in range(0, len(raw_args), chunk_size):
+                arg_part = raw_args[j:j + chunk_size]
+                chunk = {
+                    "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": idx,
+                                "function": {"arguments": arg_part},
+                            }],
+                        },
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    elif content:
+        chunk_size = 32
+        for j in range(0, len(content), chunk_size):
+            part_text = content[j:j + chunk_size]
+            chunk = {
+                "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": role if j == 0 else None, "content": part_text},
+                    "finish_reason": None,
+                }],
+            }
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    # 2. 尾包：包含 finish_reason 与可选的 usage
+    end_chunk = {
+        "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+    }
+    if usage:
+        end_chunk["usage"] = usage
+    yield f"data: {json.dumps(end_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    yield b"data: [DONE]\n\n"
+
+    # 日志与用量统计
+    _log_finish(model_name, t0, collected, rid)
+    _u = usage or {}
+    _record_usage(model_name, True, t0,
+                  input_tokens=_u.get("prompt_tokens"),
+                  output_tokens=_u.get("completion_tokens"),
+                  ttft_ms=ttft_ms)
+
+
+async def _safe_stream_upstream(url: str, headers: dict, body: dict,
+                                model_name: str = "?", t0: float = 0.0, rid: str = ""):
+    """针对带 tools 的流式请求，进行聚合校验与防损坏重试，再伪流式下发。
+
+    解决上游 Issue #3：腾讯后端（copilot.tencent.com）在流式返回 tool_calls 时偶发
+    function.name 为空或 arguments 乱码分片，导致 Claude Code / Codex 等 Agent 陷入死循环。
+    """
+    prefix = f"[{rid}] " if rid else ""
+    max_attempts = 2
+    collected = None
+    ttft_ms = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=300) as c:
+                async with c.stream("POST", url, headers=headers, json=body) as r:
+                    if r.status_code != 200:
+                        raw = await r.aread()
+                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
+                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                        yield _err_event(raw, r.status_code)
+                        return
+                    collected, ttft_ms = await _collect_stream(r, t0)
+        except httpx.HTTPError as e:
+            _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+            _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+            yield _err_event(str(e).encode(), 502)
+            return
+
+        choice = (collected.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        tool_calls = msg.get("tool_calls") or []
+
+        # 校验 tool_calls 完整性
+        valid, reason = _validate_tool_calls(tool_calls)
+        if valid or attempt >= max_attempts:
+            if not valid:
+                _log(f"{prefix}⚠️ tool_calls 校验未通过 ({reason})，已达最大重试次数，尝试原样下发")
+            elif attempt > 1:
+                _log(f"{prefix}✅ tool_calls 重试成功修复 (attempt {attempt})")
+            break
+
+        _log(f"{prefix}⚠️ 检测到腾讯后端流式 tool_calls 损坏 ({reason})，自动重试 ({attempt}/{max_attempts})...")
+        await asyncio.sleep(0.5)
+
+    if collected is None:
+        yield _err_event(b'{"error":{"message":"tool_calls aggregate failed","type":"upstream_error"}}', 502)
+        return
+
+    # 伪流式输出
+    async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms):
+        yield chunk
 
 
 def _safe_err_raw(raw: bytes, status: int) -> dict:
@@ -1173,6 +1418,15 @@ def main():
     ap.add_argument("--desensitize", action="store_true",
                     help="启用脱敏：对 system 消息里的合规模板敏感词（DoS/exploit/credential 等）"
                          "插入零宽空格，缓解被后端内容审核误拦。默认关闭。")
+    ap.add_argument("--wsl", action="store_true",
+                    help="显式开启 WSL 模式：穿透读取 Windows 宿主系统的登录凭据与 accounts.json"
+                         "（在 WSL 环境下通常自动检测生效，此开关用于显式开启）。")
+    ap.add_argument("--repair-stream-tools", action="store_true", default=True,
+                    help="启用流式 tool_calls 损坏防御（默认开启）：针对腾讯后端在流式输出下偶发"
+                         " function.name 为空或 arguments 乱码的问题，在请求含 tools 时进行聚合校验与自动重试，"
+                         "保障 Claude Code / Codex 等 Agent 的稳定性。")
+    ap.add_argument("--no-repair-stream-tools", action="store_false", dest="repair_stream_tools",
+                    help="禁用流式 tool_calls 损坏防御，强制全量原始 SSE 直通。")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     args = ap.parse_args()
 
@@ -1196,6 +1450,8 @@ def main():
     CONFIG["api_key"] = args.api_key
     CONFIG["unsafe_expose"] = args.unsafe_expose
     CONFIG["desensitize"] = args.desensitize
+    CONFIG["wsl"] = args.wsl
+    CONFIG["repair_stream_tools"] = args.repair_stream_tools
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
     CONFIG["log_level"] = args.log_level
     CONFIG["usage_log"] = args.usage_log if args.usage_log else os.environ.get("CODEBUDDY2OPENAI_USAGE_LOG")
@@ -1220,6 +1476,10 @@ def main():
         sys.stderr.write(f"   用量统计  : {CONFIG['usage_log']}\n")
     if args.desensitize:
         sys.stderr.write("   脱敏      : 已启用（system 合规词零宽处理）\n")
+    if args.wsl:
+        sys.stderr.write("   WSL模式   : 已显式启用（穿透宿主 Windows 凭据目录）\n")
+    if not args.repair_stream_tools:
+        sys.stderr.write("   工具防御  : 已禁用（全量原始 SSE 直通）\n")
     sys.stderr.write("按 Ctrl+C 退出。\n\n")
 
     # 启动时写一条标记
