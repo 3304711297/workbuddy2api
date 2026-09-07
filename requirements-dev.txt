@@ -1,2 +1,5 @@
 # 开发/CI 专用依赖（pytest 套件见 tests/）
 pytest>=8.0
+# starlette 1.6+ 的 TestClient 优先使用 httpx2；缺失时回退 httpx 并抛出弃用告警，
+# 装上可消除该告警（tests/test_converter.py 使用 TestClient 做回环 Host 校验）
+httpx2>=2.12
