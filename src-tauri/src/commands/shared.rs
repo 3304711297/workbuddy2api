@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -123,23 +124,141 @@ pub(super) fn load_accounts_state() -> AccountsState {
     state
 }
 
+/// 安全原子写入文件（Windows 平台安全替换）：
+/// 1. 先写入稳定且可识别的临时文件（`<file_name>.tmp`）；
+/// 2. sync_all 确保数据完全刷入磁盘介质后关闭文件句柄；
+/// 3. rename 原子替换目标文件（Windows 上目标文件已存在时会安全覆盖）；
+/// 4. 若写入或替换失败，自动清理临时文件，确保原文件保留完整且无 .tmp 残留。
+pub(crate) fn atomic_write_file(target: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp_path = target.with_file_name(format!("{file_name}.tmp"));
+
+    // 1. 完整写入临时文件并落盘
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    } // 离开作用域关闭文件句柄，Windows 下释放锁后方可执行 rename
+
+    // 2. 将临时文件替换到目标文件
+    // 若 rename 失败，立即清理临时文件并向上抛错，原文件完好无损
+    if let Err(err) = std::fs::rename(&tmp_path, target) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 pub(super) fn save_accounts_state(st: &AccountsState) -> Result<(), String> {
     let p = accounts_db_path();
     let raw = serde_json::to_string_pretty(st).map_err(|e| e.to_string())?;
-    std::fs::write(&p, raw).map_err(|e| e.to_string())?;
+    atomic_write_file(&p, &raw).map_err(|e| e.to_string())?;
 
     // 如果有活跃账号，同步写回到 workbuddy-desktop.info 保证外部 converter 无缝可用
     if !st.active_uid.is_empty() {
         if let Some(active_val) = st.accounts.get(&st.active_uid) {
             let target_path = desktop_auth_info_path();
-            if let Some(parent) = target_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
             if let Ok(out) = serde_json::to_string_pretty(active_val) {
-                let _ = std::fs::write(target_path, out);
+                let _ = atomic_write_file(&target_path, &out);
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_atomic_write_file_normal() {
+        let dir = std::env::temp_dir().join(format!("c2o_test_atomic_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("accounts.json");
+        let tmp_file = dir.join("accounts.json.tmp");
+
+        // 确保初态清理
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&tmp_file);
+
+        let content = "{\"active_uid\":\"123\",\"accounts\":{}}";
+        assert!(atomic_write_file(&target, content).is_ok());
+
+        assert!(target.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), content);
+        assert!(!tmp_file.exists(), "成功后不得遗留 .tmp 文件");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_atomic_write_file_overwrite() {
+        let dir = std::env::temp_dir().join(format!("c2o_test_overwrite_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("accounts.json");
+        let tmp_file = dir.join("accounts.json.tmp");
+
+        // 先写入初版
+        std::fs::write(&target, "old_version").unwrap();
+
+        let new_content = "{\"active_uid\":\"new_uid\",\"accounts\":{}}";
+        assert!(atomic_write_file(&target, new_content).is_ok());
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), new_content);
+        assert!(!tmp_file.exists(), "覆盖保存成功后不得遗留 .tmp 文件");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_atomic_write_file_failure_preserves_original() {
+        let dir = std::env::temp_dir().join(format!("c2o_test_fail_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("accounts.json");
+        let tmp_file = dir.join("accounts.json.tmp");
+
+        let original = "original_protected_content";
+        std::fs::write(&target, original).unwrap();
+
+        // 在 Windows 上以排他且无共享删除权限打开目标文件，制造 rename 失败
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // share_mode = 0 表示不给任何共享读/写/删除权限
+            let lock_guard = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&target);
+
+            if let Ok(_guard) = lock_guard {
+                let res = atomic_write_file(&target, "corrupt_data");
+                assert!(res.is_err(), "目标文件被独占锁定时应报错");
+                // 释放锁验证原文件是否完好
+                drop(_guard);
+            }
+        }
+
+        // 验证原文件未被破坏
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            original,
+            "保存失败时原文件必须保持完整"
+        );
+        assert!(!tmp_file.exists(), "失败时临时文件必须被清理");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
