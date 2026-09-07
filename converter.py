@@ -461,7 +461,7 @@ def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None 
 
 
 async def _fetch_remote_models(*, transport=None) -> list[str]:
-    """尝试从云端获取动态模型列表，按 UID 隔离缓存，失败时优雅降级返回缓存或空列表。"""
+    """尝试从云端获取动态模型列表，按 UID 隔离缓存，失败时优雅降级返回缓存或空列表，并在 debug 级别输出可观测诊断日志。"""
     global _MODELS_CACHE
     now = time.time()
 
@@ -475,8 +475,8 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
             account = session.get("account") or {}
             token = auth.get("accessToken") or ""
             uid = account.get("uid") or ""
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"动态模型凭据读取降级 (CredentialManager): {_sanitize_log_text(str(e))}", level="debug")
     if not token:
         try:
             path = _accounts_file()
@@ -485,8 +485,8 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                 uid, session = _load_active_session(cfg)
                 auth = session.get("auth") or {}
                 token = auth.get("accessToken") or ""
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"动态模型凭据读取降级 (accounts.json): {_sanitize_log_text(str(e))}", level="debug")
 
     cache_key = str(uid).strip() or "default"
     cached = _MODELS_CACHE.get(cache_key, {})
@@ -496,6 +496,7 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
 
     use_transport = transport or _MODELS_TRANSPORT_OVERRIDE
     if not token and use_transport is None:
+        _log("动态模型拉取降级: 未获取到可用登录凭据或Token", level="debug")
         return list(cached_models)
 
     headers = {
@@ -510,9 +511,18 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
         async with httpx.AsyncClient(**client_kwargs) as c:
             r = await c.get(_MODELS_URL, headers=headers)
         if r.status_code == 200:
-            body = r.json()
-            if body.get("code") == 0 and isinstance(body.get("data"), dict):
-                raw_models = body["data"].get("models") or []
+            try:
+                body = r.json()
+            except Exception as e:
+                _log(f"动态模型拉取降级: 响应JSON解析失败 ({_sanitize_log_text(str(e))})", level="debug")
+                return list(cached_models)
+
+            if isinstance(body, dict) and body.get("code") == 0 and isinstance(body.get("data"), dict):
+                raw_models = body["data"].get("models")
+                if not isinstance(raw_models, list):
+                    _log(f"动态模型拉取降级: models字段缺失或非列表 (type={type(raw_models).__name__})", level="debug")
+                    return list(cached_models)
+
                 models = []
                 for m in raw_models:
                     if isinstance(m, dict):
@@ -522,8 +532,21 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                 if models:
                     _MODELS_CACHE[cache_key] = {"models": models, "expires_at": now + 60.0}
                     return list(models)
-    except Exception:
-        pass
+                else:
+                    _log("动态模型拉取降级: 云端返回有效模型列表为空", level="debug")
+            else:
+                err_code = body.get("code") if isinstance(body, dict) else "unknown"
+                _log(f"动态模型拉取降级: 响应结构异常或业务状态码错误 (code={err_code})", level="debug")
+        else:
+            _log(f"动态模型拉取降级: HTTP {r.status_code}", level="debug")
+    except httpx.TimeoutException as e:
+        _log(f"动态模型拉取降级: 请求超时 ({_sanitize_log_text(str(e))})", level="debug")
+    except httpx.HTTPError as e:
+        _log(f"动态模型拉取降级: 网络/HTTP异常 ({_sanitize_log_text(str(e))})", level="debug")
+    except json.JSONDecodeError as e:
+        _log(f"动态模型拉取降级: 响应JSON解析失败 ({_sanitize_log_text(str(e))})", level="debug")
+    except Exception as e:
+        _log(f"动态模型拉取降级: 未知异常 ({_sanitize_log_text(str(e))})", level="debug")
 
     return list((_MODELS_CACHE.get(cache_key) or {}).get("models") or [])
 
@@ -613,7 +636,7 @@ def _sanitize_log_text(text: str) -> str:
     """脱敏日志中的 Token、密钥和敏感认证头。"""
     text = re.sub(r'(Bearer\s+)[A-Za-z0-9_\-\.]{8,}', r'\1***', text)
     text = re.sub(
-        r'("?(?:accessToken|refreshToken|token|api[_-]?key|password)"?\s*:\s*")[^"]+(")',
+        r'("?(?:accessToken|refreshToken|token|api[_-]?key|password)"?\s*[:=]\s*["\']?)[^"\'\s,{}]+(["\']?)',
         r'\1***\2',
         text,
         flags=re.IGNORECASE,
