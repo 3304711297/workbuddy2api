@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -70,17 +70,77 @@ pub struct AppConfigState(pub Mutex<AppConfig>);
 // 独立存储于 window.json，避免与 AppConfig 契约纠缠；记录的是逻辑尺寸
 // ---------------------------------------------------------------------------
 
-/// 主窗口尺寸状态：latest 保存最近的逻辑尺寸，gen 为事件代数（用于 500ms 去抖判断）
+/// 主窗口尺寸状态：采用单后台 Worker + Channel 模型做 500ms 去抖，
+/// 彻底杜绝每次收到 Resized 事件都 spawn 新系统线程的线程风暴。
 pub struct WindowSizeState {
+    tx: SyncSender<(f64, f64)>,
     latest: Mutex<(f64, f64)>,
-    gen: AtomicU64,
 }
 
 impl Default for WindowSizeState {
     fn default() -> Self {
-        Self {
-            latest: Mutex::new((0.0, 0.0)),
-            gen: AtomicU64::new(0),
+        Self::new(500)
+    }
+}
+
+impl WindowSizeState {
+    pub fn new(debounce_ms: u64) -> Self {
+        // 容量为 64 的同步信道，配合 try_send 确保极高频事件不会阻塞 UI
+        let (tx, rx) = sync_channel::<(f64, f64)>(64);
+        let latest = Mutex::new((0.0, 0.0));
+
+        std::thread::Builder::new()
+            .name("window-resize-debouncer".into())
+            .spawn(move || {
+                run_resize_worker_with_sink(
+                    rx,
+                    std::time::Duration::from_millis(debounce_ms),
+                    save_window_size,
+                );
+            })
+            .expect("failed to spawn window-resize-debouncer");
+
+        Self { tx, latest }
+    }
+
+    pub fn update(&self, width: f64, height: f64) {
+        if let Ok(mut l) = self.latest.lock() {
+            *l = (width, height);
+        }
+        // 非阻塞发送；若队列暂满则丢弃中间瞬态，最新尺寸已由 Mutex 记录
+        let _ = self.tx.try_send((width, height));
+    }
+
+    pub fn get_latest(&self) -> (f64, f64) {
+        self.latest.lock().map(|v| *v).unwrap_or((0.0, 0.0))
+    }
+}
+
+pub(crate) fn run_resize_worker_with_sink<F>(
+    rx: Receiver<(f64, f64)>,
+    debounce_duration: std::time::Duration,
+    sink: F,
+) where
+    F: Fn(f64, f64),
+{
+    while let Ok(mut cur) = rx.recv() {
+        loop {
+            match rx.recv_timeout(debounce_duration) {
+                Ok(next) => {
+                    // 倒计时窗口内收到新尺寸，刷新最新值并重置倒计时
+                    cur = next;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // 静默期满，落盘最终尺寸
+                    sink(cur.0, cur.1);
+                    break;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    // Sender 释放（程序退出），写入最后尺寸并安全退出 worker
+                    sink(cur.0, cur.1);
+                    return;
+                }
+            }
         }
     }
 }
@@ -90,8 +150,6 @@ fn window_state_path() -> PathBuf {
     commands::local_app_dir().join("window.json")
 }
 
-/// 写入窗口逻辑尺寸；宽高 < 200 时不写（最小化/过渡态尺寸不落盘）。
-/// 先写临时文件再 rename 原子替换，避免写入中途被读到半截内容。
 fn save_window_size(width: f64, height: f64) {
     if width < 200.0 || height < 200.0 {
         return;
@@ -119,23 +177,11 @@ fn load_window_size() -> Option<(f64, f64)> {
     }
 }
 
-/// 事件去抖：记录最新逻辑尺寸并推进事件代数，500ms 内无新事件才由最后一个线程落盘
+/// 事件去抖：向单一后台 worker 投递最新尺寸，500ms 内无新事件才最终落盘
 fn track_window_resize(app: &tauri::AppHandle, logical_w: f64, logical_h: f64) {
-    let state = app.state::<WindowSizeState>();
-    if let Ok(mut latest) = state.latest.lock() {
-        *latest = (logical_w, logical_h);
+    if let Some(state) = app.try_state::<WindowSizeState>() {
+        state.update(logical_w, logical_h);
     }
-    let my_gen = state.gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // 仅当代数未被更新（500ms 内没有新事件）时才写盘，天然丢弃拖拽过程中的中间态
-        let st = app.state::<WindowSizeState>();
-        if st.gen.load(Ordering::SeqCst) == my_gen {
-            let (w, h) = st.latest.lock().map(|v| *v).unwrap_or((0.0, 0.0));
-            save_window_size(w, h);
-        }
-    });
 }
 
 fn config_file_path() -> PathBuf {
@@ -438,4 +484,79 @@ pub fn run_app() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod window_resize_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_resize_worker_single_debounce() {
+        let (tx, rx) = sync_channel::<(f64, f64)>(16);
+        let sink_calls = Arc::new(Mutex::new(Vec::<(f64, f64)>::new()));
+        let sink_calls_clone = sink_calls.clone();
+
+        let handle = std::thread::spawn(move || {
+            run_resize_worker_with_sink(
+                rx,
+                std::time::Duration::from_millis(50),
+                move |w, h| {
+                    sink_calls_clone.lock().unwrap().push((w, h));
+                },
+            );
+        });
+
+        tx.send((800.0, 600.0)).unwrap();
+        // 睡眠大于 50ms 静默窗口，触发落盘
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        drop(tx);
+        handle.join().unwrap();
+
+        let calls = sink_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "单次 resize 在静默后应恰好触发一次落盘");
+        assert_eq!(calls[0], (800.0, 600.0));
+    }
+
+    #[test]
+    fn test_resize_worker_continuous_rapid_resizes() {
+        let (tx, rx) = sync_channel::<(f64, f64)>(64);
+        let sink_calls = Arc::new(Mutex::new(Vec::<(f64, f64)>::new()));
+        let sink_calls_clone = sink_calls.clone();
+
+        let handle = std::thread::spawn(move || {
+            run_resize_worker_with_sink(
+                rx,
+                std::time::Duration::from_millis(50),
+                move |w, h| {
+                    sink_calls_clone.lock().unwrap().push((w, h));
+                },
+            );
+        });
+
+        // 模拟连续快速拖拽：发送 30 次，每次间隔 5ms（均远小于 50ms debounce 窗口）
+        for i in 1..=30 {
+            tx.send((100.0 + i as f64, 200.0 + i as f64)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // 停止拖动，等待 80ms 触发静默期落盘
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        drop(tx);
+        handle.join().unwrap();
+
+        let calls = sink_calls.lock().unwrap();
+        // 连续快速拖拽期间不应触发中间写入，最终落盘应恰好 1 次且等于最后一次尺寸
+        assert_eq!(calls.len(), 1, "高频连续拖拽在静默期结束前不应多次落盘");
+        assert_eq!(calls[0], (130.0, 230.0), "落盘尺寸必须为拖拽序列的最终尺寸");
+    }
+
+    #[test]
+    fn test_window_size_state_api() {
+        let state = WindowSizeState::new(30);
+        state.update(1024.0, 768.0);
+        assert_eq!(state.get_latest(), (1024.0, 768.0));
+    }
 }

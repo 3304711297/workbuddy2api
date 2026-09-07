@@ -221,34 +221,69 @@ pub fn open_logs_dir() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Result<String, String> {
-    let mut guard = handle.0.lock().map_err(|e| e.to_string())?;
-    let mut stopped = false;
-    if let Some(child) = guard.as_mut() {
-        if child.kill().is_ok() {
-            *guard = None;
-            stopped = true;
-        }
-    }
-
-    // 兜底清理可能残留的 converter.py 进程
+/// 按 PID 精确杀死进程树（Windows 下使用 taskkill /F /T /PID，连同子孙进程彻底拔起）。
+/// 彻底取缔 WMI/PowerShell 全机进程枚举与命令行模糊匹配。
+pub(crate) fn kill_process_tree_by_pid(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = Command::new("powershell.exe")
+        let output = Command::new("taskkill")
             .creation_flags(CREATE_NO_WINDOW)
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*converter.py*' -and $_.Name -eq 'python.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-            ])
-            .output();
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output()
+            .map_err(|e| format!("启动 taskkill 失败: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "[proxy_stop] taskkill PID {pid} 退出状态 {}: {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Result<String, String> {
+    let mut guard = handle.0.lock().map_err(|e| e.to_string())?;
+    let mut stopped = false;
+
+    if let Some(mut child) = guard.take() {
+        let pid = child.id();
+        let already_exited = child.try_wait().map(|s| s.is_some()).unwrap_or(false);
+
+        if !already_exited {
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(e) = kill_process_tree_by_pid(pid) {
+                    eprintln!("[proxy_stop] 精确结束进程树失败 (PID {pid}): {e}");
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Err(e) = child.kill() {
+                    eprintln!("[proxy_stop] 结束进程失败 (PID {pid}): {e}");
+                }
+            }
+            stopped = true;
+        } else {
+            eprintln!("[proxy_stop] 进程 (PID {pid}) 之前已自行退出");
+            stopped = true;
+        }
+
+        // 回收子进程句柄与资源
+        let _ = child.wait();
     }
 
-    // 成功停止后同样轮转一次日志：子进程已退出、兜底清理也已等待完毕，
-    // 此时文件不再被写入；失败（占用未释放）静默跳过，下次启动时会再次尝试
+    // 成功停止后轮转一次日志：子进程已退出，此时文件不再被写入
     if stopped {
         rotate_proxy_log_if_oversized();
     }
@@ -627,5 +662,30 @@ mod usage_tests {
         let v2 = aggregate_usage(&records[..1], now, h0 + 1);
         assert_eq!(v2["today"]["requests"], 0);
         assert_eq!(v2["overall"]["requests"], 1);
+    }
+
+    #[test]
+    fn test_kill_process_tree_by_pid_nonexistent() {
+        // 传入不存在的 PID 不应 panic，应安全返回
+        let res = kill_process_tree_by_pid(9_999_999);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_kill_process_tree_by_pid_real_process() {
+        // 启动一个休眠 10 秒的独立子进程
+        let mut child = Command::new("python")
+            .args(["-c", "import time; time.sleep(10)"])
+            .spawn()
+            .expect("failed to spawn test python process");
+        let pid = child.id();
+        assert!(pid > 0);
+
+        // 使用精确 PID 结束进程树
+        assert!(kill_process_tree_by_pid(pid).is_ok());
+
+        // 等待子进程退出并断言已成功停止
+        let status = child.wait().expect("wait failed");
+        assert!(!status.success());
     }
 }
