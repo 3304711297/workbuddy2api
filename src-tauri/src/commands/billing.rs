@@ -88,7 +88,8 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
     let token = auth.get("accessToken").and_then(|v| v.as_str()).ok_or("缺少 accessToken")?;
     let acct_uid = account.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
 
-    let client = reqwest::Client::new();
+    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    let client = super::shared::upstream_client(30);
     let resp = client
         .get("https://copilot.tencent.com/v2/enterprises/personal/models")
         .header("Authorization", format!("Bearer {token}"))
@@ -226,7 +227,8 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
     let acct_uid = account.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
     let nickname = account.get("nickname").and_then(|v| v.as_str()).unwrap_or("—").to_string();
 
-    let client = reqwest::Client::new();
+    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    let client = super::shared::upstream_client(30);
     let resp = client
         .post("https://copilot.tencent.com/billing/meter/get-user-resource-summary")
         .header("Authorization", format!("Bearer {token}"))

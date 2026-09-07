@@ -278,7 +278,13 @@ pub async fn proxy_restart(
 #[tauri::command]
 pub async fn proxy_health(port: u16) -> Result<serde_json::Value, String> {
     let url = format!("http://127.0.0.1:{port}/health");
-    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    // 本机环回直连，绕过环境代理：否则 ALL_PROXY 指向 3067 时，
+    // Karing 未连节点会让健康检查挂起，误报「内核未启动」
+    let resp = super::shared::local_client(10)
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     resp.json().await.map_err(|e| e.to_string())
 }
 
@@ -290,10 +296,8 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
 
     // 30s 总超时：reqwest 客户端级 timeout 覆盖「发起连接 → 响应体读取完毕」全过程，
     // 流式读取中途挂起同样会在 30s 处触发 Err，无需单独的读超时
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // 同时绕过环境代理，避免本机请求被送去 3067 而受 Karing 节点状态牵连
+    let client = super::shared::local_client(30);
 
     // 对标上游 provider_health.rs 的流式判首包思路：发 stream:true 请求逐块解析 SSE，
     // 第一个非空 delta.content 到达的时刻即为 TTFT（首字时延）

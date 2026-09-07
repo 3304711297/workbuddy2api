@@ -40,7 +40,8 @@ pub struct AccountItem {
 #[tauri::command]
 pub async fn auth_begin(platform: String) -> Result<LoginState, String> {
     let url = format!("https://copilot.tencent.com/v2/plugin/auth/state?platform={platform}");
-    let client = reqwest::Client::new();
+    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    let client = super::shared::upstream_client(30);
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -73,7 +74,8 @@ pub async fn auth_begin(platform: String) -> Result<LoginState, String> {
 #[tauri::command]
 pub async fn auth_poll(state: String) -> Result<TokenPollResult, String> {
     let url = format!("https://copilot.tencent.com/v2/plugin/auth/token?state={state}");
-    let client = reqwest::Client::new();
+    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    let client = super::shared::upstream_client(30);
     let resp = client
         .get(&url)
         .header("X-No-Authorization", "true")
@@ -196,7 +198,8 @@ pub async fn accounts_refresh_token(uid: Option<String>) -> Result<String, Strin
     let acct = session.get("account").ok_or("缺少 account 节点")?;
     let uid_str = acct.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
 
-    let client = reqwest::Client::new();
+    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    let client = super::shared::upstream_client(30);
     let resp = client
         .post("https://copilot.tencent.com/v2/plugin/auth/token/refresh")
         .header("Content-Type", "application/json")

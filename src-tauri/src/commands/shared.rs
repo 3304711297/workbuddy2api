@@ -15,6 +15,37 @@ pub(super) fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+// ---------------------------------------------------------------------------
+// 统一 HTTP 客户端构造：本机环回直连优先
+// ---------------------------------------------------------------------------
+
+/// 构造「绕过一切系统/环境代理」的 reqwest 客户端，专用于访问本机环回地址（127.0.0.1 等）。
+///
+/// 背景：reqwest 默认 `trust_env` 会读取 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`。
+/// 用户环境全局设置了 `ALL_PROXY=http://127.0.0.1:3067`（Karing 混合端口），
+/// 导致访问本机反代 `/health`、`/v1/chat/completions` 时也被送去 3067；
+/// 一旦 Karing 未连接节点，3067 虽在监听但上游超时，健康检查就会挂起，
+/// 表现为「必须开代理才能启动内核」。绕过代理即可彻底摆脱该依赖。
+pub(super) fn local_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// 构造访问腾讯上游（copilot.tencent.com）的客户端。
+///
+/// 该域名国内可直连，无需也不应经过代理；同样显式绕过环境代理，
+/// 避免因代理节点故障导致账号刷新 / 配额查询失败。
+pub(super) fn upstream_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// %LOCALAPPDATA%（优先环境变量；缺省时从 USERPROFILE 派生；最终回退系统已知目录，不再硬编码用户目录）
 pub(crate) fn local_appdata() -> PathBuf {
     if let Some(v) = env_nonempty("LOCALAPPDATA") {

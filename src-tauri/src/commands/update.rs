@@ -40,8 +40,11 @@ async fn fetch_latest_release(proxy: Option<&str>) -> Result<serde_json::Value, 
     let mut builder = reqwest::Client::builder()
         .user_agent("codebuddy2openai-gui")
         .timeout(Duration::from_secs(10));
-    if let Some(p) = proxy {
-        builder = builder.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?);
+    match proxy {
+        // 显式指定代理（回退路径）：正常吃该代理
+        Some(p) => builder = builder.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?),
+        // 直连尝试：绕过环境代理，避免本机/内网可达时仍被送去 3067 徒增一跳
+        None => builder = builder.no_proxy(),
     }
     let resp = builder
         .build()
