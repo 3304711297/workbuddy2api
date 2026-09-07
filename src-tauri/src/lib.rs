@@ -70,11 +70,14 @@ pub struct AppConfigState(pub Mutex<AppConfig>);
 // 独立存储于 window.json，避免与 AppConfig 契约纠缠；记录的是逻辑尺寸
 // ---------------------------------------------------------------------------
 
-/// 主窗口尺寸状态：采用单后台 Worker + Channel 模型做 500ms 去抖，
-/// 彻底杜绝每次收到 Resized 事件都 spawn 新系统线程的线程风暴。
+/// 主窗口尺寸状态：采用单后台 Worker + 通知 Channel 模型做 500ms 去抖。
+/// 关键保证：
+/// 1. `latest` Mutex 是落盘尺寸的唯一真源；
+/// 2. Channel 仅传递通知信号 `()`，绝不由信道队列决定最终尺寸；
+/// 3. 高频 resize 导致 channel 满丢弃通知时，静默期满后落盘的仍 100% 必定是最后一次 update() 的尺寸。
 pub struct WindowSizeState {
-    tx: SyncSender<(f64, f64)>,
-    latest: Mutex<(f64, f64)>,
+    tx: SyncSender<()>,
+    latest: std::sync::Arc<Mutex<(f64, f64)>>,
 }
 
 impl Default for WindowSizeState {
@@ -85,15 +88,17 @@ impl Default for WindowSizeState {
 
 impl WindowSizeState {
     pub fn new(debounce_ms: u64) -> Self {
-        // 容量为 64 的同步信道，配合 try_send 确保极高频事件不会阻塞 UI
-        let (tx, rx) = sync_channel::<(f64, f64)>(64);
-        let latest = Mutex::new((0.0, 0.0));
+        // 容量为 64 的同步信道仅传递信号 ()，配合 try_send 确保极高频事件不会阻塞 UI
+        let (tx, rx) = sync_channel::<()>(64);
+        let latest = std::sync::Arc::new(Mutex::new((0.0, 0.0)));
+        let latest_worker = latest.clone();
 
         std::thread::Builder::new()
             .name("window-resize-debouncer".into())
             .spawn(move || {
                 run_resize_worker_with_sink(
                     rx,
+                    latest_worker,
                     std::time::Duration::from_millis(debounce_ms),
                     save_window_size,
                 );
@@ -104,11 +109,12 @@ impl WindowSizeState {
     }
 
     pub fn update(&self, width: f64, height: f64) {
+        // 先写唯一真源 latest
         if let Ok(mut l) = self.latest.lock() {
             *l = (width, height);
         }
-        // 非阻塞发送；若队列暂满则丢弃中间瞬态，最新尺寸已由 Mutex 记录
-        let _ = self.tx.try_send((width, height));
+        // 仅触发通知；即使队列满丢弃通知，由于已有通知处于等待中，静默期后必读 latest 最新尺寸
+        let _ = self.tx.try_send(());
     }
 
     pub fn get_latest(&self) -> (f64, f64) {
@@ -117,27 +123,29 @@ impl WindowSizeState {
 }
 
 pub(crate) fn run_resize_worker_with_sink<F>(
-    rx: Receiver<(f64, f64)>,
+    rx: Receiver<()>,
+    latest: std::sync::Arc<Mutex<(f64, f64)>>,
     debounce_duration: std::time::Duration,
     sink: F,
 ) where
     F: Fn(f64, f64),
 {
-    while let Ok(mut cur) = rx.recv() {
+    while let Ok(()) = rx.recv() {
         loop {
             match rx.recv_timeout(debounce_duration) {
-                Ok(next) => {
-                    // 倒计时窗口内收到新尺寸，刷新最新值并重置倒计时
-                    cur = next;
+                Ok(()) => {
+                    // 防抖窗口内收到新事件通知，重置倒计时继续等待静默
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    // 静默期满，落盘最终尺寸
-                    sink(cur.0, cur.1);
+                    // 静默期满，严格从唯一真源 latest 中读取最新真实尺寸落盘
+                    let (w, h) = latest.lock().map(|v| *v).unwrap_or((0.0, 0.0));
+                    sink(w, h);
                     break;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    // Sender 释放（程序退出），写入最后尺寸并安全退出 worker
-                    sink(cur.0, cur.1);
+                    // Sender 释放（程序退出），落盘最新真实尺寸并安全退出 worker
+                    let (w, h) = latest.lock().map(|v| *v).unwrap_or((0.0, 0.0));
+                    sink(w, h);
                     return;
                 }
             }
@@ -493,13 +501,16 @@ mod window_resize_tests {
 
     #[test]
     fn test_resize_worker_single_debounce() {
-        let (tx, rx) = sync_channel::<(f64, f64)>(16);
+        let (tx, rx) = sync_channel::<()>(16);
+        let latest = Arc::new(Mutex::new((0.0, 0.0)));
+        let latest_clone = latest.clone();
         let sink_calls = Arc::new(Mutex::new(Vec::<(f64, f64)>::new()));
         let sink_calls_clone = sink_calls.clone();
 
         let handle = std::thread::spawn(move || {
             run_resize_worker_with_sink(
                 rx,
+                latest_clone,
                 std::time::Duration::from_millis(50),
                 move |w, h| {
                     sink_calls_clone.lock().unwrap().push((w, h));
@@ -507,7 +518,8 @@ mod window_resize_tests {
             );
         });
 
-        tx.send((800.0, 600.0)).unwrap();
+        *latest.lock().unwrap() = (800.0, 600.0);
+        tx.send(()).unwrap();
         // 睡眠大于 50ms 静默窗口，触发落盘
         std::thread::sleep(std::time::Duration::from_millis(80));
 
@@ -521,13 +533,16 @@ mod window_resize_tests {
 
     #[test]
     fn test_resize_worker_continuous_rapid_resizes() {
-        let (tx, rx) = sync_channel::<(f64, f64)>(64);
+        let (tx, rx) = sync_channel::<()>(64);
+        let latest = Arc::new(Mutex::new((0.0, 0.0)));
+        let latest_clone = latest.clone();
         let sink_calls = Arc::new(Mutex::new(Vec::<(f64, f64)>::new()));
         let sink_calls_clone = sink_calls.clone();
 
         let handle = std::thread::spawn(move || {
             run_resize_worker_with_sink(
                 rx,
+                latest_clone,
                 std::time::Duration::from_millis(50),
                 move |w, h| {
                     sink_calls_clone.lock().unwrap().push((w, h));
@@ -537,7 +552,8 @@ mod window_resize_tests {
 
         // 模拟连续快速拖拽：发送 30 次，每次间隔 5ms（均远小于 50ms debounce 窗口）
         for i in 1..=30 {
-            tx.send((100.0 + i as f64, 200.0 + i as f64)).unwrap();
+            *latest.lock().unwrap() = (100.0 + i as f64, 200.0 + i as f64);
+            let _ = tx.try_send(());
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
@@ -551,6 +567,57 @@ mod window_resize_tests {
         // 连续快速拖拽期间不应触发中间写入，最终落盘应恰好 1 次且等于最后一次尺寸
         assert_eq!(calls.len(), 1, "高频连续拖拽在静默期结束前不应多次落盘");
         assert_eq!(calls[0], (130.0, 230.0), "落盘尺寸必须为拖拽序列的最终尺寸");
+    }
+
+    #[test]
+    fn test_resize_worker_channel_overflow_latest_source_of_truth() {
+        // 关键压力测试：故意使用极小容量信道（capacity = 1），高频发送 100 次事件
+        // 大量通知信号会被 try_send 丢弃，但 Worker 在静默期满后必须严格从 latest 读取最终尺寸
+        let (tx, rx) = sync_channel::<()>(1);
+        let latest = Arc::new(Mutex::new((0.0, 0.0)));
+        let latest_clone = latest.clone();
+        let sink_calls = Arc::new(Mutex::new(Vec::<(f64, f64)>::new()));
+        let sink_calls_clone = sink_calls.clone();
+
+        let handle = std::thread::spawn(move || {
+            run_resize_worker_with_sink(
+                rx,
+                latest_clone,
+                std::time::Duration::from_millis(50),
+                move |w, h| {
+                    sink_calls_clone.lock().unwrap().push((w, h));
+                },
+            );
+        });
+
+        // 连续密集更新 100 次，最后一次尺寸为 (999.0, 888.0)
+        let mut dropped_signals = 0;
+        for i in 1..=100 {
+            *latest.lock().unwrap() = (100.0 + i as f64, 200.0 + i as f64);
+            if tx.try_send(()).is_err() {
+                dropped_signals += 1;
+            }
+        }
+        // 确保确有信号因队列满被丢弃，构成压力测试场景
+        assert!(dropped_signals > 0, "capacity=1 下应有事件通知被丢弃");
+
+        // 最后一次显式更新最终尺寸
+        *latest.lock().unwrap() = (999.0, 888.0);
+        let _ = tx.try_send(());
+
+        // 停止操作，等待 80ms 超越 50ms 静默窗口期
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        drop(tx);
+        handle.join().unwrap();
+
+        let calls = sink_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "静默期结束后必须恰好触发 1 次最终落盘");
+        assert_eq!(
+            calls[0],
+            (999.0, 888.0),
+            "无论通知队列丢弃多少次信号，最终落盘必须严格等于 latest 的最后一次尺寸"
+        );
     }
 
     #[test]

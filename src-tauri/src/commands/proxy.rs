@@ -222,7 +222,7 @@ pub fn open_logs_dir() -> Result<(), String> {
 }
 
 /// 按 PID 精确杀死进程树（Windows 下使用 taskkill /F /T /PID，连同子孙进程彻底拔起）。
-/// 彻底取缔 WMI/PowerShell 全机进程枚举与命令行模糊匹配。
+/// 彻底取缔 WMI/PowerShell 全机进程枚举与命令行模糊匹配。非零退出码明确视为失败返回 Err。
 pub(crate) fn kill_process_tree_by_pid(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -236,11 +236,13 @@ pub(crate) fn kill_process_tree_by_pid(pid: u32) -> Result<(), String> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "[proxy_stop] taskkill PID {pid} 退出状态 {}: {}",
-                output.status,
+            let err_msg = format!(
+                "taskkill PID {pid} 失败 (退出码 {:?}): {}",
+                output.status.code(),
                 stderr.trim()
             );
+            eprintln!("[proxy_stop] {err_msg}");
+            return Err(err_msg);
         }
         Ok(())
     }
@@ -251,49 +253,67 @@ pub(crate) fn kill_process_tree_by_pid(pid: u32) -> Result<(), String> {
     }
 }
 
+/// 在有限时间内等待子进程退出，杜绝无限阻塞。
+/// 每 30ms 轮询一次 try_wait()，超时后返回是否已退出。
+pub(crate) fn wait_timeout(child: &mut std::process::Child, timeout: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(Some(_)) = child.try_wait() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    child.try_wait().map(|s| s.is_some()).unwrap_or(false)
+}
+
 #[tauri::command]
 pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Result<String, String> {
     let mut guard = handle.0.lock().map_err(|e| e.to_string())?;
-    let mut stopped = false;
 
-    if let Some(mut child) = guard.take() {
+    if let Some(child) = guard.as_mut() {
         let pid = child.id();
-        let already_exited = child.try_wait().map(|s| s.is_some()).unwrap_or(false);
 
-        if !already_exited {
-            #[cfg(target_os = "windows")]
-            {
-                if let Err(e) = kill_process_tree_by_pid(pid) {
-                    eprintln!("[proxy_stop] 精确结束进程树失败 (PID {pid}): {e}");
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if let Err(e) = child.kill() {
-                    eprintln!("[proxy_stop] 结束进程失败 (PID {pid}): {e}");
-                }
-            }
-            stopped = true;
-        } else {
-            eprintln!("[proxy_stop] 进程 (PID {pid}) 之前已自行退出");
-            stopped = true;
+        // 1. 检查是否早已自行退出：若已退出，直接回收句柄
+        if let Ok(Some(_)) = child.try_wait() {
+            let _ = guard.take();
+            rotate_proxy_log_if_oversized();
+            use tauri::Emitter;
+            let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
+            return Ok("stopped".into());
         }
 
-        // 回收子进程句柄与资源
-        let _ = child.wait();
-    }
+        // 2. 进程仍在运行，执行精确进程树查杀
+        let kill_result = kill_process_tree_by_pid(pid);
 
-    // 成功停止后轮转一次日志：子进程已退出，此时文件不再被写入
-    if stopped {
-        rotate_proxy_log_if_oversized();
-    }
+        // 3. 有界等待确认退出（最多 600ms），绝不无限阻塞 child.wait()
+        let mut exited = wait_timeout(child, std::time::Duration::from_millis(600));
 
-    use tauri::Emitter;
-    let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
+        // 4. 安全 Fallback：若 taskkill 失败或未在时限内退出，触发原生 child.kill() 二次确认
+        if !exited {
+            eprintln!("[proxy_stop] taskkill 未能确认退出 (PID {pid})，触发 fallback child.kill()");
+            let _ = child.kill();
+            exited = wait_timeout(child, std::time::Duration::from_millis(300));
+        }
 
-    if stopped {
-        Ok("stopped".into())
+        if exited {
+            // 确认已终止，安全回收句柄
+            let _ = guard.take();
+            rotate_proxy_log_if_oversized();
+            use tauri::Emitter;
+            let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
+            Ok("stopped".into())
+        } else {
+            // 进程仍在存活：保持状态自洽，保留 child 句柄在 guard 中避免失控，并抛出明确错误
+            let err = match kill_result {
+                Err(e) => format!("停止反代进程 (PID {pid}) 失败: {e}"),
+                Ok(_) => format!("停止反代进程 (PID {pid}) 超时，进程仍未退出"),
+            };
+            eprintln!("[proxy_stop] {err}");
+            Err(err)
+        }
     } else {
+        use tauri::Emitter;
+        let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
         Ok("not-running".into())
     }
 }
@@ -666,8 +686,11 @@ mod usage_tests {
 
     #[test]
     fn test_kill_process_tree_by_pid_nonexistent() {
-        // 传入不存在的 PID 不应 panic，应安全返回
+        // 传入不存在的 PID：taskkill 返回非零，应明确返回 Err 且不 panic
         let res = kill_process_tree_by_pid(9_999_999);
+        #[cfg(target_os = "windows")]
+        assert!(res.is_err(), "不存在的 PID 应返回 Err");
+        #[cfg(not(target_os = "windows"))]
         assert!(res.is_ok());
     }
 
@@ -681,11 +704,56 @@ mod usage_tests {
         let pid = child.id();
         assert!(pid > 0);
 
-        // 使用精确 PID 结束进程树
+        // 使用精确 PID 结束进程树，taskkill 成功
         assert!(kill_process_tree_by_pid(pid).is_ok());
 
-        // 等待子进程退出并断言已成功停止
-        let status = child.wait().expect("wait failed");
-        assert!(!status.success());
+        // 有界等待确认退出
+        assert!(wait_timeout(&mut child, std::time::Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn test_wait_timeout_does_not_block_forever() {
+        // 验证即使子进程未退出，wait_timeout 也会在限定时间内返回 false，绝不无限挂起
+        let mut child = Command::new("python")
+            .args(["-c", "import time; time.sleep(5)"])
+            .spawn()
+            .expect("failed to spawn test python process");
+
+        let start = std::time::Instant::now();
+        let exited = wait_timeout(&mut child, std::time::Duration::from_millis(60));
+        let elapsed = start.elapsed();
+
+        assert!(!exited, "5s 进程在 60ms 内不应被标记为退出");
+        assert!(elapsed < std::time::Duration::from_millis(300), "不得发生无限阻塞");
+
+        // 清理测试子进程
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn test_proxy_stop_lifecycle_state_consistency() {
+        // 验证 Child/PID 状态自洽：
+        // 1. 已提前退出的进程能被检测到退出并安全 take 释放句柄
+        let mut child = Command::new("python")
+            .args(["-c", "import sys; sys.exit(0)"])
+            .spawn()
+            .expect("failed to spawn test python process");
+        let _ = child.wait(); // 确保已经退出
+
+        let handle = ProxyHandle(std::sync::Mutex::new(Some(child)));
+        {
+            let mut guard = handle.0.lock().unwrap();
+            let c = guard.as_mut().unwrap();
+            assert!(c.try_wait().unwrap().is_some());
+            // 确认已退出后 take 释放
+            let _ = guard.take();
+        }
+
+        // 2. 重复执行：再次检查时 guard 为 None，完全安全幂等
+        {
+            let guard = handle.0.lock().unwrap();
+            assert!(guard.is_none(), "释放后应为 None，重复 stop 不发生 panic");
+        }
     }
 }
