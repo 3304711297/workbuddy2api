@@ -200,21 +200,183 @@ fn generate_alias_entry_lines(name: &str, model: &str, port: u16, indent: &str) 
     ]
 }
 
-fn find_block_extent(lines: &[String], start: usize, header_indent: usize, limit_end: usize) -> usize {
-    let mut end = start + 1;
-    while end < limit_end {
-        let line = &lines[end];
+fn find_item_extent(lines: &[String], start: usize, header_indent: usize, limit_end: usize) -> usize {
+    let mut last_content = start;
+    for j in (start + 1)..limit_end {
+        let line = &lines[j];
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            break;
+            continue;
         }
         let indent = line.len() - line.trim_start().len();
         if indent <= header_indent {
             break;
         }
-        end += 1;
+        last_content = j;
     }
-    end
+    last_content + 1
+}
+
+fn extract_yaml_value(line: &str) -> String {
+    let (_, val_part) = match line.split_once(':') {
+        Some(pair) => pair,
+        None => return String::new(),
+    };
+    let val_trimmed = val_part.trim();
+    if val_trimmed.starts_with('"') {
+        if let Some(end_q) = val_trimmed[1..].find('"') {
+            return val_trimmed[1..=end_q].to_string();
+        }
+    } else if val_trimmed.starts_with('\'') {
+        if let Some(end_q) = val_trimmed[1..].find('\'') {
+            return val_trimmed[1..=end_q].to_string();
+        }
+    }
+    let clean = val_trimmed.split('#').next().unwrap_or("").trim();
+    clean.to_string()
+}
+
+fn update_yaml_line_value(line: &str, new_val: &str) -> String {
+    let (key_part, val_part) = match line.split_once(':') {
+        Some(pair) => pair,
+        None => return line.to_string(),
+    };
+    let hash_pos = val_part.find('#');
+    let inline_comment = if let Some(pos) = hash_pos {
+        let before_hash = &val_part[..pos];
+        let dquotes = before_hash.matches('"').count();
+        let squotes = before_hash.matches('\'').count();
+        if dquotes % 2 == 0 && squotes % 2 == 0 {
+            Some(&val_part[pos..])
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match inline_comment {
+        Some(comment) => format!("{key_part}: \"{new_val}\" {comment}"),
+        None => format!("{key_part}: \"{new_val}\""),
+    }
+}
+
+fn reconcile_alias_block(
+    lines: &mut Vec<String>,
+    alias_start: usize,
+    alias_end: usize,
+    expected_model: &str,
+    expected_url: &str,
+) -> usize {
+    let header_line = &lines[alias_start];
+    let header_indent = header_line.len() - header_line.trim_start().len();
+
+    // 探测属性行缩进
+    let mut prop_indent = format!("{}  ", &header_line[..header_indent]);
+    for j in (alias_start + 1)..alias_end {
+        let l = &lines[j];
+        let t = l.trim();
+        if !t.is_empty() && !t.starts_with('#') {
+            let ind = l.len() - l.trim_start().len();
+            if ind > header_indent {
+                prop_indent = l[..ind].to_string();
+                break;
+            }
+        }
+    }
+
+    let mut found_model = None;
+    let mut found_provider = None;
+    let mut found_base_url = None;
+    let mut last_prop_idx = alias_start;
+
+    for j in (alias_start + 1)..alias_end {
+        let t = lines[j].trim();
+        if t.starts_with("model:") || t.starts_with("model ") {
+            found_model = Some(j);
+            last_prop_idx = j;
+        } else if t.starts_with("provider:") || t.starts_with("provider ") {
+            found_provider = Some(j);
+            last_prop_idx = j;
+        } else if t.starts_with("base_url:") || t.starts_with("base_url ") {
+            found_base_url = Some(j);
+            last_prop_idx = j;
+        } else if !t.is_empty() && !t.starts_with('#') {
+            last_prop_idx = j;
+        }
+    }
+
+    let mut current_end = alias_end;
+
+    // 1. 校正 model
+    match found_model {
+        Some(idx) => {
+            let val = extract_yaml_value(&lines[idx]);
+            if val != expected_model {
+                lines[idx] = update_yaml_line_value(&lines[idx], expected_model);
+            }
+        }
+        None => {
+            lines.insert(
+                last_prop_idx + 1,
+                format!("{prop_indent}model: \"{expected_model}\""),
+            );
+            last_prop_idx += 1;
+            current_end += 1;
+            if let Some(ref mut p) = found_provider {
+                if *p >= last_prop_idx {
+                    *p += 1;
+                }
+            }
+            if let Some(ref mut b) = found_base_url {
+                if *b >= last_prop_idx {
+                    *b += 1;
+                }
+            }
+        }
+    }
+
+    // 2. 校正 provider
+    match found_provider {
+        Some(idx) => {
+            let val = extract_yaml_value(&lines[idx]);
+            if val != "custom" {
+                lines[idx] = update_yaml_line_value(&lines[idx], "custom");
+            }
+        }
+        None => {
+            lines.insert(
+                last_prop_idx + 1,
+                format!("{prop_indent}provider: \"custom\""),
+            );
+            last_prop_idx += 1;
+            current_end += 1;
+            if let Some(ref mut b) = found_base_url {
+                if *b >= last_prop_idx {
+                    *b += 1;
+                }
+            }
+        }
+    }
+
+    // 3. 校正 base_url
+    match found_base_url {
+        Some(idx) => {
+            let val = extract_yaml_value(&lines[idx]);
+            if val != expected_url {
+                lines[idx] = update_yaml_line_value(&lines[idx], expected_url);
+            }
+        }
+        None => {
+            lines.insert(
+                last_prop_idx + 1,
+                format!("{prop_indent}base_url: \"{expected_url}\""),
+            );
+            current_end += 1;
+        }
+    }
+
+    current_end
 }
 
 /// 精准文本 Patch：仅修改/注入 Hermes 所需配置，100% 保持用户注释、空行、原有键顺序与缩进。
@@ -231,7 +393,7 @@ pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String
                 lines.insert(h_idx + 1 + offset, line);
             }
         } else {
-            // 扫描 start..end 内的所有列表项
+            // 扫描 start..end 内的所有列表项（允许 block 内部存在空行和注释）
             let mut items: Vec<(usize, usize, String)> = Vec::new();
             let mut i = start;
             while i < end {
@@ -240,7 +402,7 @@ pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String
                 if trimmed.starts_with("- ") || trimmed == "-" {
                     let leading_spaces = line.len() - trimmed.len();
                     let cur_indent = line[..leading_spaces].to_string();
-                    let item_end = find_block_extent(&lines, i, leading_spaces, end);
+                    let item_end = find_item_extent(&lines, i, leading_spaces, end);
                     items.push((i, item_end, cur_indent));
                     i = item_end;
                 } else {
@@ -285,33 +447,32 @@ pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String
         lines.extend(new_item);
     }
 
-    // 2. 处理 model_aliases
+    // 2. 处理 model_aliases（完整三字段校验与按需补齐）
     if let Some((h_idx, start, mut end)) = find_top_level_section(&lines, "model_aliases") {
         if lines[h_idx].contains("{}") {
             lines[h_idx] = "model_aliases:".into();
         }
         for (name, model) in WORKBUDDY_ALIASES_SPECS {
             let mut alias_found = false;
-            for i in start..end {
+            let mut i = start;
+            while i < end {
                 let line = &lines[i];
                 let trimmed = line.trim();
-                if trimmed == format!("{name}:") || trimmed.starts_with(&format!("{name}:")) {
+                let is_this_alias = (line.starts_with("  ") || line.starts_with("    "))
+                    && !line.starts_with("      ")
+                    && (trimmed == format!("{name}:") || trimmed.starts_with(&format!("{name}:")));
+
+                if is_this_alias {
                     alias_found = true;
-                    // 检查此 alias 块内部的 base_url
-                    let expected_url = format!("http://127.0.0.1:{port}/v1");
                     let header_indent = line.len() - line.trim_start().len();
-                    let alias_end = find_block_extent(&lines, i, header_indent, end);
-                    for j in (i + 1)..alias_end {
-                        let sub_trimmed = lines[j].trim();
-                        if sub_trimmed.starts_with("base_url:") {
-                            if !sub_trimmed.contains(&expected_url) {
-                                let leading = &lines[j][..lines[j].len() - sub_trimmed.len()];
-                                lines[j] = format!("{leading}base_url: \"{expected_url}\"");
-                            }
-                            break;
-                        }
-                    }
+                    let alias_end = find_item_extent(&lines, i, header_indent, end);
+                    let expected_url = format!("http://127.0.0.1:{port}/v1");
+                    let new_end = reconcile_alias_block(&mut lines, i, alias_end, model, &expected_url);
+                    let diff = new_end - alias_end;
+                    end += diff;
                     break;
+                } else {
+                    i += 1;
                 }
             }
             if !alias_found {
@@ -358,7 +519,7 @@ pub(crate) fn remove_hermes_config_content(raw: &str) -> Result<String, String> 
             let trimmed = line.trim_start();
             if trimmed.starts_with("- ") || trimmed == "-" {
                 let header_indent = line.len() - trimmed.len();
-                let item_end = find_block_extent(&lines, i, header_indent, end);
+                let item_end = find_item_extent(&lines, i, header_indent, end);
                 items.push((i, item_end));
                 i = item_end;
             } else {
@@ -391,7 +552,7 @@ pub(crate) fn remove_hermes_config_content(raw: &str) -> Result<String, String> 
 
             if is_alias_header {
                 let header_indent = line.len() - trimmed.len();
-                let alias_end = find_block_extent(&lines, i, header_indent, end);
+                let alias_end = find_item_extent(&lines, i, header_indent, end);
                 alias_ranges.push((i, alias_end));
                 i = alias_end;
             } else {
@@ -720,5 +881,212 @@ model_aliases:
         assert!(cleaned.contains("other-alias:"));
         assert!(!cleaned.contains("WorkBuddy"));
         assert!(!cleaned.contains("workbuddy:"));
+    }
+
+    // 边界测试 1: 已有 alias 三个字段全部正确 → 零修改
+    #[test]
+    fn test_alias_all_three_fields_correct_zero_change() {
+        let input = r#"model_aliases:
+  workbuddy-glm:
+    model: "glm-5.2"
+    provider: "custom"
+    base_url: "http://127.0.0.1:8787/v1"
+"#;
+        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        // 包含其他未出现的 alias，但对已有且正确的 workbuddy-glm 必须零修改
+        assert!(patched.contains("  workbuddy-glm:\n    model: \"glm-5.2\"\n    provider: \"custom\"\n    base_url: \"http://127.0.0.1:8787/v1\""));
+    }
+
+    // 边界测试 2: model 错误 → 只修 model
+    #[test]
+    fn test_alias_model_wrong_only_fixes_model() {
+        let input = r#"model_aliases:
+  workbuddy-glm:
+    model: "wrong-model" # 保留注释
+    provider: "custom"
+    base_url: "http://127.0.0.1:8787/v1"
+"#;
+        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        assert!(patched.contains("model: \"glm-5.2\" # 保留注释"));
+        assert!(!patched.contains("wrong-model"));
+        assert!(patched.contains("provider: \"custom\""));
+        assert!(patched.contains("base_url: \"http://127.0.0.1:8787/v1\""));
+    }
+
+    // 边界测试 3: provider 错误 → 只修 provider
+    #[test]
+    fn test_alias_provider_wrong_only_fixes_provider() {
+        let input = r#"model_aliases:
+  workbuddy-glm:
+    model: "glm-5.2"
+    provider: "openai" # 旧 provider
+    base_url: "http://127.0.0.1:8787/v1"
+"#;
+        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        assert!(patched.contains("provider: \"custom\" # 旧 provider"));
+        assert!(!patched.contains("\"openai\""));
+        assert!(patched.contains("model: \"glm-5.2\""));
+        assert!(patched.contains("base_url: \"http://127.0.0.1:8787/v1\""));
+    }
+
+    // 边界测试 4: base_url 错误 → 只修 base_url
+    #[test]
+    fn test_alias_base_url_wrong_only_fixes_base_url() {
+        let input = r#"model_aliases:
+  workbuddy-glm:
+    model: "glm-5.2"
+    provider: "custom"
+    base_url: "http://127.0.0.1:9999/v1" # 旧端口
+"#;
+        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        assert!(patched.contains("base_url: \"http://127.0.0.1:8787/v1\" # 旧端口"));
+        assert!(!patched.contains("9999"));
+        assert!(patched.contains("model: \"glm-5.2\""));
+        assert!(patched.contains("provider: \"custom\""));
+    }
+
+    // 边界测试 5: 缺少其中一个字段 → 精准补齐
+    #[test]
+    fn test_alias_missing_field_precise_completion() {
+        let input = r#"model_aliases:
+  workbuddy-glm:
+    model: "glm-5.2"
+    base_url: "http://127.0.0.1:8787/v1"
+"#;
+        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        assert!(patched.contains("provider: \"custom\""));
+        assert!(patched.contains("model: \"glm-5.2\""));
+        assert!(patched.contains("base_url: \"http://127.0.0.1:8787/v1\""));
+
+        // 再测试缺少 model
+        let input2 = r#"model_aliases:
+  workbuddy-glm:
+    provider: "custom"
+    base_url: "http://127.0.0.1:8787/v1"
+"#;
+        let patched2 = patch_hermes_config_content(input2, 8787).unwrap();
+        assert!(patched2.contains("model: \"glm-5.2\""));
+        assert!(patched2.contains("provider: \"custom\""));
+        assert!(patched2.contains("base_url: \"http://127.0.0.1:8787/v1\""));
+    }
+
+    // 边界测试 6: alias block 内存在空行/注释 → 不破坏 block
+    #[test]
+    fn test_alias_block_with_blank_lines_and_comments() {
+        let input = r#"model_aliases:
+  workbuddy-glm:
+    # 顶部说明
+
+    model: "wrong-model"
+
+    # 中间说明
+    provider: "custom"
+
+    base_url: "http://127.0.0.1:8787/v1"
+    # 底部说明
+  other-alias:
+    model: "foo"
+"#;
+        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        assert!(patched.contains("# 顶部说明"));
+        assert!(patched.contains("# 中间说明"));
+        assert!(patched.contains("# 底部说明"));
+        assert!(patched.contains("model: \"glm-5.2\""));
+        assert!(patched.contains("other-alias:\n    model: \"foo\""));
+    }
+
+    // 边界测试 7: configure → remove → configure 后结构仍正常
+    #[test]
+    fn test_configure_remove_configure_cycle() {
+        let initial = r#"# 系统基线配置
+model:
+  default: gemini-3.8-flash
+
+custom_providers:
+- name: cpa-gui
+  base_url: http://127.0.0.1:18080/v1
+
+model_aliases:
+  custom-agent:
+    model: "custom-v1"
+"#;
+        let c1 = patch_hermes_config_content(initial, 8787).unwrap();
+        assert!(c1.contains("WorkBuddy (127.0.0.1:8787)"));
+        assert!(c1.contains("workbuddy:"));
+        assert!(c1.contains("cpa-gui"));
+        assert!(c1.contains("custom-agent:"));
+
+        let r1 = remove_hermes_config_content(&c1).unwrap();
+        assert!(!r1.contains("WorkBuddy"));
+        assert!(!r1.contains("workbuddy"));
+        assert!(r1.contains("cpa-gui"));
+        assert!(r1.contains("custom-agent:"));
+        assert!(r1.contains("# 系统基线配置"));
+
+        let c2 = patch_hermes_config_content(&r1, 8787).unwrap();
+        assert!(c2.contains("WorkBuddy (127.0.0.1:8787)"));
+        assert!(c2.contains("workbuddy:"));
+        assert!(c2.contains("cpa-gui"));
+        assert!(c2.contains("custom-agent:"));
+        assert!(c2.contains("# 系统基线配置"));
+    }
+
+    // 边界测试 8: 连续执行 configure 三次仍然幂等
+    #[test]
+    fn test_repeated_configure_thrice_idempotent() {
+        let initial = r#"# 复杂环境基线
+model:
+  default: gemini-3.8-flash
+
+custom_providers:
+- name: cpa-gui
+  base_url: http://127.0.0.1:18080/v1
+
+model_aliases:
+  gemini:
+    model: "gemini-3.8-flash"
+"#;
+        let c1 = patch_hermes_config_content(initial, 8787).unwrap();
+        let c2 = patch_hermes_config_content(&c1, 8787).unwrap();
+        let c3 = patch_hermes_config_content(&c2, 8787).unwrap();
+
+        assert_eq!(c1, c2, "第一次与第二次必须完全一致");
+        assert_eq!(c2, c3, "第二次与第三次必须完全一致");
+    }
+
+    // 边界测试 9: WorkBuddy block 内含空行 + 注释（替换与移除均无残余）
+    #[test]
+    fn test_workbuddy_provider_block_with_blank_lines_and_comments() {
+        let input = r#"# 顶层配置
+custom_providers:
+- name: WorkBuddy (127.0.0.1:8787)
+  # 内部注释 1
+
+  base_url: http://127.0.0.1:8787/v1
+  api_key: local
+
+  # 内部注释 2
+  model: auto
+  models:
+    auto: {}
+  models_discovered: true
+
+- name: other-provider
+  base_url: http://127.0.0.1:9000/v1
+"#;
+        // 1. 端口变更替换：不留旧 block 残留
+        let patched = patch_hermes_config_content(input, 9999).unwrap();
+        assert!(patched.contains("WorkBuddy (127.0.0.1:9999)"));
+        assert!(patched.contains("127.0.0.1:9999/v1"));
+        assert!(!patched.contains("8787"), "旧端口与旧字段不得残留");
+        assert!(patched.contains("other-provider"));
+
+        // 2. 移除测试：全 block 连同内部空行与注释彻底清除，无残余
+        let removed = remove_hermes_config_content(input).unwrap();
+        assert!(!removed.contains("WorkBuddy"));
+        assert!(!removed.contains("8787"));
+        assert!(!removed.contains("内部注释 1"));
+        assert!(!removed.contains("内部注释 2"));
+        assert!(removed.contains("other-provider"));
     }
 }
