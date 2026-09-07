@@ -172,6 +172,22 @@ def find_auth_file() -> Path | None:
     return None
 
 
+def init_cred() -> None:
+    """初始化全局凭据管理器 CONFIG['cred']。
+
+    数据源优先级：accounts.json（多账号真源）→ legacy .info（兼容回退）。
+    即使 find_auth_file() 返回 None（纯新环境、仅桌面端 OAuth 登录写入 accounts.json），
+    只要 accounts.json 存在且含有效活跃会话，仍会构造 CredentialManager，
+    避免服务启动后所有请求直接 503。
+    """
+    af = find_auth_file()
+    try:
+        CONFIG["cred"] = CredentialManager(af)
+    except Exception as e:  # 凭据不可读时不阻断启动，交由 /health 与请求层按需报错
+        _log(f"凭据初始化失败：{e}")
+        CONFIG["cred"] = None
+
+
 # ---------------------------------------------------------------------------
 # Auth 凭据管理（读 + 自动刷新 + 回写）
 # ---------------------------------------------------------------------------
@@ -179,7 +195,7 @@ def find_auth_file() -> Path | None:
 class CredentialManager:
     """从 auth 文件或 accounts.json 读取凭据；token 临近过期时自动刷新并回写。"""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path | None = None):
         self.path = path
         self._lock = threading.Lock()
         self._cached: dict | None = None
@@ -197,6 +213,10 @@ class CredentialManager:
         except Exception:
             pass
         # 回退：从 .info 凭据文件读取
+        if not self.path:
+            raise RuntimeError(
+                "无可用凭据：accounts.json 缺少有效活跃会话，且未找到 legacy .info 文件"
+            )
         with open(self.path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -222,7 +242,7 @@ class CredentialManager:
     def _session(self) -> dict:
         self._load_if_stale()
         if self._cached is None:
-            raise RuntimeError(f"无法读取 auth 文件：{self.path}")
+            raise RuntimeError(f"无法读取 auth 凭据（accounts.json 与 .info 均不可用，path={self.path}）")
         return self._cached
 
     def get_active_session(self) -> dict:
@@ -1020,11 +1040,12 @@ def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
 async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[dict, int | None]:
     """消费后端的 OpenAI SSE 流，聚合成单个非流式 chat.completion 对象。
 
-    合并所有 chunk 的 delta（content / tool_calls），并取 usage / finish_reason。
-    返回 (聚合结果, ttft_ms)：ttft_ms 为首个含内容 delta 到达时刻距 t0 的毫秒数
+    合并所有 chunk 的 delta（content / reasoning_content / tool_calls），并取 usage / finish_reason。
+    返回 (聚合结果, ttft_ms)：ttft_ms 为首个含内容或推理 delta 到达时刻距 t0 的毫秒数
     （t0 为 0 或全程无内容时为 None），供用量统计复用。
     """
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     ttft_ms: int | None = None
     # tool_calls: index -> {id, name, arguments(分片拼接)}
     tool_calls: dict[int, dict] = {}
@@ -1050,6 +1071,11 @@ async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[di
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
             delta = choice.get("delta") or {}
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning:
+                if ttft_ms is None and t0:
+                    ttft_ms = int((time.time() - t0) * 1000)
+                reasoning_parts.append(reasoning)
             if delta.get("content"):
                 if ttft_ms is None and t0:
                     ttft_ms = int((time.time() - t0) * 1000)  # 首个含内容 chunk 即 TTFT
@@ -1075,6 +1101,8 @@ async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[di
         finish_reason = finish_reason or "tool_calls"
 
     message = {"role": "assistant", "content": "".join(content_parts) or None}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
     if tcs:
         message["tool_calls"] = tcs
     return {
@@ -1120,11 +1148,42 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
     msg = choice.get("message") or {}
     role = msg.get("role", "assistant")
     content = msg.get("content")
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning")
     tool_calls = msg.get("tool_calls")
     finish_reason = choice.get("finish_reason") or ("tool_calls" if tool_calls else "stop")
     usage = collected.get("usage")
 
-    # 1. 发送带 role 的首包（若有 tool_calls，带出初始结构）
+    chunk_size = 32
+
+    def _chunk(delta: dict) -> bytes:
+        """构造一个标准 OpenAI SSE chunk（finish_reason 恒为 None）。"""
+        payload = {
+            "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    # role 只在首个实际下发的 chunk 中出现一次（不管理由是 reasoning/content/tool_calls）
+    role_sent = False
+
+    def _with_role(delta: dict) -> dict:
+        nonlocal role_sent
+        if not role_sent:
+            role_sent = True
+            return {"role": role, **delta}
+        return delta
+
+    # 1. 思考过程（reasoning_content）—— 独立字段下发，绝不并入 content
+    if reasoning:
+        for j in range(0, len(reasoning), chunk_size):
+            yield _chunk(_with_role({"reasoning_content": reasoning[j:j + chunk_size]}))
+
+    # 2. 正文内容（content）—— 与 reasoning / tool_calls 完全独立，不再互斥
+    if content:
+        for j in range(0, len(content), chunk_size):
+            yield _chunk(_with_role({"content": content[j:j + chunk_size]}))
+
+    # 3. 工具调用（tool_calls）—— 首包带出结构，再切片输出 arguments
     if tool_calls:
         for idx, tc in enumerate(tool_calls):
             fn = tc.get("function") or {}
@@ -1132,15 +1191,14 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
                 "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
                 "choices": [{
                     "index": 0,
-                    "delta": {
-                        "role": role if idx == 0 else None,
+                    "delta": _with_role({
                         "tool_calls": [{
                             "index": idx,
                             "id": tc.get("id"),
                             "type": tc.get("type", "function"),
                             "function": {"name": fn.get("name"), "arguments": ""},
                         }],
-                    },
+                    }),
                     "finish_reason": None,
                 }],
             }
@@ -1148,38 +1206,11 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
 
             # 切片输出 arguments，让客户端体验如同原生流式
             raw_args = fn.get("arguments") or ""
-            chunk_size = 32
             for j in range(0, len(raw_args), chunk_size):
-                arg_part = raw_args[j:j + chunk_size]
-                chunk = {
-                    "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": idx,
-                                "function": {"arguments": arg_part},
-                            }],
-                        },
-                        "finish_reason": None,
-                    }],
-                }
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    elif content:
-        chunk_size = 32
-        for j in range(0, len(content), chunk_size):
-            part_text = content[j:j + chunk_size]
-            chunk = {
-                "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"role": role if j == 0 else None, "content": part_text},
-                    "finish_reason": None,
-                }],
-            }
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield _chunk({"tool_calls": [{"index": idx,
+                                              "function": {"arguments": raw_args[j:j + chunk_size]}}]})
 
-    # 2. 尾包：包含 finish_reason 与可选的 usage
+    # 4. 尾包：包含 finish_reason 与可选的 usage
     end_chunk = {
         "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
@@ -1376,22 +1407,20 @@ def preflight() -> bool:
     sys.stderr.write(f"平台      : {sys.platform}\n")
     sys.stderr.write(f"Python    : {sys.version.split()[0]}\n")
     sys.stderr.write(f"后端      : {BACKEND} (直连，原生 function calling)\n")
-    sys.stderr.write(f"登录文件  : {af or '(未找到)'}\n")
+    sys.stderr.write(f"登录文件  : {af or '(未找到 .info，将以 accounts.json 为真源)'}\n")
     if auth_dirs():
         sys.stderr.write(f"已查目录  : {', '.join(str(d) for d in auth_dirs())}\n")
     ok = True
-    if af is None:
-        sys.stderr.write("\n[警告] 未找到登录文件。请在桌面端完成登录（CodeBuddy/WorkBuddy）。\n")
+    try:
+        # 无 .info 时仍尝试以 accounts.json 为真源读取活跃会话（多账号体系为唯一真源）
+        cm = CredentialManager(af)
+        info = cm.summary()
+        sys.stderr.write(f"账号      : {info.get('nickname')} / {info.get('enterpriseName')}\n")
+        sys.stderr.write(f"token过期 : {'是(将自动刷新)' if info['token_expired'] else '否'}\n")
+    except Exception as e:
+        sys.stderr.write("\n[警告] 未找到可用登录凭据。请在桌面端完成登录（CodeBuddy/WorkBuddy）。\n")
+        sys.stderr.write(f"[警告] 读取凭据失败：{e}\n")
         ok = False
-    else:
-        try:
-            cm = CredentialManager(af)
-            info = cm.summary()
-            sys.stderr.write(f"账号      : {info.get('nickname')} / {info.get('enterpriseName')}\n")
-            sys.stderr.write(f"token过期 : {'是(将自动刷新)' if info['token_expired'] else '否'}\n")
-        except Exception as e:
-            sys.stderr.write(f"[警告] 读取凭据失败：{e}\n")
-            ok = False
     sys.stderr.write("================\n")
     return ok
 
@@ -1455,8 +1484,7 @@ def main():
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
     CONFIG["log_level"] = args.log_level
     CONFIG["usage_log"] = args.usage_log if args.usage_log else os.environ.get("CODEBUDDY2OPENAI_USAGE_LOG")
-    af = find_auth_file()
-    CONFIG["cred"] = CredentialManager(af) if af else None
+    init_cred()
 
     if not args.skip_check:
         preflight()

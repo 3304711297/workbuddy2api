@@ -88,7 +88,7 @@ function renderActiveAccountAndUsage(acct, usage) {
     quotaHtml = `
       <div class="embedded-quota-box" style="text-align: center; padding: 16px;">
         <span class="muted">暂未获取到该账号积分资产</span>
-        <button class="btn btn-secondary btn-sm" style="margin-left: 10px;" id="btn-refresh-usage">刷新积分</button>
+        <button class="btn btn-secondary btn-sm" style="margin-left: 10px;" id="btn-refresh-account-quota">刷新积分</button>
       </div>
     `;
   }
@@ -117,7 +117,9 @@ function renderActiveAccountAndUsage(acct, usage) {
     </div>
   `;
 
-  document.getElementById('btn-refresh-token')?.addEventListener('click', async () => {
+  // 事件绑定一律限定在 container 内部实际插入的按钮（避免误绑 usage 模块同名 ID，
+  // 且 container.innerHTML 重建后旧监听自然失效，不会随重复加载累积）
+  container.querySelector('#btn-refresh-token')?.addEventListener('click', async () => {
     try {
       showToast('正在向腾讯后端刷新 Token...', 'info');
       const res = await invokeTauri('accounts_refresh_token', { uid: acct.uid });
@@ -128,8 +130,7 @@ function renderActiveAccountAndUsage(acct, usage) {
     }
   });
 
-  // 刷新积分按钮：原 inline onclick 引用模块作用域函数（window 上无此名，点击必抛错），改 id 监听修复
-  document.getElementById('btn-refresh-usage')?.addEventListener('click', () => loadAccountsData());
+  container.querySelector('#btn-refresh-account-quota')?.addEventListener('click', () => loadAccountsData());
 }
 
 function renderAccountsGrid(list) {

@@ -37,6 +37,9 @@ jobs:
       - name: Run pytest
         run: pytest -q
 
+      - name: Run frontend unit tests
+        run: npm test
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
