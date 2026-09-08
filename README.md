@@ -175,3 +175,5 @@ print(response.choices[0].message.content)
 ## 📄 开源许可证
 
 本项目基于 [MIT License](LICENSE) 开源。
+
+本仓库包含从 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api) 与 [DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)（均 MIT）移植或借鉴的代码，其版权声明、借鉴范围与移植差异详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
