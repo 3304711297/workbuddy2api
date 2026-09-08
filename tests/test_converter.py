@@ -451,3 +451,9 @@ def test_models_cache_uid_isolation(tmp_path, monkeypatch):
     monkeypatch.setitem(converter.CONFIG, "cred", DummyCred("user_a"))
     res_a_cached = asyncio.run(converter._fetch_remote_models(transport=None))
     assert res_a_cached == ["model-for-a"]
+
+
+def test_default_repair_stream_tools_is_false():
+    """默认配置下 repair_stream_tools 必须为 False，避免带 tools 的 Agent 请求被转为阻塞聚合导致 60s/140s 超时。"""
+    assert converter.CONFIG.get("repair_stream_tools") is False
+

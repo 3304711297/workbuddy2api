@@ -48,6 +48,20 @@ async function openReleasePage(url) {
 }
 
 export function initUpdateCheck() {
+  // 绑定版本与构建指纹展示
+  const verEl = document.getElementById('app-ver');
+  if (verEl) {
+    const ver = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.1';
+    const fp = typeof __BUILD_FINGERPRINT__ !== 'undefined' ? __BUILD_FINGERPRINT__ : `v${ver}`;
+    verEl.textContent = `v${ver}`;
+    verEl.title = `构建指纹: ${fp}\n点击可复制版本信息`;
+    verEl.style.cursor = 'pointer';
+    verEl.addEventListener('click', () => {
+      copyToClipboard(fp);
+      showToast(`已复制版本指纹: ${fp}`, 'info');
+    });
+  }
+
   const entry = document.getElementById('update-entry');
   if (!entry) return;
   const onClick = async () => {

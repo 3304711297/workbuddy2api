@@ -640,13 +640,14 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
                 "log_payloads": False, "usage_log": None, "unsafe_expose": False,
                 "desensitize": False, "wsl": False, "scan_all_users": False,
-                "repair_stream_tools": True,
+                # 流式 tool_calls 损坏防御（实验性阻塞聚合重试）：默认关闭（优先原生真流式透传，杜绝 60s/140s 超时）
+                # 可通过 --repair-stream-tools 或环境变量 CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS=1 开启
+                "repair_stream_tools": os.environ.get("CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes"),
                 # 剥掉流式 delta 里的空 content:""/reasoning_content:""（GLM reasoning 周期
                 # 会被 AI SDK 当成"文本开始"提前掐断，产生上百个碎片 Thought 块）。
                 # 借鉴 DistPub/workbuddy2api；WORKBUDDY_STRIP_EMPTY_DELTA=0 关闭。
                 "strip_empty_delta": os.environ.get("WORKBUDDY_STRIP_EMPTY_DELTA", "1") not in ("0", "false", "no"),
-                # 把零散 reasoning 分片在网关层合并成一段，在首个 content/tool_calls/finish
-                # delta 之前整段释放，并从 tool_calls 的 arguments 流中剥离混入的 reasoning
+                # 流式推理净化与穿插解耦：实时流式下发 reasoning，并在 tool_calls 参数流中剥离混入的 reasoning
                 # （避免工具参数 JSON 被截断/污染）。WORKBUDDY_COALESCE_REASONING=0 关闭。
                 "coalesce_reasoning": os.environ.get("WORKBUDDY_COALESCE_REASONING", "1") not in ("0", "false", "no")}  # cred: CredentialManager | None
 
@@ -1498,7 +1499,13 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                                       retry_count=retry_count, retry_reason=retry_reason)
                         yield _err_event(raw, r.status_code)
                         return
-                    collected, ttft_ms = await _collect_stream(r, t0)
+                    # 聚合等待期间定期下发 SSE 注释保活心跳，防止中间代理或客户端 60s 静默超时
+                    collect_task = asyncio.create_task(_collect_stream(r, t0))
+                    while not collect_task.done():
+                        done, _ = await asyncio.wait({collect_task}, timeout=5.0)
+                        if not done:
+                            yield b": ping\n\n"
+                    collected, ttft_ms = await collect_task
         except httpx.HTTPError as e:
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             _record_usage(model_name, False, t0, error=f"upstream error: {e}",
@@ -1775,41 +1782,26 @@ def _parse_sse_data_objects(evt: bytes) -> list[Any]:
 
 
 class _ReasoningCoalescer:
-    """网关层"推理合并器"：把流式 reasoning 零散分片攒成一段，在首个真正推进对话
-    （content / tool_calls / finish_reason / [DONE]）的 delta 之前整段释放，并从
-    tool_calls 的参数流里剔除混入的 reasoning。用法：
-
-        c = _ReasoningCoalescer()
-        for evt_bytes in c.feed(one_cleaned_event_bytes):  yield evt_bytes
-        for evt_bytes in c.flush():                          yield evt_bytes
-
-    feed 每来一个事件返回"应当转发给客户端"的事件列表；flush 在流结束时调用以清空
-    残余 reasoning。注意合并只在同一个 choice 的 reasoning 连续段内发生，遇到
-    content / tool_calls 会先 flush 当前 reasoning，因此不会把不同用途的内容拼错。
+    """网关层"流式推理净化与穿插解耦器"：
+    1. 纯 reasoning 分片实时流式转发给客户端，杜绝静默积压导致的 60s/140s 超时；
+    2. 当 reasoning 与 content 起笔帧或 tool_calls 帧混合时，实时拆解：优先下发
+       独立的 reasoning 纯帧，并从推进帧（如工具调用）中剥离混入的 reasoning，
+       避免工具参数 JSON 损坏或客户端 Thought 块错乱。
     """
 
-    __slots__ = ("_rbuf", "_rcount")
+    __slots__ = ()
 
     def __init__(self) -> None:
-        self._rbuf: list[str] = []
-        self._rcount = 0  # 已攒的 reasoning 分片数（用于判断是否真的发生过穿插）
+        pass
 
     def _flush_reasoning(self) -> list[bytes]:
-        if not self._rbuf:
-            return []
-        text = "".join(self._rbuf)
-        self._rbuf = []
-        self._rcount = 0
-        if not text:
-            return []
-        chunk = {"choices": [{"index": 0, "delta": {"reasoning_content": text}}]}
-        return [_encode_sse_chunk(chunk)]
+        return []
 
     def feed(self, evt: bytes) -> list[bytes]:
         if not evt:
             return []
         if not CONFIG.get("coalesce_reasoning"):
-            # 关闭：原样透传（不合并、不重组）
+            # 关闭：原样透传（不重组、不剥离）
             return [evt]
 
         objs = _parse_sse_data_objects(evt)
@@ -1819,46 +1811,39 @@ class _ReasoningCoalescer:
         merged: list[bytes] = []
         for o in objs:
             if o is None:
-                # [DONE]：先 flush 残余 reasoning，再原样放 [DONE]
-                merged += self._flush_reasoning()
+                # [DONE]：原样放 [DONE]
                 merged.append(b"data: [DONE]\n\n")
                 continue
             if not isinstance(o, dict):
-                # 无法 JSON 解析的原样行：合并推理时保守忽略该行内容，避免错乱
-                merged += self._flush_reasoning()
-                merged.append(evt)  # 整帧原样补发一次（很少触发）
+                merged.append(evt)
                 continue
 
             rc = _reasoning_text(o)                 # 本 delta 的 reasoning（若有）
             advancing = _has_non_reasoning_delta(o)  # 是否带 content/tool_calls/finish
 
-            # 纯 reasoning（不带任何推进内容）→ 入缓冲，攒成一段
+            # 1. 纯 reasoning（不带推进内容）→ 实时流式下发，杜绝静默阻塞！
             if rc and not advancing:
-                self._rbuf.append(rc)
-                self._rcount += 1
+                merged.append(_encode_sse_chunk(o))
                 continue
 
+            # 2. 推进内容到来（content / tool_calls / finish 等）
             if advancing:
-                # content / tool_calls / finish 到来：先把已攒 reasoning 整段释放。
-                merged += self._flush_reasoning()
                 if rc:
-                    # 该推进 delta 自身还夹带 reasoning（如 tool_calls 与 reasoning 同帧，
-                    # 或 content 起笔帧带 reasoning）：剥走，避免污染参数流或让客户端把
-                    # "推理继续"误判成"文本已开始"而再次开启 Thought 块。
-                    self._rbuf.append(rc)
-                    self._rcount += 1
-                    merged += self._flush_reasoning()
+                    # 若该推进 delta 自身夹带 reasoning（如与 tool_calls 同帧）：
+                    # 先下发纯 reasoning 独立分片，再将 reasoning 从推进帧剥离后下发，
+                    # 避免工具 arguments JSON 被思考文本破坏。
+                    split_rc = {"choices": [{"index": 0, "delta": {"reasoning_content": rc}}]}
+                    merged.append(_encode_sse_chunk(split_rc))
                     o = _remove_reasoning_from_delta(o)
                 merged.append(_encode_sse_chunk(o))
                 continue
 
-            # 其余（如 role:"assistant" 收尾等无可见推进、无 reasoning 的标记 delta）
-            # 原样转发，不参与合并，保持协议帧完整。
+            # 3. 其余（role: "assistant" 等标记帧）原样转发保持帧完整
             merged.append(_encode_sse_chunk(o))
         return merged
 
     def flush(self) -> list[bytes]:
-        return self._flush_reasoning()
+        return []
 
 
 class _SseLineBuffer:
@@ -2204,10 +2189,10 @@ def main():
     ap.add_argument("--scan-all-users", action="store_true",
                     help="在 WSL 模式下，遍历 /mnt/c/Users 下全部 Windows 用户目录以寻找 CodeBuddy 凭据。"
                          "默认关闭（仅匹配与当前 Linux 用户同名的 Windows 用户），避免多用户机器上的跨用户凭据误读。")
-    ap.add_argument("--repair-stream-tools", action="store_true", default=True,
-                    help="启用流式 tool_calls 损坏防御（默认开启）：针对腾讯后端在流式输出下偶发"
-                         " function.name 为空或 arguments 乱码的问题，在请求含 tools 时进行聚合校验与自动重试，"
-                         "保障 Claude Code / Codex 等 Agent 的稳定性。")
+    ap.add_argument("--repair-stream-tools", action="store_true", default=None,
+                    help="启用流式 tool_calls 损坏防御（实验性阻塞聚合重试）：针对腾讯后端在流式输出下偶发"
+                         " function.name 为空或 arguments 乱码的问题，在请求含 tools 时进行聚合校验与自动重试。"
+                         "注意：长思考或大输出模型可能导致首字延迟增加。默认关闭（原生真流式直通）。")
     ap.add_argument("--no-repair-stream-tools", action="store_false", dest="repair_stream_tools",
                     help="禁用流式 tool_calls 损坏防御，强制全量原始 SSE 直通。")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
@@ -2235,7 +2220,10 @@ def main():
     CONFIG["desensitize"] = args.desensitize
     CONFIG["wsl"] = args.wsl
     CONFIG["scan_all_users"] = args.scan_all_users or os.environ.get("CODEBUDDY2OPENAI_SCAN_ALL_USERS", "").lower() in ("1", "true", "yes")
-    CONFIG["repair_stream_tools"] = args.repair_stream_tools
+    if args.repair_stream_tools is not None:
+        CONFIG["repair_stream_tools"] = args.repair_stream_tools
+    else:
+        CONFIG["repair_stream_tools"] = os.environ.get("CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes")
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
     CONFIG["log_level"] = args.log_level
     CONFIG["log_payloads"] = args.log_payloads or os.environ.get("CODEBUDDY2OPENAI_LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
@@ -2267,8 +2255,10 @@ def main():
         sys.stderr.write("   脱敏      : 已启用（system 合规词零宽处理）\n")
     if args.wsl:
         sys.stderr.write("   WSL模式   : 已显式启用（穿透宿主 Windows 凭据目录）\n")
-    if not args.repair_stream_tools:
-        sys.stderr.write("   工具防御  : 已禁用（全量原始 SSE 直通）\n")
+    if CONFIG.get("repair_stream_tools"):
+        sys.stderr.write("   工具防御  : 已显式启用（阻塞聚合校验重试模式）\n")
+    else:
+        sys.stderr.write("   流式管线  : 原生真流式直通（实时下发推理与工具调用）\n")
     sys.stderr.write("按 Ctrl+C 退出。\n\n")
 
     # 启动时写一条标记

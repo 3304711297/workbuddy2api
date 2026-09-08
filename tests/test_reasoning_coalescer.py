@@ -74,22 +74,40 @@ def test_sanitize_passthrough_non_delta():
 
 # ---------- B: reasoning coalescer ----------
 
-def test_coalescer_merges_scattered_reasoning_before_content():
-    """多个纯 reasoning 分片 → 在首个 content delta 前合并成一段释放。"""
+def test_coalescer_streams_reasoning_in_realtime_without_delay():
+    """纯 reasoning 分片应当即时下发，绝不静默积压等待 content（避免下游 60s/140s 超时）。"""
+    c = converter._ReasoningCoalescer()
+    chunks1 = c.feed(sse({"choices": [{"index": 0, "delta": {"reasoning_content": "思考1"}}]}))
+    assert len(chunks1) > 0, "reasoning 首包必须即时产出，严禁返回空列表导致下游 60s 静默超时"
+    objs1 = events_out(chunks1)
+    assert objs1[0]["choices"][0]["delta"]["reasoning_content"] == "思考1"
+
+    chunks2 = c.feed(sse({"choices": [{"index": 0, "delta": {"reasoning_content": "思考2"}}]}))
+    assert len(chunks2) > 0, "reasoning 连续分片必须持续流式下发"
+    objs2 = events_out(chunks2)
+    assert objs2[0]["choices"][0]["delta"]["reasoning_content"] == "思考2"
+
+
+def test_coalescer_streams_scattered_reasoning_in_realtime_before_content():
+    """多个纯 reasoning 分片 → 逐帧即时流式释放，且在 content 前保持顺序完整。"""
     c = converter._ReasoningCoalescer()
     chunks = []
     for seg in ("第一", "段思", "考"):
-        chunks += c.feed(sse({"choices": [{"index": 0, "delta": {"reasoning_content": seg}}]}))
+        fed = c.feed(sse({"choices": [{"index": 0, "delta": {"reasoning_content": seg}}]}))
+        assert len(fed) > 0, f"分片 '{seg}' 必须即时产生 SSE 帧，不可延迟"
+        chunks += fed
     chunks += c.feed(sse({"choices": [{"index": 0, "delta": {"content": "答案"}}]}))
     chunks += c.flush()
 
     objs = events_out(chunks)
-    # 期望事件序列：1 个合并 reasoning → 1 个 content（无多余空 reasoning 帧）
+    # 期望事件序列：3 个连续流式 reasoning 帧 → 1 个 content 帧
     reasoning = [o for o in objs if o["choices"][0]["delta"].get("reasoning_content")]
     contents = [o for o in objs if o["choices"][0]["delta"].get("content")]
-    assert len(reasoning) == 1, f"reasoning 应合并为 1 帧，实际 {len(reasoning)}"
-    assert reasoning[0]["choices"][0]["delta"]["reasoning_content"] == "第一段思考"
+    assert len(reasoning) == 3, f"reasoning 应保持 3 帧平滑流式输出，实际 {len(reasoning)}"
+    joined_reasoning = "".join(r["choices"][0]["delta"]["reasoning_content"] for r in reasoning)
+    assert joined_reasoning == "第一段思考"
     assert len(contents) == 1
+    assert contents[0]["choices"][0]["delta"]["content"] == "答案"
 
 
 def test_coalescer_strips_reasoning_from_tool_call_frame():
@@ -127,6 +145,19 @@ def test_coalescer_passthrough_when_disabled(monkeypatch):
     c = converter._ReasoningCoalescer()
     evt = sse({"choices": [{"index": 0, "delta": {"reasoning_content": "x"}}]})
     assert c.feed(evt) == [evt]
+
+
+def test_coalescer_deep_thinking_50_chunks_continuous_streaming():
+    """模拟深度思考模型（如 hy4-preview 生成复杂 SVG）输出 50 个连续推理分片：
+    每帧必须即时产出，严禁在内部积攒导致下游等待 60s 超时。"""
+    c = converter._ReasoningCoalescer()
+    received_counts = []
+    for i in range(50):
+        seg = f"步骤{i},"
+        fed = c.feed(sse({"choices": [{"index": 0, "delta": {"reasoning_content": seg}}]}))
+        received_counts.append(len(fed))
+    # 50 次输入均应立即产出
+    assert all(cnt == 1 for cnt in received_counts), "所有 50 个思考分片都必须即时下发"
 
 
 # ---------- _SseLineBuffer ----------
