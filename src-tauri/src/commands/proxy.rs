@@ -359,6 +359,19 @@ pub async fn proxy_rate_limit(port: u16) -> Result<Option<serde_json::Value>, St
     }
 }
 
+/// 每日签到：转发 POST /api/checkin/claim 到本地反代内核（绕开 CSP connect-src 限制）。
+/// 内核负责注入 X-Device-Token（与桌面端一致），这里只做透明转发。
+#[tauri::command]
+pub async fn proxy_checkin_claim(port: u16) -> Result<serde_json::Value, String> {
+    let url = format!("http://127.0.0.1:{port}/api/checkin/claim");
+    let resp = super::shared::local_client(20)
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestChatResult, String> {
     let target_model = model.unwrap_or_else(|| "glm-5.3-flash".into());

@@ -2035,6 +2035,96 @@ def _err_event(msg: bytes, status: int) -> bytes:
 # 启动
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 每日签到（手动按钮触发；借鉴 xiaofan6ya/workbuddy2api，MIT License）
+#
+# 用户拍板（2026-09-08）：不做自动定时签到，GUI 放"签到"按钮手动点击。
+# 端点（逆向自 WorkBuddy 桌面端 main/tar.js）：
+#   POST /v2/billing/meter/checkin-activity-status —— 活动状态
+#   POST /v2/billing/meter/daily-checkin           —— 领取（每日 100 积分）
+# 业务码：1001=今日已领 1002=无资格 1003=活动已结束。
+# 风控要点：请求经 CredentialManager 注入 X-Device-Token，与桌面端一致。
+# ---------------------------------------------------------------------------
+
+_CHECKIN_STATUS_URL = f"{BACKEND}/v2/billing/meter/checkin-activity-status"
+_CHECKIN_CLAIM_URL = f"{BACKEND}/v2/billing/meter/daily-checkin"
+
+_CHECKIN_CODE_MAP = {
+    1001: "already_claimed",
+    1002: "not_eligible",
+    1003: "event_ended",
+}
+
+
+def _checkin_post(url: str, headers: dict) -> dict:
+    """同步 POST 签到端点，返回后端 JSON（失败抛 RuntimeError）。"""
+    with httpx.Client(timeout=15) as c:
+        r = c.post(url, headers=headers, json={})
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return r.json()
+
+
+def _get_checkin_cred() -> CredentialManager:
+    cred = CONFIG.get("cred")
+    if cred is not None:
+        return cred
+    path = find_auth_file()
+    if not path:
+        raise RuntimeError("未找到登录凭据（请先在桌面端登录）")
+    return CredentialManager(path)
+
+
+@app.get("/api/checkin/status")
+async def checkin_status(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key"),
+):
+    """查询签到活动状态（today_checked_in / active / end_time 等）。"""
+    _check_auth(authorization, x_api_key)
+    try:
+        cred = _get_checkin_cred()
+        headers = cred.get_headers()
+        body = _checkin_post(_CHECKIN_STATUS_URL, headers)
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
+    if body.get("code") not in (0, None):
+        return {"ok": False, "error": body.get("msg") or body}
+    return {"ok": True, "data": body.get("data") or {}}
+
+
+@app.post("/api/checkin/claim")
+async def checkin_claim(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key"),
+):
+    """执行每日签到领取（GUI 按钮手动触发；成功返回 credit / streak_days）。"""
+    _check_auth(authorization, x_api_key)
+    try:
+        cred = _get_checkin_cred()
+        headers = cred.get_headers()
+        body = _checkin_post(_CHECKIN_CLAIM_URL, headers)
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
+    code = body.get("code")
+    if code and code != 0:
+        payload = body.get("data") or {}
+        return {
+            "ok": False,
+            "code": code,
+            "status": _CHECKIN_CODE_MAP.get(code, "unknown"),
+            "msg": body.get("msg") or "",
+            "credit": payload.get("credit") or 0,
+            "streak_days": payload.get("streak_days") or 0,
+        }
+    payload = body.get("data") or {}
+    return {
+        "ok": True,
+        "credit": payload.get("credit") or 0,
+        "streak_days": payload.get("streak_days") or 0,
+    }
+
+
 def preflight() -> bool:
     af = find_auth_file()
     sys.stderr.write("==== 预检 ====\n")
