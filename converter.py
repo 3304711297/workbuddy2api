@@ -191,6 +191,70 @@ def init_cred() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 设备风控头提供器（X-Device-Token，借鉴 xiaofan6ya/workbuddy2api，MIT License）
+#
+# 背景：WorkBuddy 桌面端给签到/对话等敏感请求注入 Turing Shield SDK 生成的
+# `X-Device-Token`；缺失时上游风控可能识别为「非真实客户端」。本实现通过
+# 仓库根的 turing_helper.js（Node）调用桌面端自带 SDK 原生模块取 token：
+#   1. helper 自动发现本机 WorkBuddy 安装位置（不写死路径，支持环境变量覆盖）
+#   2. 取不到/SDK 不可用时优雅降级为不带该头，绝不阻塞主流程
+#   3. 进程内缓存 10 分钟（设备 token 长期有效，helper 内部另有磁盘缓存+旧值兜底）
+# ---------------------------------------------------------------------------
+
+_TURING_TOKEN_CACHE: Optional[str] = None
+_TURING_TOKEN_AT: float = 0.0
+_TURING_TTL_SEC = 600.0
+
+
+def _find_node_runtime() -> str:
+    """定位可用的 node 运行时：系统 PATH → WorkBuddy managed node → 裸 'node'。"""
+    import shutil
+
+    exe = shutil.which("node")
+    if exe:
+        return exe
+    # WorkBuddy 桌面端自带 managed node（GUI.for.Cores 风格工作区）
+    base = Path(os.environ.get("LOCALAPPDATA", "")) / ".workbuddy" / "binaries" / "node"
+    for cand in (base / "node.exe", base / "workspace" / "node.exe"):
+        if cand.is_file():
+            return str(cand)
+    return "node"
+
+
+def _get_turing_device_token() -> Optional[str]:
+    """取得设备风控 token（进程内缓存 10 分钟）；任何失败返回 None，不抛异常。"""
+    global _TURING_TOKEN_CACHE, _TURING_TOKEN_AT
+    now = time.time()
+    if _TURING_TOKEN_CACHE is not None and (now - _TURING_TOKEN_AT) < _TURING_TTL_SEC:
+        return _TURING_TOKEN_CACHE
+    try:
+        helper = Path(__file__).resolve().parent / "turing_helper.cjs"
+        if not helper.is_file():
+            return None
+        import subprocess
+
+        node = _find_node_runtime()
+        # 短超时：SDK 联网取 token 正常 1~3s，异常时尽快放弃不拖累请求
+        proc = subprocess.run(
+            [node, str(helper)],
+            capture_output=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout.decode("utf-8", "replace").strip())
+        token = (data.get("token") or "").strip()
+        if not token:
+            return None
+        _TURING_TOKEN_CACHE = token
+        _TURING_TOKEN_AT = now
+        return token
+    except Exception as exc:
+        _log(f"获取 device token 失败（优雅降级为不带 X-Device-Token）: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Auth 凭据管理（读 + 自动刷新 + 回写）
 # ---------------------------------------------------------------------------
 
@@ -349,6 +413,11 @@ class CredentialManager:
             "X-Domain": domain,
             "User-Agent": USER_AGENT,
         }
+        # 设备风控头：桌面端所有敏感请求均携带（Turing Shield SDK 生成）。
+        # 取不到时优雅降级为不带该头（借鉴 xiaofan6ya/workbuddy2api，MIT）。
+        tok = _get_turing_device_token()
+        if tok:
+            h["X-Device-Token"] = tok
         return h
 
     def get_headers(self) -> dict:
