@@ -44,15 +44,15 @@ flowchart TD
         Other[Cherry Studio / NextChat / OpenAI SDK]
     end
 
-    subgraph Console [CodeBuddy2OpenAI 桌面控制台 (Tauri v2)]
-        GUI[前端 UI (服务看板/账号资产/Agent接入)]
-        Core[Rust 后端 (多账号/配置写入/生命周期)]
-        DB[(本地 accounts.json)]
+    subgraph Console ["CodeBuddy2OpenAI 桌面控制台 (Tauri v2)"]
+        GUI["前端 UI (服务看板/账号资产/Agent接入)"]
+        Core["Rust 后端 (多账号/配置写入/生命周期)"]
+        DB[("本地 accounts.json")]
     end
 
-    subgraph Proxy [本地反代服务 (端口 8787)]
-        Server[FastAPI / Uvicorn]
-        Converter[converter.py (格式转换/流式/函数调用)]
+    subgraph Proxy ["本地反代服务 (端口 8787)"]
+        Server["FastAPI / Uvicorn"]
+        Converter["converter.py (格式转换/流式/函数调用)"]
     end
 
     subgraph Remote [腾讯官方云端]
@@ -163,6 +163,11 @@ print(response.choices[0].message.content)
 
 - 本项目基于 [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) 进行深度二次开发与架构重构。
 - 架构设计深度借鉴了优秀开源项目 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 的桌面端实践思路。
+- 以下功能借鉴自社区衍生项目 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api) 及其增强分支 [DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)（均 MIT 开源）：
+  - **`X-Device-Token` 设备风控头注入**（借鉴 xiaofan6ya 版）：通过桌面端自带 Turing Shield SDK 取设备 token，`turing_helper.cjs` 自动发现安装位置，降低敏感请求被上游风控识别的概率；
+  - **流式 reasoning 合并器与空 delta 清洗**（借鉴 DistPub 版）：网关层把零散 reasoning 分片合并为一段再释放，剥离混入 `tool_calls` 参数流的推理内容，避免 AI SDK 出现大量碎片 Thought 块与工具参数 JSON 截断（移植时已修复其上游「键不存在被误判为空串导致纯 reasoning 帧被删」的缺陷）；
+  - **脱敏词表扩张**（借鉴 DistPub 版）：补充竞争品牌词（Claude/Anthropic/OpenAI/Gemini/Kimi/Qwen/Cursor 等），脱敏覆盖角色扩展至 `assistant` 历史回复；
+  - **每日签到**（端点逆向成果参考两仓库）：`/v2/billing/meter/daily-checkin` 链路，本项目按自身定位实现为 GUI 手动按钮触发，不做自动定时签到。
 - 本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。
 
 ---
