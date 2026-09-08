@@ -2050,19 +2050,31 @@ _CHECKIN_STATUS_URL = f"{BACKEND}/v2/billing/meter/checkin-activity-status"
 _CHECKIN_CLAIM_URL = f"{BACKEND}/v2/billing/meter/daily-checkin"
 
 _CHECKIN_CODE_MAP = {
-    1001: "already_claimed",
+    1001: "already_claimed",     # 逆向文档口径
+    10001: "already_claimed",    # 实测：已签到时上游返回 HTTP 400 + code 10001
     1002: "not_eligible",
     1003: "event_ended",
 }
 
 
 def _checkin_post(url: str, headers: dict) -> dict:
-    """同步 POST 签到端点，返回后端 JSON（失败抛 RuntimeError）。"""
+    """同步 POST 签到端点，返回后端 JSON（失败抛 RuntimeError）。
+
+    实测：今日已签到时上游返回 HTTP 400 + {"code":10001,"msg":"今天已签到，请明天再来"}。
+    该情形是可预期的业务态而非错误，返回错误体交由调用方按 code 归一处理。
+    """
     with httpx.Client(timeout=15) as c:
         r = c.post(url, headers=headers, json={})
-    if r.status_code != 200:
+    if r.status_code == 200:
+        return r.json()
+    try:
+        err_body = r.json()
+    except Exception:
         raise RuntimeError(f"HTTP {r.status_code}")
-    return r.json()
+    code = err_body.get("code")
+    if code in _CHECKIN_CODE_MAP:
+        return err_body  # 业务码错误体（如已签到），交由调用方归一
+    raise RuntimeError(f"HTTP {r.status_code}: {err_body.get('msg') or ''}")
 
 
 def _get_checkin_cred() -> CredentialManager:
@@ -2103,6 +2115,18 @@ async def checkin_claim(
     try:
         cred = _get_checkin_cred()
         headers = cred.get_headers()
+        # 先查活动状态：今日已签到则不再发领取请求（幂等 + 减少无效风控暴露）
+        st_body = _checkin_post(_CHECKIN_STATUS_URL, headers)
+        st = (st_body.get("data") or {}) if st_body.get("code") in (0, None) else {}
+        if st.get("today_checked_in"):
+            return {
+                "ok": False,
+                "status": "already_claimed",
+                "msg": "今天已签到，请明天再来",
+                "credit": st.get("today_credit") or 0,
+                "streak_days": st.get("streak_days") or 0,
+                "activity": {"active": st.get("active"), "end_time": st.get("end_time")},
+            }
         body = _checkin_post(_CHECKIN_CLAIM_URL, headers)
     except Exception as e:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})

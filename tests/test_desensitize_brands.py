@@ -20,6 +20,13 @@ def test_brand_terms_in_wordlist():
         assert term in desensitize.SENSITIVE_TERMS, term
 
 
+def test_word_boundary_prevents_substring_match():
+    """\\b 词边界：嵌入更长单词中的品牌词子串不触发零宽打断。"""
+    assert desensitize.desensitize_text("notopenai style") == "notopenai style"
+    out = desensitize.desensitize_text("use OpenAI style")
+    assert "O" + desensitize._ZWSP + "penAI" in out
+
+
 def test_desensitize_text_zero_widths_brands():
     text = "I am Claude, made by Anthropic; also try OpenAI Gemini Kimi Qwen Cursor"
     out = desensitize.desensitize_text(text)

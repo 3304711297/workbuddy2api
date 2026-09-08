@@ -96,6 +96,9 @@ def test_checkin_status_ok(monkeypatch):
 
 def test_checkin_claim_success(monkeypatch):
     client = _client_with(monkeypatch, {
+        "/v2/billing/meter/checkin-activity-status": [
+            {"code": 0, "data": {"active": True, "today_checked_in": False}},
+        ],
         "/v2/billing/meter/daily-checkin": [
             {"code": 0, "data": {"credit": 100, "streak_days": 3}},
         ],
@@ -110,6 +113,9 @@ def test_checkin_claim_success(monkeypatch):
 
 def test_checkin_claim_already_claimed(monkeypatch):
     client = _client_with(monkeypatch, {
+        "/v2/billing/meter/checkin-activity-status": [
+            {"code": 0, "data": {"active": True, "today_checked_in": False}},
+        ],
         "/v2/billing/meter/daily-checkin": [
             {"code": 1001, "msg": "今日已领取"},
         ],
@@ -120,8 +126,68 @@ def test_checkin_claim_already_claimed(monkeypatch):
     assert d["status"] == "already_claimed"
 
 
+def test_checkin_claim_checked_in_via_status_precheck(monkeypatch):
+    """上游 status 报 today_checked_in=true → 直接返回 already_claimed，不再发领取请求。"""
+    client = _client_with(monkeypatch, {
+        "/v2/billing/meter/checkin-activity-status": [
+            {"code": 0, "data": {"active": True, "today_checked_in": True,
+                                  "streak_days": 6, "today_credit": 100}},
+        ],
+    })
+    res = client.post("/api/checkin/claim")
+    assert res.status_code == 200
+    d = res.json()
+    assert d["ok"] is False
+    assert d["status"] == "already_claimed"
+    assert d["credit"] == 100
+    assert d["streak_days"] == 6
+
+
+def test_checkin_claim_http400_code10001_normalized(monkeypatch):
+    """实测行为：已签到时 claim 返回 HTTP 400 + code 10001 → 归一为 already_claimed。"""
+    # status 说未签到，但 claim 撞上 400/10001（竞态或多端已签）——两条路径都必须归一
+    converter.CONFIG["cred"] = _FakeCred()
+    converter._RATE_LIMIT_STATE.clear()
+
+    calls = {"status": 0, "claim": 0}
+    STATUS = {"code": 0, "data": {"active": True, "today_checked_in": False}}
+    CLAIM_400 = {"code": 10001, "msg": "今天已签到，请明天再来"}
+
+    class SyncResp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._p = payload
+        def json(self):
+            return self._p
+
+    class SyncClient:
+        def __init__(self, **kw):
+            pass
+        def post(self, url, **kw):
+            if "checkin-activity-status" in url:
+                calls["status"] += 1
+                return SyncResp(200, STATUS)
+            calls["claim"] += 1
+            return SyncResp(400, CLAIM_400)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "Client", SyncClient)
+    client = TestClient(converter.app, headers={"Host": "127.0.0.1:8787"})
+    res = client.post("/api/checkin/claim")
+    d = res.json()
+    assert res.status_code == 200
+    assert d["ok"] is False
+    assert d["status"] == "already_claimed"
+
+
 def test_checkin_claim_event_ended(monkeypatch):
     client = _client_with(monkeypatch, {
+        "/v2/billing/meter/checkin-activity-status": [
+            {"code": 0, "data": {"active": True, "today_checked_in": False}},
+        ],
         "/v2/billing/meter/daily-checkin": [
             {"code": 1003, "msg": "活动已结束"},
         ],

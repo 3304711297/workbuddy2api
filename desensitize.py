@@ -90,9 +90,10 @@ SENSITIVE_TERMS: list[str] = [
 ]
 
 # 编译成一个大正则，按词长降序，避免短词先吃掉长词。
-# 用 \b 边界 + 忽略大小写。
+# 用 \b 词边界 + 忽略大小写（\b 防止品牌词/术语命中更长单词中的子串，
+# 如 "openai" 匹配到 "notopenai"；多词短语含空格/连字符时 \b 作用于首尾字符）。
 _PATTERN = re.compile(
-    "|".join(re.escape(t) for t in sorted(SENSITIVE_TERMS, key=len, reverse=True)),
+    "|".join(r"\b" + re.escape(t) + r"\b" for t in sorted(SENSITIVE_TERMS, key=len, reverse=True)),
     re.IGNORECASE,
 )
 
