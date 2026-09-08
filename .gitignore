@@ -29,3 +29,6 @@ node_modules/
 
 # Rust/Tauri 编译产物
 src-tauri/target/
+
+# worktrees (superpowers workflow)
+.worktrees/
