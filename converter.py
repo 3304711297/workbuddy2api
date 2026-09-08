@@ -640,7 +640,15 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
                 "log_payloads": False, "usage_log": None, "unsafe_expose": False,
                 "desensitize": False, "wsl": False, "scan_all_users": False,
-                "repair_stream_tools": True}  # cred: CredentialManager | None
+                "repair_stream_tools": True,
+                # 剥掉流式 delta 里的空 content:""/reasoning_content:""（GLM reasoning 周期
+                # 会被 AI SDK 当成"文本开始"提前掐断，产生上百个碎片 Thought 块）。
+                # 借鉴 DistPub/workbuddy2api；WORKBUDDY_STRIP_EMPTY_DELTA=0 关闭。
+                "strip_empty_delta": os.environ.get("WORKBUDDY_STRIP_EMPTY_DELTA", "1") not in ("0", "false", "no"),
+                # 把零散 reasoning 分片在网关层合并成一段，在首个 content/tool_calls/finish
+                # delta 之前整段释放，并从 tool_calls 的 arguments 流中剥离混入的 reasoning
+                # （避免工具参数 JSON 被截断/污染）。WORKBUDDY_COALESCE_REASONING=0 关闭。
+                "coalesce_reasoning": os.environ.get("WORKBUDDY_COALESCE_REASONING", "1") not in ("0", "false", "no")}  # cred: CredentialManager | None
 
 
 # ---------------------------------------------------------------------------
@@ -1533,6 +1541,364 @@ def _safe_err_raw(raw: bytes, status: int) -> dict:
         return {"error": {"message": raw.decode("utf-8", "replace")[:500], "type": "upstream_error", "code": status}}
 
 
+# ---------------------------------------------------------------------------
+# 流式 delta 净化与 reasoning 合并（借鉴 DistPub/workbuddy2api，MIT License）
+# strip_empty_delta：剥掉 SSE delta 里的空 content/"" 与空 reasoning_content/""，
+#   避免 AI SDK 把空 content 误判为「文本已开始」而产生大量碎片 Thought 块。
+# coalesce_reasoning：把零散 reasoning 分片合并为一段，在首个推进对话的 delta
+#   （content/tool_calls/finish）之前整段释放，并从 tool_calls 参数流里剥离混入的
+#   reasoning，避免工具参数 JSON 被截断/污染。
+# 两者均可通过 CONFIG 环境变量关闭（WORKBUDDY_STRIP_EMPTY_DELTA=0 / WORKBUDDY_COALESCE_REASONING=0）。
+# ---------------------------------------------------------------------------
+
+_EMPTY_DELTA_KEYS = ("content", "reasoning_content")
+
+
+def _is_empty_delta_content(value: str) -> bool:
+    return value is None or (isinstance(value, str) and value == "")
+
+
+def _sanitize_delta_obj(obj: Any) -> tuple[bool, Any]:
+    """尝试清洗 SSE data JSON；返回 (changed, new_obj)。
+
+    - 若不是 Chat delta 形状（choices/delta 都在），原样返回 (False, obj)
+    - 清洗规则：遍历每个 choice.delta
+        * 若 content == "" 且 reasoning_content 非空 → 删 content
+        * 若 content == "" 且 reasoning_content 也空 → 整个 delta 若仍含
+          tool_calls/role 等"非空"字段就保留，但若 delta 完全空（只两个空字段）→ 整 choice 删
+        * reasoning_content == "" 同样处理
+    """
+    if not isinstance(obj, dict):
+        return False, obj
+    choices = obj.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False, obj
+    changed = False
+    new_choices: list = []
+    for ch in choices:
+        if not isinstance(ch, dict):
+            new_choices.append(ch)
+            continue
+        delta = ch.get("delta")
+        if not isinstance(delta, dict):
+            new_choices.append(ch)
+            continue
+
+        # 复制 delta 用于清洗
+        new_delta = dict(delta)
+        delta_changed = False
+
+        for k in _EMPTY_DELTA_KEYS:
+            if k not in new_delta:
+                continue  # 键不存在≠空串：纯 reasoning delta 没有 content 键，不能因此删帧
+            v = new_delta[k]
+            if _is_empty_delta_content(v):
+                # 仅当存在"非空兄弟字段"时删除这个空字段；
+                # 若 delta 里只有这一个空字段，则把整个 choice 也丢掉
+                if len(new_delta) == 1:
+                    delta = None  # 标记整 choice 删除
+                    delta_changed = True
+                    break
+                if k in new_delta:
+                    del new_delta[k]
+                    delta_changed = True
+
+        if delta is None:
+            # 整个 choice 没有任何有效 delta 字段
+            # 但若 choice 仍带 finish_reason（典型收尾 chunk），就保留 finish_reason
+            if ch.get("finish_reason"):
+                new_choices.append({"index": ch.get("index", 0),
+                                    "delta": {},
+                                    "finish_reason": ch["finish_reason"]})
+                changed = True
+            else:
+                # 整 choice 丢弃
+                changed = True
+                continue
+        elif delta_changed:
+            new_ch = dict(ch)
+            new_ch["delta"] = new_delta
+            new_choices.append(new_ch)
+            changed = True
+        else:
+            new_choices.append(ch)
+
+    if not changed:
+        return False, obj
+    new_obj = dict(obj)
+    new_obj["choices"] = new_choices
+    return True, new_obj
+
+
+def _sanitize_sse_data(data: str) -> str:
+    """清洗单个 SSE data 行（去掉 'data:' 前缀后的 payload）。
+    非 JSON / 非 Chat delta 形状 → 原样返回。
+    """
+    if data == "[DONE]":
+        return data
+    try:
+        obj = json.loads(data)
+    except (json.JSONDecodeError, ValueError):
+        return data
+    changed, new_obj = _sanitize_delta_obj(obj)
+    if not changed:
+        return data
+    # ensure_ascii=False 保留中文，separators 紧凑减少字节
+    return json.dumps(new_obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _maybe_sanitize_line(line: str) -> str:
+    """对单条 SSE 行做"按行"清洗：保留 event:/id:/retry: 等控制行；
+    data: 行解析 payload 并清洗后重新拼回 data: 前缀。
+    关闭时（CONFIG['strip_empty_delta'] = False）原样返回。
+    """
+    if not CONFIG.get("strip_empty_delta"):
+        return line
+    if not line or not line.startswith("data:"):
+        return line
+    payload = line[5:].lstrip()
+    if not payload or payload == "[DONE]":
+        return line
+    try:
+        obj = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        return line
+    _, new_obj = _sanitize_delta_obj(obj)
+    if obj is new_obj:
+        return line
+    return "data: " + json.dumps(new_obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _reasoning_text(obj: Any) -> str:
+    """从 SSE data JSON 里取第一个 choice.delta 的 reasoning_content（若有）。"""
+    try:
+        ch = (obj.get("choices") or [{}])[0]
+        delta = ch.get("delta") or {}
+        r = delta.get("reasoning_content")
+        return r if isinstance(r, str) else ""
+    except Exception:
+        return ""
+
+
+def _has_non_reasoning_delta(obj: Any) -> bool:
+    """该 SSE data 是否携带"会推进对话/工具"的可见内容（content / tool_calls /
+    finish_reason / error）。纯 reasoning（或只有 role 收尾）不算。
+    """
+    if not isinstance(obj, dict):
+        return True
+    if obj.get("error"):
+        return True
+    try:
+        ch = (obj.get("choices") or [{}])[0]
+    except Exception:
+        return True
+    if not isinstance(ch, dict):
+        return True
+    delta = ch.get("delta") or {}
+    if not isinstance(delta, dict):
+        return True
+    if ch.get("finish_reason"):
+        return True
+    # 只要 delta 里出现非空 content / tool_calls，就算"可见推进"
+    c = delta.get("content")
+    if isinstance(c, str) and c:
+        return True
+    if delta.get("tool_calls"):
+        return True
+    if delta.get("refusal"):
+        return True
+    return False
+
+
+def _remove_reasoning_from_delta(obj: Any) -> Any:
+    """把某个推进 delta 里夹带的 reasoning_content 整段剥掉，返回新对象。
+
+    用于 content 起笔帧或 tool_calls 帧与 reasoning 同帧的情形：推理 token 若混在
+    tool_calls 的 arguments 里会让参数 JSON 截断/坏掉；若混在 content 起笔帧里会让
+    客户端误判"文本已开始"而提前结束 Thought 周期。剥走后，调用方负责把这段
+    reasoning 单独以纯 reasoning delta 释放。无 reasoning 时原样返回同一对象。
+    """
+    if not isinstance(obj, dict):
+        return obj
+    choices = obj.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return obj
+    changed = False
+    new_choices: list = []
+    for ch in choices:
+        if not isinstance(ch, dict):
+            new_choices.append(ch)
+            continue
+        delta = ch.get("delta")
+        if not isinstance(delta, dict):
+            new_choices.append(ch)
+            continue
+        rc = delta.get("reasoning_content")
+        if not isinstance(rc, str) or not rc:
+            new_choices.append(ch)
+            continue
+        new_delta = dict(delta)
+        new_delta.pop("reasoning_content", None)
+        new_ch = dict(ch)
+        new_ch["delta"] = new_delta
+        new_choices.append(new_ch)
+        changed = True
+    if not changed:
+        return obj
+    new_obj = dict(obj)
+    new_obj["choices"] = new_choices
+    return new_obj
+
+
+def _encode_sse_chunk(obj: Any) -> bytes:
+    return b"data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n\n"
+
+
+def _parse_sse_data_objects(evt: bytes) -> list[Any]:
+    """把一个完整 SSE 帧（可能含多行 data:）解析成 payload 对象列表。非 data 行忽略。"""
+    out: list[Any] = []
+    for ln in evt.split(b"\n"):
+        s = ln.lstrip()
+        if not s.startswith(b"data:"):
+            continue
+        payload = s[5:].strip()
+        if not payload or payload in (b"[DONE]", b"[done]"):
+            out.append(None)  # 占位表示 [DONE]
+            continue
+        try:
+            out.append(json.loads(payload))
+        except (json.JSONDecodeError, ValueError):
+            # 无法解析的数据行原样透传，不参与合并（交给客户端容错）
+            out.append(payload)
+    return out
+
+
+class _ReasoningCoalescer:
+    """网关层"推理合并器"：把流式 reasoning 零散分片攒成一段，在首个真正推进对话
+    （content / tool_calls / finish_reason / [DONE]）的 delta 之前整段释放，并从
+    tool_calls 的参数流里剔除混入的 reasoning。用法：
+
+        c = _ReasoningCoalescer()
+        for evt_bytes in c.feed(one_cleaned_event_bytes):  yield evt_bytes
+        for evt_bytes in c.flush():                          yield evt_bytes
+
+    feed 每来一个事件返回"应当转发给客户端"的事件列表；flush 在流结束时调用以清空
+    残余 reasoning。注意合并只在同一个 choice 的 reasoning 连续段内发生，遇到
+    content / tool_calls 会先 flush 当前 reasoning，因此不会把不同用途的内容拼错。
+    """
+
+    __slots__ = ("_rbuf", "_rcount")
+
+    def __init__(self) -> None:
+        self._rbuf: list[str] = []
+        self._rcount = 0  # 已攒的 reasoning 分片数（用于判断是否真的发生过穿插）
+
+    def _flush_reasoning(self) -> list[bytes]:
+        if not self._rbuf:
+            return []
+        text = "".join(self._rbuf)
+        self._rbuf = []
+        self._rcount = 0
+        if not text:
+            return []
+        chunk = {"choices": [{"index": 0, "delta": {"reasoning_content": text}}]}
+        return [_encode_sse_chunk(chunk)]
+
+    def feed(self, evt: bytes) -> list[bytes]:
+        if not evt:
+            return []
+        if not CONFIG.get("coalesce_reasoning"):
+            # 关闭：原样透传（不合并、不重组）
+            return [evt]
+
+        objs = _parse_sse_data_objects(evt)
+        if not objs:
+            return [evt]
+
+        merged: list[bytes] = []
+        for o in objs:
+            if o is None:
+                # [DONE]：先 flush 残余 reasoning，再原样放 [DONE]
+                merged += self._flush_reasoning()
+                merged.append(b"data: [DONE]\n\n")
+                continue
+            if not isinstance(o, dict):
+                # 无法 JSON 解析的原样行：合并推理时保守忽略该行内容，避免错乱
+                merged += self._flush_reasoning()
+                merged.append(evt)  # 整帧原样补发一次（很少触发）
+                continue
+
+            rc = _reasoning_text(o)                 # 本 delta 的 reasoning（若有）
+            advancing = _has_non_reasoning_delta(o)  # 是否带 content/tool_calls/finish
+
+            # 纯 reasoning（不带任何推进内容）→ 入缓冲，攒成一段
+            if rc and not advancing:
+                self._rbuf.append(rc)
+                self._rcount += 1
+                continue
+
+            if advancing:
+                # content / tool_calls / finish 到来：先把已攒 reasoning 整段释放。
+                merged += self._flush_reasoning()
+                if rc:
+                    # 该推进 delta 自身还夹带 reasoning（如 tool_calls 与 reasoning 同帧，
+                    # 或 content 起笔帧带 reasoning）：剥走，避免污染参数流或让客户端把
+                    # "推理继续"误判成"文本已开始"而再次开启 Thought 块。
+                    self._rbuf.append(rc)
+                    self._rcount += 1
+                    merged += self._flush_reasoning()
+                    o = _remove_reasoning_from_delta(o)
+                merged.append(_encode_sse_chunk(o))
+                continue
+
+            # 其余（如 role:"assistant" 收尾等无可见推进、无 reasoning 的标记 delta）
+            # 原样转发，不参与合并，保持协议帧完整。
+            merged.append(_encode_sse_chunk(o))
+        return merged
+
+    def flush(self) -> list[bytes]:
+        return self._flush_reasoning()
+
+
+class _SseLineBuffer:
+    """字节级 SSE 行缓冲解析器。
+
+    上游可能把一行 SSE 拆到多个 TCP chunk 里发（GLM 流经常出现），所以不能
+    假设每次 aiter_bytes 拿到的是完整行。每调一次 feed(chunk) 就把内部
+    缓冲里能切的完整行（以 \n 分隔）切出来，返回行列表（不含换行符）。
+    """
+
+    __slots__ = ("_buf",)
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        if not chunk:
+            return []
+        self._buf.extend(chunk)
+        out: list[bytes] = []
+        while True:
+            idx = self._buf.find(b"\n")
+            if idx < 0:
+                break
+            line = bytes(self._buf[:idx])
+            del self._buf[:idx + 1]
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            out.append(line)
+        return out
+
+    def flush(self) -> list[bytes]:
+        if not self._buf:
+            return []
+        line = bytes(self._buf)
+        self._buf.clear()
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        return [line]
+
+
 async def _stream_upstream(url: str, headers: dict, body: dict,
                            model_name: str = "?", t0: float = 0.0, rid: str = ""):
     """把后端 SSE 原样转发给客户端（后端已是标准 OpenAI SSE，含 tool_calls）。
@@ -1548,22 +1914,26 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     err_msg: str | None = None   # 上游错误摘要（None 表示流正常结束）
     buf = b""
     raw_parts: list[bytes] = []   # 累积完整原始 SSE
+    forwarded_parts: list[bytes] = []  # 累积清洗后实际转发给客户端的 SSE
     prefix = f"[{rid}] " if rid else ""
+    coal = _ReasoningCoalescer()
+    line_buf = _SseLineBuffer()
 
-    def _feed(chunk: bytes):
-        nonlocal finish_reason, saw_filter, buf, ttft_ms
-        # 行缓冲解析：把累计的 chunk 按 data: 行切出来统计
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            line = line.strip()
-            if not line.startswith(b"data:"):
+    def _record_event_stats(cleaned: bytes):
+        """从清洗后的 SSE 事件里解析统计信息（usage/finish/tool_names/审核拦截）。"""
+        nonlocal finish_reason, saw_filter, ttft_ms
+        text_repr = cleaned.decode("utf-8", "replace")
+        if "content-filter" in text_repr or "敏感" in text_repr or "审核" in text_repr:
+            saw_filter = True
+        for ln in cleaned.split(b"\n"):
+            s = ln.lstrip()
+            if not s.startswith(b"data:"):
                 continue
-            data = line[5:].strip()
-            if data == b"[DONE]":
+            d = s[5:].lstrip()
+            if d == b"[DONE]":
                 continue
             try:
-                obj = json.loads(data)
+                obj = json.loads(d)
             except Exception:
                 continue
             if obj.get("usage"):
@@ -1579,13 +1949,27 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                     nm = (tc.get("function") or {}).get("name")
                     if nm:
                         tool_names.append(nm)
-            # 内容审核拦截常以 content-filter 或特殊中文文案返回
-            try:
-                text_repr = data.decode("utf-8", "replace")
-            except Exception:
-                text_repr = ""
-            if "content-filter" in text_repr or "敏感" in text_repr or "审核" in text_repr:
-                saw_filter = True
+
+    def _feed_and_coalesce(chunk: bytes):
+        """字节 chunk → 行缓冲 → 完整事件清洗 → reasoning 合并 → (转发事件列表)。"""
+        nonlocal buf
+        for line in line_buf.feed(chunk):
+            buf += line + b"\n"
+        # buf 现在累积了完整行；按空行切完整 SSE 事件
+        events = []
+        while b"\n\n" in buf:
+            evt, buf = buf.split(b"\n\n", 1)
+            events.append(evt)
+        out: list[bytes] = []
+        for evt in events:
+            cleaned_lines = []
+            for ln in evt.split(b"\n"):
+                cleaned_lines.append(_maybe_sanitize_line(ln.decode("utf-8", "replace")))
+            cleaned = ("\n".join(cleaned_lines) + "\n\n").encode("utf-8")
+            _record_event_stats(cleaned)
+            forwarded_parts.append(cleaned)
+            out += coal.feed(cleaned)
+        return out
 
     try:
         async with httpx.AsyncClient(timeout=None) as c:
@@ -1603,8 +1987,12 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                 async for chunk in r.aiter_bytes():
                     if chunk:
                         raw_parts.append(chunk)
-                        _feed(chunk)
-                        yield chunk
+                        # 空段清洗 + reasoning 合并后转发（借鉴 DistPub/workbuddy2api）
+                        for evt in _feed_and_coalesce(chunk):
+                            yield evt
+                # 流尾兜底：残余行与残余 reasoning
+                for evt in coal.flush():
+                    yield evt
     except httpx.HTTPError as e:
         _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
         err_msg = f"upstream error: {e}"
