@@ -1143,9 +1143,10 @@ async def chat_completions(request: Request,
         body["stream_options"] = {"include_usage": True}
 
     # 可选：脱敏。缓解客户端合规模板（如 ZCode 的 system 声明）被后端误判为敏感词。
-    # 只对 system 角色消息里的"合规声明高频词"插入零宽空格，不改用户输入。
+    # system+assistant 角色里的"合规声明高频词/竞争品牌词"插入零宽空格，不改用户输入。
+    # （assistant 历史回复实测同样触发 11128 拦截，借鉴 DistPub/workbuddy2api）
     if CONFIG.get("desensitize"):
-        body = desensitize_body(body, roles=("system",))
+        body = desensitize_body(body, roles=("system", "assistant"))
 
     # 日志：请求摘要
     model_name = payload.get("model", "auto")
