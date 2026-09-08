@@ -483,6 +483,7 @@ pub fn run_app() {
             commands::proxy_stop,
             commands::proxy_restart,
             commands::proxy_health,
+            commands::proxy_rate_limit,
             commands::proxy_test_chat,
             // 日志目录打开（前端 invoke）
             commands::open_logs_dir,

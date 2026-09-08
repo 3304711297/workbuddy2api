@@ -8,29 +8,83 @@ import { state } from './state.js';
 import { esc, showToast, showConfirm, invokeTauri } from './utils.js';
 import { checkHealth } from './service.js';
 
+// 频率限制状态数据获取：优先 Tauri command（绕过 CSP connect-src 限制），
+// 老版构建无该 command 或内核无该端点时返回 null（前端降级隐藏该卡片）。
+async function fetchRateLimit() {
+  try {
+    return await invokeTauri('proxy_rate_limit', { port: state.port });
+  } catch {
+    return null;
+  }
+}
+
+// 把 /api/rate_limit 载荷渲染成内嵌 HTML；rl=null 或 models 为空时返回空串。
+function renderRateLimitCard(rl, activeModel) {
+  if (!rl || !rl.models) return '';
+  const models = Object.entries(rl.models);
+  if (models.length === 0) return '';
+
+  const rows = models.map(([model, e]) => {
+    const limited = e.state === 'limited';
+    const dot = limited
+      ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px;animation:pulse-dot 1.2s ease-in-out infinite;"></span>'
+      : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
+    const status = limited
+      ? `<strong style="color:var(--danger);">已触发 · 冷却中</strong> <span class="mono">⏳ ${esc(fmtCooldown(e.remainingSec))}</span> <small class="muted mono">@${esc(e.resetLocal || '')}</small>`
+      : `<strong style="color:var(--success);">正常</strong> <small class="muted mono">(冷却已于 ${esc(e.resetLocal || '')} 结束)</small>`;
+    const badge = model === activeModel ? '<span class="badge badge-info" style="font-size:10px;margin-left:6px;">当前会话</span>' : '';
+    return `<div class="pkg-item" title="${esc(e.message || '腾讯上游 code 6004 频率限制')}">${dot}<span class="mono">${esc(model)}</span>${badge}<span>${status}</span></div>`;
+  }).join('');
+
+  const ru = rl.rollingUsage || {};
+  const usageRows = Object.entries(ru).map(([model, u]) =>
+    `<div class="pkg-item"><span class="mono muted">${esc(model)} · 近5h</span><span><strong>${u.reqs5h ?? 0}</strong> 次 / <strong>${((u.tokens5h || 0) / 1e6).toFixed(2)}M</strong> tokens${u.err429_5h ? ` <small style="color:var(--danger);">429×${u.err429_5h}</small>` : ''}</span></div>`
+  ).join('');
+
+  return `
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+        <span style="font-size:12px;color:var(--text-secondary);">上游频率限制（腾讯 code 6004）</span>
+        <span class="muted" style="font-size:10px;">无固定公开阈值 · 仅报实测值</span>
+      </div>
+      ${rows}
+      ${usageRows ? `<div style="margin-top:6px;">${usageRows}</div>` : ''}
+    </div>
+  `;
+}
+
+function fmtCooldown(sec) {
+  if (sec == null) return '--';
+  if (sec <= 0) return '已恢复';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(sec % 60).padStart(2, '0')}s`;
+}
+
 export async function loadAccountsData() {
   const container = document.getElementById('active-account-container');
   const listEl = document.getElementById('accounts-list');
   container.innerHTML = `<div class="card" style="padding: 24px; text-align: center;"><span class="spinner"></span> 正在同步账号与资产数据...</div>`;
 
   try {
-    const [accounts, usage] = await Promise.allSettled([
+    const [accounts, usage, rateLimit] = await Promise.allSettled([
       invokeTauri('accounts_list'),
-      invokeTauri('usage_query')
+      invokeTauri('usage_query'),
+      fetchRateLimit()
     ]);
 
     const acctList = accounts.status === 'fulfilled' ? accounts.value : [];
     const usageData = usage.status === 'fulfilled' ? usage.value : null;
+    const rateLimitData = rateLimit.status === 'fulfilled' ? rateLimit.value : null;
     state.accountsList = acctList;
 
-    renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData);
+    renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData, rateLimitData);
     renderAccountsGrid(acctList);
   } catch (e) {
     container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${esc(e.message || e)}</div>`;
   }
 }
 
-function renderActiveAccountAndUsage(acct, usage) {
+function renderActiveAccountAndUsage(acct, usage, rateLimit) {
   const container = document.getElementById('active-account-container');
   if (!container) return;
 
@@ -51,6 +105,9 @@ function renderActiveAccountAndUsage(acct, usage) {
 
   // 计算积分进度
   let quotaHtml = '';
+  // 频率限制卡片：仅当反代端点返回了真实 6004 记录时渲染（老版内核/无记录 → 空）
+  // 桌面端无「当前测试模型」全局态，rate_limit.models 里的 model 字段即最近被限模型，直接展示不加会话徽标
+  const rateLimitHtml = renderRateLimitCard(rateLimit, null);
   if (usage) {
     const total = usage.total || 0;
     const remain = usage.remain || 0;
@@ -82,6 +139,7 @@ function renderActiveAccountAndUsage(acct, usage) {
           <div class="progress-fill" style="width: ${pct}%; background: ${progressColor};"></div>
         </div>
         ${pkgRows ? `<div class="pkg-list">${pkgRows}</div>` : ''}
+        ${rateLimitHtml}
       </div>
     `;
   } else {

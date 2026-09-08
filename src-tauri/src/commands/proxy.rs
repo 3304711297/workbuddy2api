@@ -343,6 +343,22 @@ pub async fn proxy_health(port: u16) -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+/// 拉取反代自曝的上游频率限制状态（GET /api/rate_limit，code 6004 冷却与滚动用量）。
+/// 老版内核无该端点时返回 Ok(null)，由前端按「数据不可用」优雅降级。
+#[tauri::command]
+pub async fn proxy_rate_limit(port: u16) -> Result<Option<serde_json::Value>, String> {
+    let url = format!("http://127.0.0.1:{port}/api/rate_limit");
+    let resp = super::shared::local_client(8).get(&url).send().await;
+    match resp {
+        Ok(r) if r.status() == reqwest::StatusCode::OK => {
+            let v: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+            Ok(Some(v))
+        }
+        // 404 = 老版内核（无此端点）；连接失败 = 内核未运行。两者都属「不可用」而非错误。
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
 #[tauri::command]
 pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestChatResult, String> {
     let target_model = model.unwrap_or_else(|| "glm-5.3-flash".into());
