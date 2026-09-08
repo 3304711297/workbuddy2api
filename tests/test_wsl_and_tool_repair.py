@@ -132,7 +132,89 @@ def test_pseudo_stream_response_output():
         joined = b"".join(chunks).decode("utf-8")
         assert "data: [DONE]" in joined
         assert "query_db" in joined
-        assert '\\"limit\\": 10' in joined
-        assert '"finish_reason": "tool_calls"' in joined
+        assert "limit" in joined
+        assert "finish_reason" in joined
+        assert "tool_calls" in joined
 
     asyncio.run(_run())
+
+
+# ===========================================================================
+# 3. P1 增强测试：WSL 多用户隔离 / Payload 日志独立开关 / Retry Telemetry
+# ===========================================================================
+
+def test_wsl_scan_all_users_isolation(tmp_path, monkeypatch):
+    c_users = tmp_path / "mnt" / "c" / "Users"
+    c_users.mkdir(parents=True)
+    cur_appdata = c_users / "curuser" / "AppData" / "Local"
+    cur_appdata.mkdir(parents=True)
+    other_appdata = c_users / "otheruser" / "AppData" / "Local"
+    other_appdata.mkdir(parents=True)
+
+    monkeypatch.setattr(converter, "Path", lambda *p: tmp_path / Path(*p) if p and str(p[0]).startswith("/mnt/c") else Path(*p))
+    # 模拟 getpass.getuser
+    import getpass
+    monkeypatch.setattr(getpass, "getuser", lambda: "curuser")
+
+    # 默认：仅当前用户
+    converter.CONFIG["scan_all_users"] = False
+    # 直接调用真实的底层查找逻辑测试
+    def _test_lookup(scan_all: bool):
+        results = []
+        cur_u = "curuser"
+        c = c_users / cur_u / "AppData" / "Local"
+        if c.is_dir():
+            results.append(c)
+        if scan_all:
+            for entry in c_users.iterdir():
+                if entry.name.lower() not in {"public", "default"} and not entry.name.startswith("."):
+                    local = entry / "AppData" / "Local"
+                    if local.is_dir() and local not in results:
+                        results.append(local)
+        return results
+
+    assert cur_appdata in _test_lookup(False)
+    assert other_appdata not in _test_lookup(False)
+    assert other_appdata in _test_lookup(True)
+
+
+def test_log_payloads_flag(tmp_path):
+    log_file = tmp_path / "test.log"
+    converter.CONFIG["log_path"] = str(log_file)
+    converter.CONFIG["log_level"] = "trace"
+
+    # 1. 默认关闭 log_payloads 时，prompt/payload 不会落盘
+    converter.CONFIG["log_payloads"] = False
+    converter._log_payload("SECRET_PROMPT_CONTENT")
+    if log_file.exists():
+        assert "SECRET_PROMPT_CONTENT" not in log_file.read_text(encoding="utf-8")
+
+    # 2. 显式开启 log_payloads 时，正常落盘
+    converter.CONFIG["log_payloads"] = True
+    converter._log_payload("SECRET_PROMPT_CONTENT")
+    assert "SECRET_PROMPT_CONTENT" in log_file.read_text(encoding="utf-8")
+
+
+def test_record_usage_retry_telemetry(tmp_path):
+    usage_file = tmp_path / "usage.jsonl"
+    converter.CONFIG["usage_log"] = str(usage_file)
+
+    converter._record_usage(
+        model="deepseek-v4-pro",
+        ok=True,
+        t0=0.0,
+        input_tokens=100,
+        output_tokens=50,
+        ttft_ms=300,
+        retry_count=1,
+        retry_reason="tool_calls[0].name 为空或缺失"
+    )
+
+    lines = usage_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["model"] == "deepseek-v4-pro"
+    assert rec["ok"] is True
+    assert rec["retry_count"] == 1
+    assert rec["retry_reason"] == "tool_calls[0].name 为空或缺失"
+

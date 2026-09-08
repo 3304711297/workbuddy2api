@@ -77,7 +77,7 @@ def _wsl_win_local_appdata() -> list[Path]:
     if not users_root.is_dir():
         return results
 
-    # 1. 优先尝试与当前 Linux 用户名同名的 Windows 用户目录
+    # 1. 优先尝试与当前 Linux 用户名同名的 Windows 用户目录（默认安全策略）
     import getpass
     try:
         cur_user = getpass.getuser()
@@ -87,16 +87,17 @@ def _wsl_win_local_appdata() -> list[Path]:
     except Exception:
         pass
 
-    # 2. 遍历 /mnt/c/Users，排除 Windows 默认非用户目录
-    ignore = {"public", "default", "default user", "all users", "desktop.ini"}
-    try:
-        for entry in users_root.iterdir():
-            if entry.name.lower() not in ignore and not entry.name.startswith("."):
-                local = entry / "AppData" / "Local"
-                if local.is_dir() and local not in results:
-                    results.append(local)
-    except Exception:
-        pass
+    # 2. 遍历 /mnt/c/Users：仅在显式开启 --scan-all-users 时执行，防多用户机器跨用户误读他人凭据
+    if CONFIG.get("scan_all_users"):
+        ignore = {"public", "default", "default user", "all users", "desktop.ini"}
+        try:
+            for entry in users_root.iterdir():
+                if entry.name.lower() not in ignore and not entry.name.startswith("."):
+                    local = entry / "AppData" / "Local"
+                    if local.is_dir() and local not in results:
+                        results.append(local)
+        except Exception:
+            pass
     return results
 
 
@@ -567,8 +568,8 @@ PASSTHROUGH_BODY_KEYS = {
 app = FastAPI(title="codebuddy2openai", version="2.0")
 CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
-                "usage_log": None, "unsafe_expose": False,
-                "desensitize": False, "wsl": False,
+                "log_payloads": False, "usage_log": None, "unsafe_expose": False,
+                "desensitize": False, "wsl": False, "scan_all_users": False,
                 "repair_stream_tools": True}  # cred: CredentialManager | None
 
 
@@ -667,6 +668,13 @@ def _log(msg: str, level: str = "info"):
         pass  # 日志失败不应影响主流程
 
 
+def _log_payload(msg: str):
+    """记录完整请求/响应 body 或原始 SSE。
+    必须显式指定 --log-payloads（或环境变量 CODEBUDDY2OPENAI_LOG_PAYLOADS=1）
+    且 log_level 为 trace 时才会落盘，防止高级调试模式下将长会话 Prompt 正文写入日志文件。
+    """
+    if CONFIG.get("log_payloads"):
+        _log(msg, level="trace")
 
 
 def _truncate(s: str, n: int = 80) -> str:
@@ -693,12 +701,13 @@ def _usage_int(v) -> int | None:
 
 def _record_usage(model: str, ok: bool, t0: float, *,
                   input_tokens=None, output_tokens=None,
-                  ttft_ms=None, error=None):
+                  ttft_ms=None, error=None,
+                  retry_count: int = 0, retry_reason: str | None = None):
     """向 CONFIG['usage_log'] 追加一行用量统计（JSONL，append 模式，每行写完即落盘）。
 
     行格式：{"ts": <epoch毫秒>, "model": str, "ok": bool, "input_tokens": int|null,
              "output_tokens": int|null, "latency_ms": int, "ttft_ms": int|null,
-             "error": str|null}
+             "error": str|null, "retry_count": int, "retry_reason": str|null}
     未启用 --usage-log 时直接丢弃；写入任何异常一律静默吞掉，绝不影响请求响应。
     """
     path = CONFIG.get("usage_log")
@@ -714,6 +723,8 @@ def _record_usage(model: str, ok: bool, t0: float, *,
             "latency_ms": int((time.time() - t0) * 1000) if t0 else 0,
             "ttft_ms": _usage_int(ttft_ms),
             "error": (_truncate(str(error), 200) if error else None),
+            "retry_count": int(retry_count or 0),
+            "retry_reason": (_truncate(str(retry_reason), 100) if retry_reason else None),
         }
         with _USAGE_LOCK:  # 并发请求下保证逐行完整追加
             with open(path, "a", encoding="utf-8") as f:
@@ -970,7 +981,7 @@ async def chat_completions(request: Request,
     if last_user:
         _log(f"[{rid}] last_user={_truncate(last_user, 60)!r}", level="debug")
     # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）
-    _log(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}", level="trace")
+    _log_payload(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}")
 
     headers = cred.get_headers()
     url = f"{BACKEND}/v2/chat/completions"
@@ -1057,7 +1068,7 @@ def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
          + (f" | tool_calls={tc_names}" if tc_names else "")
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整响应体
-    _log(f"{prefix}── RESPONSE BODY ──\n{json.dumps(result, ensure_ascii=False, indent=2)}", level="trace")
+    _log_payload(f"{prefix}── RESPONSE BODY ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
 
 
 async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[dict, int | None]:
@@ -1161,7 +1172,8 @@ def _validate_tool_calls(tool_calls: list[dict] | None) -> tuple[bool, str]:
 
 
 async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: float = 0.0,
-                                  rid: str = "", ttft_ms: int | None = None):
+                                  rid: str = "", ttft_ms: int | None = None,
+                                  retry_count: int = 0, retry_reason: str | None = None):
     """将聚合校验后的完整响应转换为标准 OpenAI SSE 流，供客户端消费。"""
     cid = collected.get("id") or ("chatcmpl-" + os.urandom(12).hex())
     created = collected.get("created") or int(time.time())
@@ -1249,7 +1261,9 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
     _record_usage(model_name, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
-                  ttft_ms=ttft_ms)
+                  ttft_ms=ttft_ms,
+                  retry_count=retry_count,
+                  retry_reason=retry_reason)
 
 
 async def _safe_stream_upstream(url: str, headers: dict, body: dict,
@@ -1263,6 +1277,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     max_attempts = 2
     collected = None
     ttft_ms = None
+    retry_count = 0
+    retry_reason = None
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1271,13 +1287,15 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                     if r.status_code != 200:
                         raw = await r.aread()
                         _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}",
+                                      retry_count=retry_count, retry_reason=retry_reason)
                         yield _err_event(raw, r.status_code)
                         return
                     collected, ttft_ms = await _collect_stream(r, t0)
         except httpx.HTTPError as e:
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-            _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+            _record_usage(model_name, False, t0, error=f"upstream error: {e}",
+                          retry_count=retry_count, retry_reason=retry_reason)
             yield _err_event(str(e).encode(), 502)
             return
 
@@ -1290,10 +1308,13 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
         if valid or attempt >= max_attempts:
             if not valid:
                 _log(f"{prefix}⚠️ tool_calls 校验未通过 ({reason})，已达最大重试次数，尝试原样下发")
+                retry_reason = reason
             elif attempt > 1:
                 _log(f"{prefix}✅ tool_calls 重试成功修复 (attempt {attempt})")
             break
 
+        retry_count += 1
+        retry_reason = reason
         _log(f"{prefix}⚠️ 检测到腾讯后端流式 tool_calls 损坏 ({reason})，自动重试 ({attempt}/{max_attempts})...")
         await asyncio.sleep(0.5)
 
@@ -1302,7 +1323,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
         return
 
     # 伪流式输出
-    async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms):
+    async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms,
+                                              retry_count=retry_count, retry_reason=retry_reason):
         yield chunk
 
 
@@ -1395,7 +1417,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
          + (f" | tool_calls={tool_names}" if tool_names else "")
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整原始 SSE（后端返回的全部内容）
-    _log(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}", level="trace")
+    _log_payload(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
     # 用量统计：正常结束 ok=true；上游错误 ok=false（失败也记一行）。
     # _record_usage 内部整体 try/except 静默失败，绝不影响已返回的流式响应。
     _record_usage(model_name, ok=(err_msg is None), t0=t0,
@@ -1463,9 +1485,12 @@ def main():
                     choices=["info", "debug", "trace"],
                     help="日志详细级别：info（默认，仅记录请求摘要与耗时，不落盘 prompt/response 正文）；"
                          "debug（含错误响应详情）；trace（完整记录请求体与响应流，自动脱敏 Token/Key）。")
+    ap.add_argument("--log-payloads", action="store_true",
+                    help="在 trace 日志级别下，额外将完整请求体（含 prompt）、响应体及原始 SSE 落盘。"
+                         "默认关闭以避免长会话 Prompt 正文写入日志文件。可通过 CODEBUDDY2OPENAI_LOG_PAYLOADS=1 开启。")
     ap.add_argument("--usage-log", default=None, metavar="PATH",
                     help="开启用量统计：每个聊天请求（流式/非流式）完成后向该文件追加一行 JSONL"
-                         "（ts/model/ok/input_tokens/output_tokens/latency_ms/ttft_ms/error）。"
+                         "（ts/model/ok/input_tokens/output_tokens/latency_ms/ttft_ms/error/retry_count/retry_reason）。"
                          "不传则不记录。")
     ap.add_argument("--desensitize", action="store_true",
                     help="启用脱敏：对 system 消息里的合规模板敏感词（DoS/exploit/credential 等）"
@@ -1473,6 +1498,9 @@ def main():
     ap.add_argument("--wsl", action="store_true",
                     help="显式开启 WSL 模式：穿透读取 Windows 宿主系统的登录凭据与 accounts.json"
                          "（在 WSL 环境下通常自动检测生效，此开关用于显式开启）。")
+    ap.add_argument("--scan-all-users", action="store_true",
+                    help="在 WSL 模式下，遍历 /mnt/c/Users 下全部 Windows 用户目录以寻找 CodeBuddy 凭据。"
+                         "默认关闭（仅匹配与当前 Linux 用户同名的 Windows 用户），避免多用户机器上的跨用户凭据误读。")
     ap.add_argument("--repair-stream-tools", action="store_true", default=True,
                     help="启用流式 tool_calls 损坏防御（默认开启）：针对腾讯后端在流式输出下偶发"
                          " function.name 为空或 arguments 乱码的问题，在请求含 tools 时进行聚合校验与自动重试，"
@@ -1503,9 +1531,11 @@ def main():
     CONFIG["unsafe_expose"] = args.unsafe_expose
     CONFIG["desensitize"] = args.desensitize
     CONFIG["wsl"] = args.wsl
+    CONFIG["scan_all_users"] = args.scan_all_users or os.environ.get("CODEBUDDY2OPENAI_SCAN_ALL_USERS", "").lower() in ("1", "true", "yes")
     CONFIG["repair_stream_tools"] = args.repair_stream_tools
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
     CONFIG["log_level"] = args.log_level
+    CONFIG["log_payloads"] = args.log_payloads or os.environ.get("CODEBUDDY2OPENAI_LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
     CONFIG["usage_log"] = args.usage_log if args.usage_log else os.environ.get("CODEBUDDY2OPENAI_USAGE_LOG")
     init_cred()
 
@@ -1522,7 +1552,11 @@ def main():
     elif not _is_loopback_host(args.host) and args.unsafe_expose:
         sys.stderr.write("   ⚠️ 警告：非回环暴露且无鉴权 (--unsafe-expose)\n")
     if CONFIG["log_path"]:
-        sys.stderr.write(f"   日志      : {CONFIG['log_path']} (级别: {CONFIG['log_level']})\n")
+        payload_flag = "已开启 (--log-payloads)" if CONFIG["log_payloads"] else "已禁用 (需 --log-payloads)"
+        sys.stderr.write(f"   日志      : {CONFIG['log_path']} (级别: {CONFIG['log_level']} | Payload 落盘: {payload_flag})\n")
+    if args.wsl:
+        scan_mode = "全用户扫描 (--scan-all-users)" if CONFIG["scan_all_users"] else "仅当前用户"
+        sys.stderr.write(f"   WSL模式   : 已显式启用（穿透宿主 Windows 凭据目录 | {scan_mode}）\n")
     if CONFIG["usage_log"]:
         sys.stderr.write(f"   用量统计  : {CONFIG['usage_log']}\n")
     if args.desensitize:
