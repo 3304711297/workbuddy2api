@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import ipaddress
 import json
 import os
@@ -905,6 +906,128 @@ async def api_usage_summary(
     return {"uid": uid, "nickname": nickname, **summary}
 
 
+# ---------------------------------------------------------------------------
+# 频率限制自曝端点（GET /api/rate_limit —— 上游 code 6004 冷却状态与滚动用量）
+# ---------------------------------------------------------------------------
+
+# 上游频率限制状态（仅记录真实发生的 6004 报文，不做任何推测）：
+#   {model: {"code":6004, "message":…, "resetAtMs":…, "firstSeenMs":…, "lastSeenMs":…}}
+_RATE_LIMIT_STATE: dict[str, dict] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+
+# 6004 报文：{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-08 22:11:33 UTC+8 重置，…"}
+_RATE_LIMIT_RE = re.compile(
+    r"\"code\"\s*:\s*6004.*?将在\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*UTC\+8\s*重置"
+)
+
+
+def _record_rate_limit(model: str, err_text: str) -> None:
+    """从上游错误体里识别 6004 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
+    m = _RATE_LIMIT_RE.search(err_text or "")
+    if not m:
+        return
+    try:
+        reset_ms = int(
+            datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+            .timestamp()
+            * 1000
+        )
+    except Exception:
+        return
+    with _RATE_LIMIT_LOCK:
+        prev = _RATE_LIMIT_STATE.get(model)
+        entry = {
+            "code": 6004,
+            "message": (err_text or "")[:300],
+            "resetAtMs": reset_ms,
+            "resetLocal": m.group(1)[11:],
+            "firstSeenMs": prev["firstSeenMs"] if prev and prev.get("resetAtMs") == reset_ms else int(time.time() * 1000),
+            "lastSeenMs": int(time.time() * 1000),
+        }
+        _RATE_LIMIT_STATE[model] = entry
+
+
+def _rolling_usage(model: str) -> dict:
+    """从 usage.jsonl 统计该模型近 5h/24h 的成功请求与 tokens（只读本地文件）。"""
+    path = CONFIG.get("usage_log")
+    if not path or not os.path.exists(path):
+        return {}
+    now_ms = time.time() * 1000
+    reqs5 = reqs24 = tok5 = tok24 = err5 = 0
+    last429 = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                ts = rec.get("ts")
+                if not ts or rec.get("model") != model or (now_ms - ts) > 24 * 3600 * 1000:
+                    continue
+                if rec.get("ok"):
+                    reqs24 += 1
+                    tok24 += (rec.get("input_tokens") or 0) + (rec.get("output_tokens") or 0)
+                    if (now_ms - ts) <= 5 * 3600 * 1000:
+                        reqs5 += 1
+                        tok5 += (rec.get("input_tokens") or 0) + (rec.get("output_tokens") or 0)
+                elif rec.get("error") == "HTTP 429":
+                    if (now_ms - ts) <= 5 * 3600 * 1000:
+                        err5 += 1
+                    if last429 is None or ts > last429:
+                        last429 = ts
+    except Exception:
+        return {}
+    return {
+        "reqs5h": reqs5,
+        "reqs24h": reqs24,
+        "tokens5h": tok5,
+        "tokens24h": tok24,
+        "err429_5h": err5,
+        "last429Local": time.strftime("%m-%d %H:%M:%S", time.localtime(last429 / 1000)) if last429 else None,
+    }
+
+
+@app.get("/api/rate_limit")
+async def api_rate_limit():
+    """各模型上游频率限制（6004）状态与滚动用量观测（只读，不消耗配额）。"""
+    models: dict[str, dict] = {}
+    now_ms = time.time() * 1000
+    with _RATE_LIMIT_LOCK:
+        snapshot = dict(_RATE_LIMIT_STATE)
+    for model, e in snapshot.items():
+        remaining = max(0, int((e["resetAtMs"] - now_ms) / 1000))
+        models[model] = {
+            "state": "limited" if remaining > 0 else "ok",
+            "resetAt": datetime.datetime.fromtimestamp(
+                e["resetAtMs"] / 1000, tz=datetime.timezone.utc
+            ).isoformat(),
+            "resetLocal": e["resetLocal"],
+            "remainingSec": remaining,
+            "message": e["message"],
+            "lastSeenLocal": time.strftime("%m-%d %H:%M:%S", time.localtime(e["lastSeenMs"] / 1000)),
+        }
+    # 活跃凭据对应的账号昵称（辅助定位多账号场景）
+    nickname = ""
+    try:
+        cred = CONFIG.get("cred")
+        if cred is not None:
+            session = cred.get_active_session()
+            nickname = (session.get("account") or {}).get("nickname") or ""
+    except Exception:
+        pass
+    return {
+        "models": models,
+        "rollingUsage": {m: _rolling_usage(m) for m in snapshot or {}},
+        "nickname": nickname,
+        "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 @app.get("/v1/models")
 async def list_models(authorization: Optional[str] = Header(default=None),
                      x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
@@ -1017,6 +1140,12 @@ async def chat_completions(request: Request,
     except HTTPException as e:
         # 上游错误（非 200 等）：记一条失败统计（ok=false）后原样抛出，不改变既有错误语义
         _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
+        # 6004 频率限制：从 detail 原始报文提取重置时刻（detail 可能是 dict 或 str）
+        try:
+            _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
+            _record_rate_limit(model_name, _dl)
+        except Exception:
+            pass
         raise
     except httpx.HTTPError as e:
         _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
@@ -1398,6 +1527,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                     _log(f"{prefix}── ERROR BODY ──\n{err.decode('utf-8','replace')}", level="debug")
                     # 上游错误：先记一条失败统计（tokens 未知填 null）再返回错误事件
                     _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                    # 6004 频率限制：记录重置时刻，供 /api/rate_limit 自曝
+                    _record_rate_limit(model_name, err.decode("utf-8", "replace"))
                     yield _err_event(err, r.status_code)
                     return
                 async for chunk in r.aiter_bytes():
@@ -1547,6 +1678,7 @@ def main():
     sys.stderr.write("   POST /v1/chat/completions   (原生 tools/tool_calls，支持流式)\n")
     sys.stderr.write("   GET  /health\n")
     sys.stderr.write("   GET  /api/usage_summary     (当前账号积分概览，Hermes 配额看板数据源)\n")
+    sys.stderr.write("   GET  /api/rate_limit        (上游频率限制 6004 状态与滚动用量，Hermes 配额看板数据源)\n")
     if args.api_key:
         sys.stderr.write("   鉴权已启用（API key 已设置）\n")
     elif not _is_loopback_host(args.host) and args.unsafe_expose:
