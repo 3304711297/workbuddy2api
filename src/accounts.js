@@ -131,8 +131,9 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
             ${usage.is_paid_user ? '<span class="badge badge-info" style="margin-left:8px;">企业/付费版</span>' : '<span class="badge badge-info" style="margin-left:8px;">个人免费版</span>'}
           </div>
           <div class="quota-totals-text">
-            <span>总计 <strong class="mono">${Math.round(total).toLocaleString()}</strong></span> · 
+            <span>总计 <strong class="mono">${Math.round(total).toLocaleString()}</strong></span> ·
             <span>已消耗 <strong class="mono">${Math.round(used).toLocaleString()}</strong></span>
+            <button class="btn btn-secondary btn-sm" id="btn-daily-checkin" style="margin-left: 10px;">🎁 每日签到</button>
           </div>
         </div>
         <div class="progress-track">
@@ -189,6 +190,34 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
   });
 
   container.querySelector('#btn-refresh-account-quota')?.addEventListener('click', () => loadAccountsData());
+
+  // 每日签到按钮：走 Tauri command 转发到反代 /api/checkin/claim（绕开 CSP connect-src）；
+  // 内核负责注入 X-Device-Token，与桌面端行为一致
+  container.querySelector('#btn-daily-checkin')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = '签到中...';
+    try {
+      const data = await invokeTauri('proxy_checkin_claim', { port: state.port });
+      if (data.ok) {
+        showToast(`✅ 签到成功：+${data.credit ?? 0} 积分${data.streak_days ? `（连续 ${data.streak_days} 天）` : ''}`, 'success');
+      } else if (data.status === 'already_claimed') {
+        showToast('今日已签到，明天再来', 'info');
+      } else if (data.status === 'event_ended') {
+        showToast('签到活动已结束', 'warning');
+      } else if (data.status === 'not_eligible') {
+        showToast('当前账号无签到资格', 'warning');
+      } else {
+        showToast(`签到失败: ${data.error || data.msg || '未知错误'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`签到请求失败: ${err.message || err}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '🎁 每日签到';
+    }
+  });
 }
 
 function renderAccountsGrid(list) {

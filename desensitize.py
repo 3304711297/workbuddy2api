@@ -67,6 +67,26 @@ SENSITIVE_TERMS: list[str] = [
     "botnet",
     "zero-day",
     "0day",
+    # 竞争品牌词（实测触发 11128 审核拦截；借鉴 DistPub/workbuddy2api）
+    # Claude Code / Anthropic 品牌词
+    "Claude Code",
+    "Claude Opus",
+    "Claude Sonnet",
+    "Claude Haiku",
+    "Claude Fable",
+    "Anthropic",
+    "Co-Authored-By",
+    "noreply@anthropic.com",
+    # 通用品牌词（长词先入正则，由词长降序排序保证）
+    "Claude",
+    "OpenAI",
+    "Gemini",
+    "Kimi",
+    "Qwen",
+    "Cursor",
+    "OpenCode",
+    "agent-identity",
+    "OhMyOpenCode",
 ]
 
 # 编译成一个大正则，按词长降序，避免短词先吃掉长词。
