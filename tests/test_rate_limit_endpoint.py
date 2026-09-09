@@ -124,7 +124,11 @@ def test_rate_limit_idempotent_same_reset(rl_client):
 
 
 def test_rate_limit_reset_expiry_flips_state(rl_client):
-    """reset 时刻已过 → state 应翻转为 ok（冷却结束）。"""
+    """reset 时刻已过 → state 翻转为 expired（冷却结束的历史痕迹）。
+
+    与「从未被限过」（无条目）区分开；resetLocal 必须保留，
+    前端用它展示「冷却已于 X 结束」，清空会导致文案残缺。
+    """
     rl_client.post(
         "/v1/chat/completions",
         json={"model": "hy4-preview", "messages": [{"role": "user", "content": "hi"}]},
@@ -132,5 +136,8 @@ def test_rate_limit_reset_expiry_flips_state(rl_client):
     # 直接把内存里的 resetAtMs 改到过去，模拟冷却结束
     converter._RATE_LIMIT_STATE["hy4-preview"]["resetAtMs"] = 0
     data = rl_client.get("/api/rate_limit").json()
-    assert data["models"]["hy4-preview"]["state"] == "ok"
-    assert data["models"]["hy4-preview"]["remainingSec"] == 0
+    ent = data["models"]["hy4-preview"]
+    assert ent["state"] == "expired"
+    assert ent["remainingSec"] == 0
+    assert ent["resetLocal"] == "12:00:00"  # 历史痕迹保留，前端文案依赖
+    assert ent["message"]

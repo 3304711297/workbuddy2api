@@ -1079,8 +1079,11 @@ async def api_rate_limit():
         snapshot = dict(_RATE_LIMIT_STATE)
     for model, e in snapshot.items():
         remaining = max(0, int((e["resetAtMs"] - now_ms) / 1000))
+        # 冷却已结束的条目仅为历史痕迹：state 由 ok 细化为 expired，
+        # 使消费方能区分「当前正被限 / 历史曾限过（已恢复）／从未限过（无条目）」。
+        # 注意：resetLocal/message 必须保留——前端用它展示「冷却已于 X 结束」。
         models[model] = {
-            "state": "limited" if remaining > 0 else "ok",
+            "state": "limited" if remaining > 0 else "expired",
             "resetAt": datetime.datetime.fromtimestamp(
                 e["resetAtMs"] / 1000, tz=datetime.timezone.utc
             ).isoformat(),
