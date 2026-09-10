@@ -91,6 +91,22 @@ codebuddy2openai.exe (GUI)
 - `/api/rate_limit` 仍是 **5 小时滚动口径**（`reqs5h`/`tokens5h`/`err429_5h`）。
   上游已改为「每日免费额度 + 动态重置」，前端 `src/accounts.js:41` 与 token-stats
   插件的今日口径展示（A2/A3/B1/C1/C2）尚未跟进。
-- 凭证轮换：当前**单账号**场景（`accounts.json` 里只有 1 个账号）下无意义；
+- **凭证轮换（P1，已拍板延后至多账号就绪）**：
+  当前单账号（`accounts.json` 只有 1 个账号）下 N=1，轮换等于原地不动，故暂不实现。
   token 续期已由 `converter.py:377` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /
-  `refreshExpiresIn` 90 天）。多账号后再议。
+  `refreshExpiresIn` 90 天），单账号场景无缺口。
+
+  **触发条件**：`accounts.json` 里 `accounts` 字典 ≥2 个账号时启动实施。
+
+  **实施要点（已确认，勿重复调研）**：
+  - 账号结构 `{"active_uid": uid, "accounts": {uid: {auth, account}}}`；
+    取活跃会话走 `_load_active_session(cfg) -> (uid, session)`（`converter.py:149`）。
+  - 切换即改 `active_uid`（`CredentialManager._load_if_stale()` 已按 mtime 感知外部切换，
+    改文件即可被下一次调用读到，无需重启）。
+  - 轮换时机：上游 429 / code 6004 冷却时切下一个账号（冷却状态现成，
+    `_RATE_LIMIT_STATE` + `/api/rate_limit`）。
+  - **必须 opt-in 且默认关闭**（`--rotate N` 之类），纯手动触发——
+    09-08 用户已裁定：不接受任何定时/自动的上游交互。
+  - 参考实现见 `IceeAn/codebuddy2api`（MIT，看门条目 `c2api-upstream-iceean`）；
+    只借思路不搬文件，取代码须出自其当前树并署名（合规红线见第 5 节）。
+
