@@ -21,7 +21,7 @@ export function initTabs() {
   const meta = {
     dashboard: { title: '服务看板', desc: '反代服务运行状态与全局端点概览' },
     accounts: { title: '账号与资产', desc: '管理多账号凭据切换，实时查看各账号的剩余积分与资源包' },
-    agents: { title: 'Agent 一键接入', desc: '为日常 AI 助理 (Hermes / ZCode) 一键写入代理配置' },
+    agents: { title: 'Agent 接入引导', desc: '查看推荐配置项，在 Hermes / ZCode 等客户端内手动填写接入' },
     models: { title: '模型与接口', desc: '查看支持的标准模型别名与多语言接入示例' },
     oauth: { title: '授权新账号', desc: '无需原版 WorkBuddy 客户端，浏览器直接网页授权绑定' },
     settings: { title: '服务设置', desc: '代理端口、脱敏选项及凭据目录管理' },
