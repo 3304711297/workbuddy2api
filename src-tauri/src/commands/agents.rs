@@ -104,9 +104,10 @@ pub fn agent_detect(port: Option<u16>) -> Result<AgentStatus, String> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn agent_configure(agent_type: String, port: u16) -> Result<String, String> {
+pub async fn agent_configure(agent_type: String, port: u16) -> Result<String, String> {
     match agent_type.as_str() {
-        "hermes" => configure_hermes(port),
+        // async：configure_hermes 需 await 动态模型拉取（Tauri 2 原生支持异步 command）
+        "hermes" => configure_hermes(port).await,
         "zcode" => configure_zcode(port),
         _ => Err(format!("不支持的 agent 类型: {agent_type}")),
     }
@@ -155,30 +156,119 @@ fn find_top_level_section(lines: &[String], key: &str) -> Option<(usize, usize, 
     Some((h_idx, start, end))
 }
 
-fn generate_workbuddy_provider_lines(port: u16, indent: &str) -> Vec<String> {
-    vec![
+/// 静态回退模型列表：仅在本机反代不可达（/v1/models 拉取失败，如内核未启动）时使用，
+/// 保证写入功能离线仍可用；正常运行时一律走动态获取的实时列表。
+const WORKBUDDY_FALLBACK_MODELS: &[&str] = &[
+    "auto",
+    "hy4-preview",
+    "hy3",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5v-turbo",
+    "kimi-k3",
+    "kimi-k2.7",
+    "kimi-k2.6",
+    "kimi-k2.5",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "minimax-m3",
+];
+
+/// Hermes 对 custom endpoint 模型缓存条目的凭据指纹（blake2b-8 hex）。
+/// 推导（hermes_cli/models.py::_custom_endpoint_fingerprint）：
+///   blake2b("local||{}".encode(), digest_size=8).hexdigest()
+/// 其中 api_key="local"（写入侧固定值）、api_mode=""、headers={}。
+/// 本 provider 写入的 api_key 恒为 "local" 且无 extra_headers/api_mode，故该指纹为常量。
+/// 若指纹失配，Hermes 仅忽略该缓存条目并回退 config.yaml 的 models（无害降级）。
+const WORKBUDDY_ENDPOINT_FP: &str = "cbe4e4162cb98225";
+
+/// 清洗 /v1/models 返回的模型 id：去空、去重（保序）、剔除 converter 兜底别名 "default"。
+/// "auto" 是合法路由别名，保留。
+fn normalize_model_ids(ids: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        let id = id.trim().to_string();
+        if id.is_empty() || id == "default" || out.contains(&id) {
+            continue;
+        }
+        out.push(id);
+    }
+    out
+}
+
+/// 从本机反代动态拉取实时模型列表（含官方新增/移除后的最新状态）。
+/// 必须走 local_client 显式绕过环境代理（PR#1 教训：ALL_PROXY 会劫持回环地址）。
+/// 拉取失败（内核未启动/鉴权拒绝/响应异常）返回 None，由调用方回退静态列表。
+/// Authorization 头固定 "Bearer local"：与写入 Hermes 的 api_key 契约一致；
+/// converter 未设 api_key 时该头被忽略，设了才校验。
+async fn fetch_proxy_models(port: u16) -> Option<Vec<String>> {
+    let url = format!("http://127.0.0.1:{port}/v1/models");
+    let client = super::shared::local_client(5);
+    let resp = client
+        .get(&url)
+        .header("Authorization", "Bearer local")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let data = body.get("data")?.as_array()?;
+    let ids: Vec<String> = data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    let out = normalize_model_ids(ids);
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// 同步 provider_models_cache.json 中本 provider 的条目（桌面端模型下拉框的数据源之一，
+/// 键格式与 hermes_cli/models.py 一致：custom:{base_url}#{fp}，见 WORKBUDDY_ENDPOINT_FP）。
+/// 读取-合并-原子写回，不触碰其他 provider 的条目；失败不阻断配置写入
+/// （后果仅是桌面下拉框仍显示旧列表，config.yaml 已是新清单）。
+fn update_provider_models_cache(
+    config_path: &std::path::Path,
+    port: u16,
+    models: &[String],
+) -> Result<(), String> {
+    let Some(home) = config_path.parent() else {
+        return Err("无法定位 Hermes 配置目录".into());
+    };
+    let cache_path = home.join("provider_models_cache.json");
+    let mut cache: serde_json::Value = std::fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !cache.is_object() {
+        cache = serde_json::json!({});
+    }
+    let key = format!("custom:http://127.0.0.1:{port}/v1#{WORKBUDDY_ENDPOINT_FP}");
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    cache[key.as_str()] = serde_json::json!({ "fp": WORKBUDDY_ENDPOINT_FP, "at": at, "models": models });
+    let mut out = serde_json::to_string_pretty(&cache).map_err(|e| e.to_string())?;
+    out.push('\n');
+    atomic_write_file(&cache_path, &out).map_err(|e| e.to_string())
+}
+
+fn generate_workbuddy_provider_lines(port: u16, indent: &str, models: &[String]) -> Vec<String> {
+    let mut lines = vec![
         format!("{indent}- name: WorkBuddy (127.0.0.1:{port})"),
         format!("{indent}  base_url: http://127.0.0.1:{port}/v1"),
         format!("{indent}  api_key: local"),
         format!("{indent}  model: auto"),
         format!("{indent}  models:"),
-        format!("{indent}    auto: {{}}"),
-        format!("{indent}    hy4-preview: {{}}"),
-        format!("{indent}    hy3: {{}}"),
-        format!("{indent}    glm-5.3: {{}}"),
-        format!("{indent}    glm-5.3-flash: {{}}"),
-        format!("{indent}    glm-5.2: {{}}"),
-        format!("{indent}    glm-5.1: {{}}"),
-        format!("{indent}    glm-5v-turbo: {{}}"),
-        format!("{indent}    kimi-k3: {{}}"),
-        format!("{indent}    kimi-k2.7: {{}}"),
-        format!("{indent}    kimi-k2.6: {{}}"),
-        format!("{indent}    kimi-k2.5: {{}}"),
-        format!("{indent}    deepseek-v4-pro: {{}}"),
-        format!("{indent}    deepseek-v4-flash: {{}}"),
-        format!("{indent}    minimax-m3: {{}}"),
-        format!("{indent}  models_discovered: true"),
-    ]
+    ];
+    for m in models {
+        lines.push(format!("{indent}    {m}: {{}}"));
+    }
+    lines.push(format!("{indent}  models_discovered: true"));
+    lines
 }
 
 const WORKBUDDY_ALIASES_SPECS: &[(&str, &str)] = &[
@@ -380,7 +470,10 @@ fn reconcile_alias_block(
 }
 
 /// 精准文本 Patch：仅修改/注入 Hermes 所需配置，100% 保持用户注释、空行、原有键顺序与缩进。
-pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String, String> {
+/// `models` 为本次要写入的模型清单（动态获取结果或静态回退）。
+/// 已存在 WorkBuddy 块且端口一致时，还会比对模型清单：缺模型即整块重写，
+/// 否则新模型永远进不了已有配置（重跑写入也无法自愈）。
+pub(crate) fn patch_hermes_config_content(raw: &str, port: u16, models: &[String]) -> Result<String, String> {
     let line_ending = if raw.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines: Vec<String> = raw.lines().map(|s| s.to_string()).collect();
 
@@ -388,7 +481,7 @@ pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String
     if let Some((h_idx, start, end)) = find_top_level_section(&lines, "custom_providers") {
         if lines[h_idx].contains("[]") {
             lines[h_idx] = "custom_providers:".into();
-            let new_item = generate_workbuddy_provider_lines(port, "");
+            let new_item = generate_workbuddy_provider_lines(port, "", models);
             for (offset, line) in new_item.into_iter().enumerate() {
                 lines.insert(h_idx + 1 + offset, line);
             }
@@ -425,13 +518,14 @@ pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String
                 let content = lines[*s..*e].join("\n");
                 let expected_name = format!("127.0.0.1:{port}");
                 let expected_url = format!("127.0.0.1:{port}/v1");
-                if !content.contains(&expected_name) || !content.contains(&expected_url) {
-                    let replacement = generate_workbuddy_provider_lines(port, indent);
+                let models_stale = models.iter().any(|m| !content.contains(&format!("{m}: {{}}")));
+                if !content.contains(&expected_name) || !content.contains(&expected_url) || models_stale {
+                    let replacement = generate_workbuddy_provider_lines(port, indent, models);
                     lines.splice(*s..*e, replacement);
                 }
             } else {
                 let indent = items.first().map(|(_, _, ind)| ind.as_str()).unwrap_or("");
-                let new_item = generate_workbuddy_provider_lines(port, indent);
+                let new_item = generate_workbuddy_provider_lines(port, indent, models);
                 let insert_pos = end;
                 for (offset, line) in new_item.into_iter().enumerate() {
                     lines.insert(insert_pos + offset, line);
@@ -443,7 +537,7 @@ pub(crate) fn patch_hermes_config_content(raw: &str, port: u16) -> Result<String
             lines.push(String::new());
         }
         lines.push("custom_providers:".into());
-        let new_item = generate_workbuddy_provider_lines(port, "");
+        let new_item = generate_workbuddy_provider_lines(port, "", models);
         lines.extend(new_item);
     }
 
@@ -576,23 +670,44 @@ pub(crate) fn remove_hermes_config_content(raw: &str) -> Result<String, String> 
     Ok(result)
 }
 
-fn configure_hermes(port: u16) -> Result<String, String> {
-    let p = resolve_hermes_config();
-    if !p.exists() {
-        return Err(format!("Hermes 配置文件未找到: {}", p.display()));
-    }
-    let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+fn configure_hermes(port: u16) -> impl std::future::Future<Output = Result<String, String>> {
+    async move {
+        let p = resolve_hermes_config();
+        if !p.exists() {
+            return Err(format!("Hermes 配置文件未找到: {}", p.display()));
+        }
+        let raw = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
 
-    // 备份原文件
-    let bak = p.with_extension("yaml.bak-codebuddy-gui");
-    let _ = std::fs::copy(&p, bak);
+        // 动态获取实时模型列表；内核未启动等场景回退静态表，保证离线可用
+        let (models, source) = match fetch_proxy_models(port).await {
+            Some(list) => (list, "动态获取 /v1/models"),
+            None => (
+                WORKBUDDY_FALLBACK_MODELS.iter().map(|s| s.to_string()).collect(),
+                "静态回退列表（反代不可达）",
+            ),
+        };
 
-    // 纯文本精准 Patch，杜绝破坏用户注释、空行与排版
-    let patched = patch_hermes_config_content(&raw, port)?;
-    if patched != raw {
-        atomic_write_file(&p, &patched).map_err(|e| e.to_string())?;
+        // 备份原文件
+        let bak = p.with_extension("yaml.bak-codebuddy-gui");
+        let _ = std::fs::copy(&p, bak);
+
+        // 纯文本精准 Patch，杜绝破坏用户注释、空行与排版
+        let patched = patch_hermes_config_content(&raw, port, &models)?;
+        if patched != raw {
+            atomic_write_file(&p, &patched).map_err(|e| e.to_string())?;
+        }
+
+        // 同步桌面端模型下拉框缓存（失败不阻断：config.yaml 已写入成功）
+        let cache_note = match update_provider_models_cache(&p, port, &models) {
+            Ok(()) => "模型缓存已同步".to_string(),
+            Err(e) => format!("模型缓存同步失败（不影响配置写入）: {e}"),
+        };
+
+        Ok(format!(
+            "Hermes Agent 配置一键写入成功！（{source}，共 {} 个模型；{cache_note}）",
+            models.len()
+        ))
     }
-    Ok("Hermes Agent 配置一键写入成功！".into())
 }
 
 fn remove_hermes() -> Result<String, String> {
@@ -614,11 +729,8 @@ fn configure_zcode(port: u16) -> Result<String, String> {
     // ZCode Desktop 的自定义供应商列表存放在其内部压缩数据库里，只认界面内添加，
     // 直接写 JSON 配置文件不会被读取（实测确认）。因此这里不再写文件，
     // 而是返回引导信息由前端复制到剪贴板，引导用户在 Desktop 界面内添加。
-    let models_list = [
-        "auto", "hy4-preview", "hy3", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1",
-        "glm-5v-turbo", "kimi-k3", "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
-        "deepseek-v4-pro", "deepseek-v4-flash", "minimax-m3",
-    ];
+    // 模型清单用静态回退表：ZCode 已退役，同步上下文不值得做异步改造。
+    let models_list: Vec<&str> = WORKBUDDY_FALLBACK_MODELS.to_vec();
     let payload = serde_json::json!({
         "mode": "manual-guide",
         "base_url": format!("http://127.0.0.1:{port}/v1"),
@@ -658,6 +770,18 @@ fn remove_zcode() -> Result<String, String> {
 mod hermes_patch_tests {
     use super::*;
 
+    /// 测试用模型清单（贴近静态回退表 + 一个可辨识的探针模型）。
+    /// 函数而非 const：String 构造不能在 const 上下文求值。
+    fn models() -> Vec<String> {
+        [
+            "auto", "hy4-preview", "hy3", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3",
+            "deepseek-v4-pro", "deepseek-v4.1-flash",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     // Case A: 普通已有配置
     #[test]
     fn test_case_a_normal_existing_config() {
@@ -671,7 +795,7 @@ custom_providers:
 platforms:
   webhook: true
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("WorkBuddy (127.0.0.1:8787)"));
         assert!(patched.contains("name: cpa-gui"));
         assert!(patched.contains("platforms:\n  webhook: true"));
@@ -696,7 +820,7 @@ custom_providers:
 platforms:
   webhook: true # 结束
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("# 顶部重要注释 - 系统基线"));
         assert!(patched.contains("# 第二行说明"));
         assert!(patched.contains("# 行内注释"));
@@ -724,7 +848,7 @@ custom_providers:
 platforms:
   webhook: true
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("gemini-3.8-flash\n\n\n\ncustom_providers:"));
         assert!(patched.contains("platforms:\n  webhook: true"));
     }
@@ -738,9 +862,9 @@ platforms:
 custom_providers:
 - name: cpa-gui
 "#;
-        let patched1 = patch_hermes_config_content(input, 8787).unwrap();
-        let patched2 = patch_hermes_config_content(&patched1, 8787).unwrap();
-        let patched3 = patch_hermes_config_content(&patched2, 8787).unwrap();
+        let patched1 = patch_hermes_config_content(input, 8787, &models()).unwrap();
+        let patched2 = patch_hermes_config_content(&patched1, 8787, &models()).unwrap();
+        let patched3 = patch_hermes_config_content(&patched2, 8787, &models()).unwrap();
 
         assert_eq!(patched1, patched2, "第二次执行不得造成任何内容变更");
         assert_eq!(patched2, patched3, "第三次执行不得造成任何内容变更");
@@ -765,6 +889,14 @@ custom_providers:
   model: auto
   models:
     auto: {}
+    hy4-preview: {}
+    hy3: {}
+    glm-5.3: {}
+    glm-5.3-flash: {}
+    glm-5.2: {}
+    kimi-k3: {}
+    deepseek-v4-pro: {}
+    deepseek-v4.1-flash: {}
   models_discovered: true
 
 model_aliases:
@@ -797,7 +929,7 @@ model_aliases:
     provider: "custom"
     base_url: "http://127.0.0.1:8787/v1"
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert_eq!(patched, input, "目标已正确时必须保持完全一致，零字节变更");
     }
 
@@ -848,7 +980,7 @@ model_aliases:
     base_url: "http://127.0.0.1:8787/v1"
 # 尾部注释
 "#;
-        let patched = patch_hermes_config_content(input, 9999).unwrap();
+        let patched = patch_hermes_config_content(input, 9999, &models()).unwrap();
         assert!(patched.contains("# 顶层注释"));
         assert!(patched.contains("# 尾部注释"));
         assert!(patched.contains("WorkBuddy (127.0.0.1:9999)"));
@@ -892,7 +1024,7 @@ model_aliases:
     provider: "custom"
     base_url: "http://127.0.0.1:8787/v1"
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         // 包含其他未出现的 alias，但对已有且正确的 workbuddy-glm 必须零修改
         assert!(patched.contains("  workbuddy-glm:\n    model: \"glm-5.2\"\n    provider: \"custom\"\n    base_url: \"http://127.0.0.1:8787/v1\""));
     }
@@ -906,7 +1038,7 @@ model_aliases:
     provider: "custom"
     base_url: "http://127.0.0.1:8787/v1"
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("model: \"glm-5.2\" # 保留注释"));
         assert!(!patched.contains("wrong-model"));
         assert!(patched.contains("provider: \"custom\""));
@@ -922,7 +1054,7 @@ model_aliases:
     provider: "openai" # 旧 provider
     base_url: "http://127.0.0.1:8787/v1"
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("provider: \"custom\" # 旧 provider"));
         assert!(!patched.contains("\"openai\""));
         assert!(patched.contains("model: \"glm-5.2\""));
@@ -938,7 +1070,7 @@ model_aliases:
     provider: "custom"
     base_url: "http://127.0.0.1:9999/v1" # 旧端口
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("base_url: \"http://127.0.0.1:8787/v1\" # 旧端口"));
         assert!(!patched.contains("9999"));
         assert!(patched.contains("model: \"glm-5.2\""));
@@ -953,7 +1085,7 @@ model_aliases:
     model: "glm-5.2"
     base_url: "http://127.0.0.1:8787/v1"
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("provider: \"custom\""));
         assert!(patched.contains("model: \"glm-5.2\""));
         assert!(patched.contains("base_url: \"http://127.0.0.1:8787/v1\""));
@@ -964,7 +1096,7 @@ model_aliases:
     provider: "custom"
     base_url: "http://127.0.0.1:8787/v1"
 "#;
-        let patched2 = patch_hermes_config_content(input2, 8787).unwrap();
+        let patched2 = patch_hermes_config_content(input2, 8787, &models()).unwrap();
         assert!(patched2.contains("model: \"glm-5.2\""));
         assert!(patched2.contains("provider: \"custom\""));
         assert!(patched2.contains("base_url: \"http://127.0.0.1:8787/v1\""));
@@ -987,7 +1119,7 @@ model_aliases:
   other-alias:
     model: "foo"
 "#;
-        let patched = patch_hermes_config_content(input, 8787).unwrap();
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
         assert!(patched.contains("# 顶部说明"));
         assert!(patched.contains("# 中间说明"));
         assert!(patched.contains("# 底部说明"));
@@ -1010,7 +1142,7 @@ model_aliases:
   custom-agent:
     model: "custom-v1"
 "#;
-        let c1 = patch_hermes_config_content(initial, 8787).unwrap();
+        let c1 = patch_hermes_config_content(initial, 8787, &models()).unwrap();
         assert!(c1.contains("WorkBuddy (127.0.0.1:8787)"));
         assert!(c1.contains("workbuddy:"));
         assert!(c1.contains("cpa-gui"));
@@ -1023,7 +1155,7 @@ model_aliases:
         assert!(r1.contains("custom-agent:"));
         assert!(r1.contains("# 系统基线配置"));
 
-        let c2 = patch_hermes_config_content(&r1, 8787).unwrap();
+        let c2 = patch_hermes_config_content(&r1, 8787, &models()).unwrap();
         assert!(c2.contains("WorkBuddy (127.0.0.1:8787)"));
         assert!(c2.contains("workbuddy:"));
         assert!(c2.contains("cpa-gui"));
@@ -1046,9 +1178,9 @@ model_aliases:
   gemini:
     model: "gemini-3.8-flash"
 "#;
-        let c1 = patch_hermes_config_content(initial, 8787).unwrap();
-        let c2 = patch_hermes_config_content(&c1, 8787).unwrap();
-        let c3 = patch_hermes_config_content(&c2, 8787).unwrap();
+        let c1 = patch_hermes_config_content(initial, 8787, &models()).unwrap();
+        let c2 = patch_hermes_config_content(&c1, 8787, &models()).unwrap();
+        let c3 = patch_hermes_config_content(&c2, 8787, &models()).unwrap();
 
         assert_eq!(c1, c2, "第一次与第二次必须完全一致");
         assert_eq!(c2, c3, "第二次与第三次必须完全一致");
@@ -1075,7 +1207,7 @@ custom_providers:
   base_url: http://127.0.0.1:9000/v1
 "#;
         // 1. 端口变更替换：不留旧 block 残留
-        let patched = patch_hermes_config_content(input, 9999).unwrap();
+        let patched = patch_hermes_config_content(input, 9999, &models()).unwrap();
         assert!(patched.contains("WorkBuddy (127.0.0.1:9999)"));
         assert!(patched.contains("127.0.0.1:9999/v1"));
         assert!(!patched.contains("8787"), "旧端口与旧字段不得残留");
@@ -1088,5 +1220,83 @@ custom_providers:
         assert!(!removed.contains("内部注释 1"));
         assert!(!removed.contains("内部注释 2"));
         assert!(removed.contains("other-provider"));
+    }
+    // 动态模型清单 1: 已有块端口一致但缺新模型 → 必须整块重写补齐
+    // （这是"官方新增模型后重跑写入也无法自愈"缺陷的回归用例）
+    #[test]
+    fn test_existing_block_with_missing_model_gets_rewritten() {
+        let input = r#"custom_providers:
+- name: WorkBuddy (127.0.0.1:8787)
+  base_url: http://127.0.0.1:8787/v1
+  api_key: local
+  model: auto
+  models:
+    auto: {}
+    hy4-preview: {}
+  models_discovered: true
+"#;
+        let patched = patch_hermes_config_content(input, 8787, &models()).unwrap();
+        assert!(patched.contains("deepseek-v4.1-flash: {}"), "缺失的新模型必须被补齐");
+        assert!(patched.contains("glm-5.3-flash: {}"));
+        assert!(patched.contains("models_discovered: true"));
+    }
+
+    // 动态模型清单 2: normalize_model_ids 剔除 default 兜底别名、去空、去重
+    #[test]
+    fn test_normalize_model_ids_filters_default_and_dedupes() {
+        let ids = vec![
+            "auto".to_string(),
+            "glm-5.3".to_string(),
+            "".to_string(),
+            "  glm-5.3  ".to_string(),
+            "default".to_string(),
+            "deepseek-v4.1-flash".to_string(),
+        ];
+        let out = normalize_model_ids(ids);
+        assert_eq!(
+            out,
+            vec![
+                "auto".to_string(),
+                "glm-5.3".to_string(),
+                "deepseek-v4.1-flash".to_string()
+            ]
+        );
+    }
+
+    // 动态模型清单 3: generate_workbuddy_provider_lines 按传入清单逐行生成
+    #[test]
+    fn test_generate_lines_uses_dynamic_models() {
+        let models = vec!["auto".to_string(), "deepseek-v4.1-flash".to_string()];
+        let lines = generate_workbuddy_provider_lines(8787, "", &models);
+        assert!(lines.iter().any(|l| l == "    auto: {}"));
+        assert!(lines.iter().any(|l| l == "    deepseek-v4.1-flash: {}"));
+        assert!(!lines.iter().any(|l| l.contains("kimi-k2.7")), "未传入的模型不得出现");
+        assert!(lines.last().unwrap().contains("models_discovered: true"));
+    }
+
+    // 动态模型清单 4: 清单完全一致 + 端口一致 → provider 块零重写
+    // （patch 仍会补齐缺失的 model_aliases 段——那是另一部分的职责，不算重写）
+    #[test]
+    fn test_matching_models_no_rewrite() {
+        let mut models_block = String::from(
+            "custom_providers:\n- name: WorkBuddy (127.0.0.1:8787)\n  base_url: http://127.0.0.1:8787/v1\n  api_key: local\n  model: auto\n  models:\n",
+        );
+        for m in models() {
+            models_block.push_str(&format!("    {m}: {{}}\n"));
+        }
+        models_block.push_str("  models_discovered: true\n\nmodel_aliases:\n");
+        let patched = patch_hermes_config_content(&models_block, 8787, &models()).unwrap();
+        // provider 块本身保持原样：每个模型恰好出现一次（未重写、未重复）
+        for m in models() {
+            let expect = format!("    {m}: {{}}");
+            assert_eq!(
+                patched.matches(&expect).count(),
+                1,
+                "模型 {m} 应恰好出现一次（清单一致未重写）"
+            );
+        }
+        assert!(patched.contains("models_discovered: true"));
+        // alias 段被补齐是预期行为
+        assert!(patched.contains("workbuddy:"));
     }
 }
