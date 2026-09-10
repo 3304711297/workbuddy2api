@@ -1,0 +1,96 @@
+# AGENTS.md — codebuddy2openai 维护协议
+
+给 AI Agent（与未来的自己）看的仓库操作手册。改这个仓库前先读这里，能少踩几个坑。
+
+## 1. 这是什么
+
+把腾讯 CodeBuddy / WorkBuddy 订阅暴露成本地 OpenAI 兼容端点（`http://127.0.0.1:8787/v1`）的
+Tauri v2 桌面应用 + Python 反代内核。
+
+三段代码，改动前先判断落在哪一段：
+
+| 段 | 位置 | 规模 | 语言 |
+|---|---|---|---|
+| 反代内核 | `converter.py`, `desensitize.py`, `turing_helper.cjs` | ~2.5k 行 | Python / Node |
+| 桌面前端 | `index.html`, `src/*.js`（14 个 ES module） | ~1.7k 行 | 原生 JS + Vite |
+| Rust 后端 | `src-tauri/src/`（`commands/` 7 文件） | ~2.7k 行 | Rust |
+
+## 2. 改完怎么验证（缺一不可）
+
+```bash
+python -m pytest tests/ -q          # Python：110 passed 为当前基线
+npm test                            # 前端：4/4（node --test）
+cd src-tauri && cargo test          # Rust
+```
+
+**改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust
+嵌入 exe。只改源码不构建，GUI 里看到的还是旧界面。
+
+```bash
+npm run build && cd src-tauri && cargo tauri build --no-bundle
+```
+
+构建前先退 GUI：内核 `converter.py` 是 GUI 托管启动的子进程，退 GUI 会连带结束它。
+
+## 3. 会让当前聊天断掉的操作（重要）
+
+本机 Hermes 的对话模型就走这条反代链路。**以下操作会切断 8787、中断进行中的会话**：
+
+- 退出 / 重启 GUI（内核是它的子进程）
+- 杀 `converter.py` 或 `python.exe`（内核宿主）
+- 重建 exe（要先退 GUI）
+
+进程链长这样，别误杀：
+
+```
+codebuddy2openai.exe (GUI)
+  └─ python.exe
+       └─ converter.py --desensitize --usage-log   ← 8787 监听
+```
+
+判断链路是否活着：`curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8787/v1/models`
+返回 200 即正常。
+
+## 4. 各文件的硬约束
+
+- **`converter.py`**：`core.autocrlf=true`，但 HEAD 里存的是 **纯 LF**。用 Python 写回时务必
+  `data.replace(b"\r\n", b"\n")`，否则 `\r\n` 会被二次转义成 `\r\r\n`，测试成片失败。
+- **`/api/rate_limit` 的 `state` 三态**：`limited`=冷却中 / `expired`=曾限过已恢复 /
+  `ok`=从未被限（无条目）。**改这个枚举时必须同步排查消费端**——Hermes 的 token-stats
+  插件（`plugin_api.py` + `desktop-plugins/token-stats/plugin.js`）直接读它，漏改会显示
+  「未知」。这是 a404e80 踩过的坑。
+- **`_RATE_LIMIT_STATE` 条目只增不减**（上限约 28 条），`resetAt`/`message` 字段必须保留，
+  前端 `src/accounts.js` 靠它渲染「冷却已于 X 结束」，删了会残缺成「冷却已于 结束」。
+- **`desensitize.py`**：改脱敏词表会直接影响风控命中率。已知触发点包括
+  `x-anthropic-billing-header:`、`"You are Claude Code, Anthropic's official CLI"`、
+  `"Main branch (you will usually use this for PRs):"`。改动后需实测模型可调用性，
+  不能只看单测。
+
+## 5. 外部依赖与合规红线
+
+- **凭据来源**：优先读 `%LOCALAPPDATA%/codebuddy2openai/accounts.json`（桌面端维护，
+  含 `active_uid` + `accounts` 字典），回退到 legacy `.info` 文件。
+- **Turing Shield SDK**（`X-Device-Token`）：只扫描 `%LOCALAPPDATA%`/`%APPDATA%`/
+  `%ProgramFiles%`/`%USERPROFILE%` 下的 WorkBuddy 安装目录，**各磁盘根目录默认不扫**
+  （防伪造 SDK 导致本地代码执行）。用户可用 `WORKBUDDY_TURING_SDK_DIR` 显式指定。
+- **借鉴源合规**（详见 `THIRD_PARTY_NOTICES.md`）：
+  - `xiaofan6ya/workbuddy2api`、`DistPub/workbuddy2api` — MIT，可借鉴
+  - `IceeAn/codebuddy2api` — MIT，**但仅覆盖其自 `bce86ded` 起独立重写的当前树**
+  - ⚠️ **`xueyue33/codebuddy2api` 无 LICENSE = all rights reserved，禁止取用代码**。
+    从 IceeAn 取代码须出自其当前树并署名；一律「借思路不搬文件」。
+
+## 6. 提交与 CI
+
+- 提交信息用中文 + conventional 前缀（`feat:` / `fix:` / `docs:` / `chore:`）。
+- push 后**必须盯 CI 到绿**：`gh run list -R 3304711297/codebuddy2openai --limit 3`。
+  CI 覆盖 Build frontend / pytest / 前端单测 / cargo check / cargo test。
+- 推送若报 `Recv failure`，改走 Karing 代理（`127.0.0.1:3067`）；两种都试。
+
+## 7. 已知待办（未实现，别重复造）
+
+- `/api/rate_limit` 仍是 **5 小时滚动口径**（`reqs5h`/`tokens5h`/`err429_5h`）。
+  上游已改为「每日免费额度 + 动态重置」，前端 `src/accounts.js:41` 与 token-stats
+  插件的今日口径展示（A2/A3/B1/C1/C2）尚未跟进。
+- 凭证轮换：当前**单账号**场景（`accounts.json` 里只有 1 个账号）下无意义；
+  token 续期已由 `converter.py:377` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /
+  `refreshExpiresIn` 90 天）。多账号后再议。
