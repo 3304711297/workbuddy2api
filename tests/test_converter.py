@@ -457,3 +457,95 @@ def test_default_repair_stream_tools_is_false():
     """默认配置下 repair_stream_tools 必须为 False，避免带 tools 的 Agent 请求被转为阻塞聚合导致 60s/140s 超时。"""
     assert converter.CONFIG.get("repair_stream_tools") is False
 
+
+# ---------------------------------------------------------------------------
+# /v1/models 上下文窗口上报（供 Hermes 等客户端精确识别模型窗口）
+# ---------------------------------------------------------------------------
+
+def _setup_models_env(tmp_path, monkeypatch, *, settings=None, upstream=None, token="tok_123"):
+    import httpx
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    acc_dir = tmp_path / "codebuddy2openai"
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    (acc_dir / "accounts.json").write_text(json.dumps({
+        "active_uid": "u1",
+        "accounts": {"u1": {"auth": {"accessToken": token}, "account": {"uid": "u1"}}}
+    }), encoding="utf-8")
+    if settings is not None:
+        (acc_dir / "model_settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    def handler(request):
+        assert request.url.path == "/v2/enterprises/personal/models"
+        return httpx.Response(200, json={"code": 0, "data": {"models": upstream or []}})
+
+    monkeypatch.setattr(converter, "_MODELS_TRANSPORT_OVERRIDE", httpx.MockTransport(handler))
+    monkeypatch.setattr(converter, "_MODELS_CACHE", {})
+    monkeypatch.setattr(converter, "_MODELS_WINDOWS", {}, raising=False)
+    return acc_dir
+
+
+def test_list_models_reports_upstream_context_length(tmp_path, monkeypatch):
+    """上游窗口字段（maxInputTokens / maxAllowedSize）应作为顶层 context_length 上报；
+    未知窗口的模型不携带该字段（缺失时客户端自行回退）。"""
+    import asyncio
+    _setup_models_env(tmp_path, monkeypatch, upstream=[
+        {"id": "deepseek-v4.1-flash", "maxInputTokens": 1000000},
+        {"id": "legacy-alias-model", "maxAllowedSize": 200000},
+        {"id": "no-window-model"},
+    ])
+    res = asyncio.run(converter.list_models())
+    by_id = {item["id"]: item for item in res["data"]}
+    assert by_id["deepseek-v4.1-flash"]["context_length"] == 1000000
+    assert by_id["legacy-alias-model"]["context_length"] == 200000
+    assert "context_length" not in by_id["no-window-model"]
+    assert "context_length" not in by_id["auto"]
+
+
+def test_list_models_manual_window_overrides_upstream(tmp_path, monkeypatch):
+    """控制台手动设置的 context_window 优先于上游默认值。"""
+    import asyncio
+    _setup_models_env(tmp_path, monkeypatch,
+                      settings={"deepseek-v4.1-flash": {"context_window": 64000}},
+                      upstream=[{"id": "deepseek-v4.1-flash", "maxInputTokens": 1000000}])
+    res = asyncio.run(converter.list_models())
+    by_id = {item["id"]: item for item in res["data"]}
+    assert by_id["deepseek-v4.1-flash"]["context_length"] == 64000
+
+
+def test_list_models_manual_only_model_reports_window(tmp_path, monkeypatch):
+    """仅存在于本地设置（上游无此模型）的手动配置模型也应上报窗口；
+    非法值（0 / 非数字）不产生字段。"""
+    import asyncio
+    _setup_models_env(tmp_path, monkeypatch,
+                      settings={
+                          "custom-finetuned-model": {"context_window": 32000},
+                          "zero-window-model": {"context_window": 0},
+                          "bad-window-model": {"context_window": "abc"},
+                      },
+                      upstream=[])
+    res = asyncio.run(converter.list_models())
+    by_id = {item["id"]: item for item in res["data"]}
+    assert by_id["custom-finetuned-model"]["context_length"] == 32000
+    assert "context_length" not in by_id["zero-window-model"]
+    assert "context_length" not in by_id["bad-window-model"]
+
+
+def test_list_models_excludes_alias_ids(tmp_path, monkeypatch):
+    """别名行（MODEL_MAP 中映射到其他正式名的键，如 hy4 / hy3 / kimi-k3）
+    不应出现在 /v1/models 列表中——它们只作请求侧别名存在，不是可独立调用的
+    正式模型名；列表只上报正式名与其窗口。"""
+    import asyncio
+    _setup_models_env(tmp_path, monkeypatch,
+                      upstream=[{"id": "hy4", "maxInputTokens": 1000000},
+                                {"id": "hy4-preview", "maxInputTokens": 1000000},
+                                {"id": "kimi-k3", "maxInputTokens": 200000}])
+    res = asyncio.run(converter.list_models())
+    ids = [item["id"] for item in res["data"]]
+    assert "hy4" not in ids          # 别名：hy4 -> hy4-preview
+    assert "hy3" not in ids          # 别名：hy3 -> hy3-x
+    assert "kimi-k3" not in ids      # 别名：kimi-k3 -> kimi-k3-1
+    assert "hy4-preview" in ids      # 正式名保留
+    assert "hy3-x" in ids
+    assert "kimi-k3-1" in ids
+
+

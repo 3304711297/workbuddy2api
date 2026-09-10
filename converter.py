@@ -510,6 +510,7 @@ DEFAULT_MODELS = [
 _MODELS_URL = f"{BACKEND}/v2/enterprises/personal/models"
 _MODELS_TRANSPORT_OVERRIDE = None
 _MODELS_CACHE: dict[str, dict] = {}  # uid -> {"models": list[str], "expires_at": float}
+_MODELS_WINDOWS: dict[str, int] = {}  # model_id -> 上游窗口（maxInputTokens/maxAllowedSize）
 
 
 def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None = None, custom_models: list[str] | None = None) -> list[str]:
@@ -529,6 +530,24 @@ def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None 
             seen.add(m)
             result.append(m)
     return result
+
+
+def _reported_context_length(model_id: str, settings: dict, windows: dict):
+    """解析上报给客户端的上下文窗口（/v1/models 条目顶层 context_length）。
+
+    优先级：控制台手改值（model_settings.json 的 context_window）> 上游默认值
+    （maxInputTokens / maxAllowedSize，由 _fetch_remote_models 采集）。
+    无有效值时返回 None，响应不携带该字段（客户端自行回退）。
+    """
+    cfg = settings.get(model_id)
+    if isinstance(cfg, dict):
+        ctx = cfg.get("context_window")
+        if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+            return ctx
+    w = windows.get(model_id)
+    if isinstance(w, int) and not isinstance(w, bool) and w > 0:
+        return w
+    return None
 
 
 async def _fetch_remote_models(*, transport=None) -> list[str]:
@@ -595,12 +614,20 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                     return list(cached_models)
 
                 models = []
+                windows = {}
                 for m in raw_models:
                     if isinstance(m, dict):
                         mid = m.get("id")
                         if mid and mid != "hunyuan-image-v3.0":
                             models.append(str(mid))
+                            w = m.get("maxInputTokens")
+                            if not isinstance(w, int):
+                                w = m.get("maxAllowedSize")
+                            if isinstance(w, int) and w > 0:
+                                windows[str(mid)] = w
                 if models:
+                    if windows:
+                        _MODELS_WINDOWS.update(windows)
                     _MODELS_CACHE[cache_key] = {"models": models, "expires_at": now + 60.0}
                     return list(models)
                 else:
@@ -1114,10 +1141,19 @@ async def list_models(authorization: Optional[str] = Header(default=None),
                      x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
     _check_auth(authorization, x_api_key)
     dynamic_models = await _fetch_remote_models()
-    custom_models = list(_load_model_settings().keys())
+    settings = _load_model_settings()
+    custom_models = list(settings.keys())
     all_models = _merge_model_ids(DEFAULT_MODELS, dynamic_models, custom_models)
-    data = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "codebuddy"}
-            for m in all_models]
+    # 剔除别名行：MODEL_MAP 中映射到其他正式名的键（如 hy3 -> hy3-x）只作请求侧
+    # 兼容存在，列表只上报正式名，避免同一模型出现多行。
+    all_models = [m for m in all_models if MODEL_MAP.get(m, m) == m]
+    data = []
+    for m in all_models:
+        item = {"id": m, "object": "model", "created": 1700000000, "owned_by": "codebuddy"}
+        ctx = _reported_context_length(m, settings, _MODELS_WINDOWS)
+        if ctx is not None:
+            item["context_length"] = ctx
+        data.append(item)
     return {"object": "list", "data": data}
 
 
