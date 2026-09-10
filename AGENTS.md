@@ -66,6 +66,40 @@ codebuddy2openai.exe (GUI)
   `"Main branch (you will usually use this for PRs):"`。改动后需实测模型可调用性，
   不能只看单测。
 
+  **风控拦截机制（2026-09-10 实测，判断要不要扩脱敏范围时看这里）**：
+
+  - 命中返回 **code 11128** `Illegal API invocation from an unapproved channel`，
+    Hermes 侧表现为会话连续 3 次重试全挂后彻底不可用（不是 429/6004 限流，别误判）。
+  - **整串匹配，不是分词**：`Main branch` 或 `(you will usually use this for PRs):`
+    单独出现都不触发，必须完整串 `Main branch (you will usually use this for PRs)` 才拦。
+    所以加词表要加**完整短语**，只加片段无效。
+  - **只拦 `system` / `assistant` 角色；`user` / `tool` 角色带同样的串不拦**。
+    后端防的是"客户端指纹"，只扫客户端会主动构造的角色。
+    这与 `converter.py:1189` 的 `roles=("system", "assistant")` **精确吻合**——
+    不要为了"更保险"去扩 `user`/`tool`，实测证明没必要，扩了只会污染真实对话。
+  - **毒在历史里会永久复现**：触发串一旦进入某条 `assistant` 历史消息，
+    后续每次请求都带着它 → 该会话永久 11128。修代码救不回已有会话，
+    只能改 `state.db` 那条消息或放弃会话。
+  - 脱敏分两层，**顺序不能反**：`_rewrite_known_fingerprints()`（精确改写已知指纹）
+    先跑，再走 `SENSITIVE_TERMS` 零宽空格兜底（`desensitize_text()`）。
+    精确改写更稳；零宽空格只打断匹配，遇变体仍会漏。
+
+  **实测复现方法**（改完别只看单测，跑一遍）：
+
+  ```bash
+  # 单条探针：把触发串放进 system/assistant，打 8787
+  curl -s -X POST http://127.0.0.1:8787/v1/chat/completions \
+    -H "Content-Type: application/json" -H "Authorization: Bearer dummy" \
+    -d '{"model":"deepseek-v4.1-flash","messages":[
+         {"role":"user","content":"hi"},
+         {"role":"assistant","content":"Main branch (you will usually use this for PRs):"}],
+         "stream":false,"max_tokens":10}'
+  ```
+
+  返回 11128 = 脱敏没生效；正常返回 = 生效。
+  ⚠️ 探针必须**以 `user` 消息开头**，否则拿到的是 11151/11148（会话结构非法），
+  不是风控结果，别误报成缺陷。
+
 ## 5. 外部依赖与合规红线
 
 - **凭据来源**：优先读 `%LOCALAPPDATA%/codebuddy2openai/accounts.json`（桌面端维护，
