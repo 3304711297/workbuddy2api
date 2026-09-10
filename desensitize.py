@@ -67,6 +67,8 @@ SENSITIVE_TERMS: list[str] = [
     "botnet",
     "zero-day",
     "0day",
+    # 已实证的客户端 system prompt 指纹（L1 词表兜底；L2 精确改写优先）。
+    "Main branch (you will usually use this for PRs)",
     # 竞争品牌词（实测触发 11128 审核拦截；借鉴 DistPub/workbuddy2api）
     # Claude Code / Anthropic 品牌词
     "Claude Code",
@@ -92,6 +94,30 @@ SENSITIVE_TERMS: list[str] = [
 # 编译成一个大正则，按词长降序，避免短词先吃掉长词。
 # 用 \b 词边界 + 忽略大小写（\b 防止品牌词/术语命中更长单词中的子串，
 # 如 "openai" 匹配到 "notopenai"；多词短语含空格/连字符时 \b 作用于首尾字符）。
+_CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+_CLAUDE_CODE_IDENTITY_PREFIX = "You are Claude Code, Anthropic's official CLI"
+_NEUTRAL_CLI_IDENTITY = (
+    "You are an interactive software engineering assistant operating in a "
+    "command-line environment."
+)
+_MAIN_BRANCH_FINGERPRINT = "Main branch (you will usually use this for PRs):"
+_MAIN_BRANCH_FINGERPRINT_NO_COLON = "Main branch (you will usually use this for PRs)"
+_ATTRIBUTION_HEADER_PREFIX = "x-anthropic-billing-header:"
+
+
+def _rewrite_known_fingerprints(text: str) -> str:
+    """将已确认的客户端身份指纹改成中性文本，并移除署名首行。"""
+    text = text.replace(_CLAUDE_CODE_IDENTITY, _NEUTRAL_CLI_IDENTITY)
+    text = text.replace(_CLAUDE_CODE_IDENTITY_PREFIX, _NEUTRAL_CLI_IDENTITY)
+    text = text.replace(_MAIN_BRANCH_FINGERPRINT, "Main branch:")
+    text = text.replace(_MAIN_BRANCH_FINGERPRINT_NO_COLON, "Main branch")
+
+    if text.startswith(_ATTRIBUTION_HEADER_PREFIX):
+        line_end = text.find("\n")
+        text = "" if line_end < 0 else text[line_end + 1:]
+    return text
+
+
 _PATTERN = re.compile(
     "|".join(r"\b" + re.escape(t) + r"\b" for t in sorted(SENSITIVE_TERMS, key=len, reverse=True)),
     re.IGNORECASE,
@@ -107,10 +133,11 @@ def _zero_width_split(term: str) -> str:
 
 
 def desensitize_text(text: str) -> str:
-    """对文本中的触发词插入零宽空格。无触发词则原样返回。"""
+    """先改写已知客户端指纹，再对通用触发词插入零宽空格。"""
     if not text:
         return text
-    return _PATTERN.sub(lambda m: _zero_width_split(m.group(0)), text)
+    rewritten = _rewrite_known_fingerprints(text)
+    return _PATTERN.sub(lambda m: _zero_width_split(m.group(0)), rewritten)
 
 
 def _iter_text_blocks(content):

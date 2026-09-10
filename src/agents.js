@@ -1,5 +1,5 @@
 /**
- * Agent 一键接入 (Hermes / ZCode)
+ * Agent 接入引导 (Hermes / ZCode)
  */
 
 import { state } from './state.js';
@@ -50,6 +50,29 @@ export async function loadAgentsStatus() {
   }
 }
 
+function renderHermesGuide(guide) {
+  const wrap = document.getElementById('hermes-guide');
+  if (!wrap) return;
+  const field = (label, value) => `
+    <div class="zguide-field">
+      <span class="zguide-label">${esc(label)}</span>
+      <span class="zguide-value" data-copy="${esc(value)}" title="点击复制">${esc(value)}</span>
+    </div>`;
+  wrap.innerHTML = `
+    <div class="zcode-guide-panel">
+      ${field('配置文件路径', guide.config_path)}
+      ${field('目标 Base URL', guide.target_base_url)}
+      ${field('目标 API Key', guide.target_api_key)}
+      ${field('目标模型（default）', guide.target_model)}
+      <div class="zguide-field">
+        <span class="zguide-label">YAML 配置片段（点击复制）</span>
+        <pre class="zguide-value" data-copy="${esc(guide.yaml_snippet)}" title="点击复制 YAML 片段" style="white-space: pre-wrap; font-size: 11.5px; margin: 0;">${esc(guide.yaml_snippet)}</pre>
+      </div>
+      <ol class="zguide-steps">${guide.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+    </div>`;
+  wrap.hidden = false;
+}
+
 function renderZcodeGuide(guide) {
   const wrap = document.getElementById('zcode-guide');
   if (!wrap) return;
@@ -77,36 +100,34 @@ function renderZcodeGuide(guide) {
 }
 
 export function initAgentActions() {
-  document.getElementById('btn-config-hermes')?.addEventListener('click', async () => {
+  document.getElementById('btn-guide-hermes')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_configure', { agent_type: 'hermes', port: state.port });
-      showToast(res, 'success');
-      loadAgentsStatus();
+      const guide = await invokeTauri('hermes_endpoint_guide', { port: state.port });
+      renderHermesGuide(guide);
     } catch (e) {
-      showToast(`配置失败: ${e.message || e}`, 'error');
+      showToast(`获取 Hermes 接入引导失败: ${e.message || e}`, 'error');
     }
   });
 
-  document.getElementById('btn-remove-hermes')?.addEventListener('click', async () => {
-    try {
-      const res = await invokeTauri('agent_remove', { agent_type: 'hermes' });
-      showToast(res, 'info');
-      loadAgentsStatus();
-    } catch (e) {
-      showToast(`移除失败: ${e.message || e}`, 'error');
-    }
+  // 引导面板内的值/芯片点击即复制（事件委托）
+  document.getElementById('hermes-guide')?.addEventListener('click', async (ev) => {
+    const el = ev.target.closest('[data-copy]');
+    if (!el) return;
+    const ok = await copyToClipboard(el.dataset.copy);
+    el.classList.add('copied');
+    showToast(ok ? '已复制' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
+    setTimeout(() => el.classList.remove('copied'), 1500);
   });
 
   document.getElementById('btn-config-zcode')?.addEventListener('click', async () => {
     try {
-      const raw = await invokeTauri('agent_configure', { agent_type: 'zcode', port: state.port });
+      const raw = await invokeTauri('zcode_guide', { port: state.port });
       renderZcodeGuide(JSON.parse(raw));
     } catch (e) {
       showToast(`生成接入配置失败: ${e.message || e}`, 'error');
     }
   });
 
-  // 引导面板内的值/芯片点击即复制（事件委托）
   document.getElementById('zcode-guide')?.addEventListener('click', async (ev) => {
     const el = ev.target.closest('[data-copy]');
     if (!el) return;
@@ -118,7 +139,7 @@ export function initAgentActions() {
 
   document.getElementById('btn-remove-zcode')?.addEventListener('click', async () => {
     try {
-      const res = await invokeTauri('agent_remove', { agent_type: 'zcode' });
+      const res = await invokeTauri('zcode_remove');
       showToast(res, 'info');
       loadAgentsStatus();
     } catch (e) {

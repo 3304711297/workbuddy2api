@@ -2,7 +2,7 @@
 //! 1. 反代生命周期 (start/stop/restart/health/test_chat)
 //! 2. 多账号体系与登录流程 (auth_begin/auth_poll/accounts_list/accounts_switch/accounts_delete/accounts_refresh)
 //! 3. 账户真实积分与资源包查询 (usage_query)
-//! 4. Agent 一键检测与配置写入 (agent_detect/agent_configure/agent_remove)
+//! 4. Agent 状态检测与手动接入引导 (agent_detect/hermes_endpoint_guide/zcode_guide/zcode_remove)
 //!
 //! 模块划分（纯机械拆分，`commands::xxx` 调用路径保持不变）：
 //! - shared:  跨域路径工具 + 多账号状态持久化（供各功能子模块复用）

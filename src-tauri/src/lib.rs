@@ -472,10 +472,11 @@ pub fn run_app() {
             // 模型全量获取与配置
             commands::models_fetch_all,
             commands::model_save_config,
-            // Agent 一键集成
+            // Agent 状态检测与手动接入引导
             commands::agent_detect,
-            commands::agent_configure,
-            commands::agent_remove,
+            commands::hermes_endpoint_guide,
+            commands::zcode_guide,
+            commands::zcode_remove,
             // 反代控制与测试
             commands::proxy_start,
             commands::proxy_get_logs,

@@ -42,6 +42,60 @@ def test_sensitive_terms_table_stable():
     assert len(SENSITIVE_TERMS) >= 20
 
 
+def test_known_system_prompt_fingerprints_are_rewritten():
+    text = (
+        "You are Claude Code, Anthropic's official CLI for Claude.\n"
+        "Main branch (you will usually use this for PRs):\n"
+        "x-anthropic-billing-header: opaque attribution\n"
+        "Keep this instruction."
+    )
+
+    out = desensitize_text(text)
+
+    assert "You are Claude Code, Anthropic's official CLI" not in out
+    assert "interactive software engineering assistant" in out
+    assert "Main branch (you will usually use this for PRs)" not in out
+    assert "Main branch:" in out
+    assert "x-anthropic-billing-header:" not in out
+    assert "Keep this instruction." in out
+    assert "Main branch (you will usually use this for PRs)" in SENSITIVE_TERMS
+
+
+def test_fingerprint_rewrite_handles_main_branch_without_colon():
+    out = desensitize_text("Main branch (you will usually use this for PRs)")
+    assert out == "Main branch"
+
+
+def test_fingerprint_rewrite_preserves_roles_blocks_and_input():
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: attribution\nMain branch (you will usually use this for PRs):",
+                },
+                {"type": "image_url", "image_url": {"url": "https://example.invalid/a"}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.",
+        },
+        {"role": "user", "content": "Main branch (you will usually use this for PRs):"},
+    ]
+    original = repr(messages)
+
+    out = desensitize_messages(messages, roles=("system", "assistant"))
+
+    assert "x-anthropic-billing-header:" not in out[0]["content"][0]["text"]
+    assert out[0]["content"][0]["text"] == "Main branch:"
+    assert out[0]["content"][1] == messages[0]["content"][1]
+    assert "You are Claude Code" not in out[1]["content"]
+    assert out[2]["content"] == "Main branch (you will usually use this for PRs):"
+    assert repr(messages) == original
+
+
 # ---------------------------------------------------------------------------
 # 消息级（角色过滤）
 # ---------------------------------------------------------------------------
