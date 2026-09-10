@@ -2,7 +2,7 @@
 
 # 🚀 CodeBuddy2OpenAI
 
-### 独立桌面控制台 · WorkBuddy 转 OpenAI 兼容端点 · 多账号资产管理 · Agent 一键接入
+### 独立桌面控制台 · WorkBuddy 转 OpenAI 兼容端点 · 多账号资产管理 · Agent 接入引导
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/3304711297/codebuddy2openai)
@@ -24,9 +24,9 @@
 - 🔑 **无需安装原版 WorkBuddy**：集成浏览器 OAuth 授权全自动轮询流程，直接扫码/验证码登录获取凭据。
 - 👥 **多账号管理与切换**：凭据统一持久化于本地数据库，支持一键切换活跃账号、手动刷新 Token 与账号删除。
 - 📊 **内嵌真实积分资产看板**：逆向对接腾讯官方计量计费接口，实时掌握账户剩余积分、使用进度条及资源包配额明细。
-- 🤖 **Agent 智能体一键接入**：
-  - **Hermes Agent**：一键检测并注入 `config.yaml`（自动注册供应商并映射 7 个快捷模型别名），支持一键移除恢复。
-  - **ZCode**：ZCode Desktop 的供应商列表只认界面内添加，因此采用**引导式接入**——自动复制接口地址/密钥/模型清单到剪贴板，并在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴即可；支持清理配置残留。
+- 🤖 **Agent 智能体接入引导（只读，不改写客户端配置）**：
+  - **Hermes Agent**：提供推荐配置项与一键复制，按说明在 Hermes 的 `config.yaml` 中手动填写（供应商 + 模型别名）。
+  - **ZCode**：ZCode Desktop 的供应商列表只认界面内添加，因此采用**引导式接入**——展示接口地址/密钥/模型清单，点击任意值即复制，在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴即可。
   - ZCode 状态徽章基于本地服务端口的真实可达性探测，如实反映服务在线/离线。
 - ⚡ **动态模型矩阵**：模型清单**自动获取 WorkBuddy 支持的全量模型**（含计费倍率、上下文窗口与思考强度配置），随上游动态更新，无需随版本维护静态列表；在「模型与接口」页面查看与定制。
 - 🛡️ **安全脱敏支持**：内置 `--desensitize` 敏感词处理机制，避免系统提示词误触发安全风控拦截。
@@ -90,7 +90,7 @@ src-tauri/target/release/codebuddy2openai.exe
 
 1. **授权登录**：进入「授权新账号」页面，点击开始授权，浏览器将自动唤起腾讯登录页，完成授权后客户端自动保存凭据并切到账号面板。
 2. **启动服务**：在「服务看板」点击「启动服务」，本地将监听 `http://127.0.0.1:8787`。
-3. **Agent 一键接入**：进入「Agent 一键接入」页面——Hermes 点击「一键写入配置」直接生效；ZCode 点击「如何接入配置」复制配置值后，在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴添加。
+3. **Agent 接入引导**：进入「Agent 智能体接入引导」页面——Hermes 与 ZCode 均点击「如何手动接入」，查看推荐配置项与逐项可复制的值，再到对应客户端内按需填写（本工具不改写任何客户端配置文件）。
 
 ---
 
