@@ -141,3 +141,32 @@ def test_rate_limit_reset_expiry_flips_state(rl_client):
     assert ent["remainingSec"] == 0
     assert ent["resetLocal"] == "12:00:00"  # 历史痕迹保留，前端文案依赖
     assert ent["message"]
+
+
+def test_rate_limit_night_free_and_today_usage(rl_client, tmp_path, monkeypatch):
+    import time
+    log_file = tmp_path / "usage.jsonl"
+    now_ms = int(time.time() * 1000)
+    lines = [
+        '{"ts": ' + str(now_ms - 1000) + ', "model": "hy4-preview", "ok": true, "input_tokens": 100, "output_tokens": 200}',
+        '{"ts": ' + str(now_ms - 500) + ', "model": "hy4-preview", "error": "HTTP 429"}',
+    ]
+    log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setitem(converter.CONFIG, "usage_log", str(log_file))
+
+    # 触发记录以便在 snapshot 中出现该模型
+    rl_client.post("/v1/chat/completions", json={"model": "hy4-preview", "messages": [{"role": "user", "content": "hi"}]})
+
+    data = rl_client.get("/api/rate_limit").json()
+    assert "nightFree" in data
+    assert isinstance(data["nightFree"], bool)
+    assert data["nightWindow"]["start"] == "23:00"
+    assert data["nightWindow"]["end"] == "08:00"
+
+    ru = data["rollingUsage"].get("hy4-preview")
+    assert ru is not None
+    assert ru["reqsToday"] == 1
+    assert ru["tokensToday"] == 300
+    assert ru["err429_today"] >= 1
+    assert "nightFree" in ru
+

@@ -26,26 +26,44 @@ function renderRateLimitCard(rl, activeModel) {
 
   const rows = models.map(([model, e]) => {
     const limited = e.state === 'limited';
+    const expired = e.state === 'expired';
     const dot = limited
       ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px;animation:pulse-dot 1.2s ease-in-out infinite;"></span>'
-      : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
+      : expired
+        ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning, #f59e0b);margin-right:6px;"></span>'
+        : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
     const status = limited
       ? `<strong style="color:var(--danger);">已触发 · 冷却中</strong> <span class="mono">⏳ ${esc(fmtCooldown(e.remainingSec))}</span> <small class="muted mono">@${esc(e.resetLocal || '')}</small>`
-      : `<strong style="color:var(--success);">正常</strong> <small class="muted mono">(冷却已于 ${esc(e.resetLocal || '')} 结束)</small>`;
+      : expired
+        ? `<strong style="color:var(--warning, #f59e0b);">已恢复</strong> <small class="muted mono">(冷却已于 ${esc(e.resetLocal || '')} 结束)</small>`
+        : `<strong style="color:var(--success);">正常</strong>`;
     const badge = model === activeModel ? '<span class="badge badge-info" style="font-size:10px;margin-left:6px;">当前会话</span>' : '';
     return `<div class="pkg-item" title="${esc(e.message || '腾讯上游 code 6004 频率限制')}">${dot}<span class="mono">${esc(model)}</span>${badge}<span>${status}</span></div>`;
   }).join('');
 
   const ru = rl.rollingUsage || {};
-  const usageRows = Object.entries(ru).map(([model, u]) =>
-    `<div class="pkg-item"><span class="mono muted">${esc(model)} · 近5h</span><span><strong>${u.reqs5h ?? 0}</strong> 次 / <strong>${((u.tokens5h || 0) / 1e6).toFixed(2)}M</strong> tokens${u.err429_5h ? ` <small style="color:var(--danger);">429×${u.err429_5h}</small>` : ''}</span></div>`
-  ).join('');
+  const usageRows = Object.entries(ru).map(([model, u]) => {
+    const hasToday = u.reqsToday !== undefined;
+    const reqs = hasToday ? u.reqsToday : (u.reqs5h ?? 0);
+    const tokens = hasToday ? (u.tokensToday || 0) : (u.tokens5h || 0);
+    const err429 = hasToday ? u.err429_today : u.err429_5h;
+    const label = hasToday ? '今日' : '近5h';
+    const subNote = hasToday && u.reqs5h !== undefined ? ` <small class="muted mono">(近5h ${u.reqs5h}次)</small>` : '';
+    return `<div class="pkg-item"><span class="mono muted">${esc(model)} · ${label}</span><span><strong>${reqs}</strong> 次 / <strong>${(tokens / 1e6).toFixed(2)}M</strong> tokens${err429 ? ` <small style="color:var(--danger);">429×${err429}</small>` : ''}${subNote}</span></div>`;
+  }).join('');
+
+  const nightBadge = rl.nightFree
+    ? '<span class="badge badge-success" style="font-size:10px;margin-left:6px;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">🌙 夜间限免中 (23:00–08:00)</span>'
+    : '<span class="muted mono" style="font-size:10px;">夜间 23:00–08:00 免积分</span>';
 
   return `
     <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
-      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
-        <span style="font-size:12px;color:var(--text-secondary);">上游频率限制（腾讯 code 6004）</span>
-        <span class="muted" style="font-size:10px;">无固定公开阈值 · 仅报实测值</span>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <div style="display:flex;align-items:center;">
+          <span style="font-size:12px;color:var(--text-secondary);">上游频率限制（腾讯 code 6004）</span>
+          ${rl.nightFree ? nightBadge : ''}
+        </div>
+        <span class="muted" style="font-size:10px;">${!rl.nightFree ? nightBadge + ' · ' : ''}无固定公开阈值 · 仅报实测值</span>
       </div>
       ${rows}
       ${usageRows ? `<div style="margin-top:6px;">${usageRows}</div>` : ''}

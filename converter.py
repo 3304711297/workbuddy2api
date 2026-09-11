@@ -1054,11 +1054,17 @@ def _record_rate_limit(model: str, err_text: str) -> None:
 
 
 def _rolling_usage(model: str) -> dict:
-    """从 usage.jsonl 统计该模型近 5h/24h 的成功请求与 tokens（只读本地文件）。"""
+    """从 usage.jsonl 统计该模型今日(UTC+8)及近 5h/24h 的成功请求与 tokens（只读本地文件）。"""
     path = CONFIG.get("usage_log")
     if not path or not os.path.exists(path):
         return {}
     now_ms = time.time() * 1000
+    tz8 = datetime.timezone(datetime.timedelta(hours=8))
+    now_dt = datetime.datetime.now(tz8)
+    today_start_ms = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+    is_night_free = (now_dt.hour >= 23 or now_dt.hour < 8)
+
+    reqs_today = tok_today = err_today = 0
     reqs5 = reqs24 = tok5 = tok24 = err5 = 0
     last429 = None
     try:
@@ -1074,26 +1080,36 @@ def _rolling_usage(model: str) -> dict:
                 ts = rec.get("ts")
                 if not ts or rec.get("model") != model or (now_ms - ts) > 24 * 3600 * 1000:
                     continue
+                tokens = (rec.get("input_tokens") or 0) + (rec.get("output_tokens") or 0)
                 if rec.get("ok"):
                     reqs24 += 1
-                    tok24 += (rec.get("input_tokens") or 0) + (rec.get("output_tokens") or 0)
+                    tok24 += tokens
                     if (now_ms - ts) <= 5 * 3600 * 1000:
                         reqs5 += 1
-                        tok5 += (rec.get("input_tokens") or 0) + (rec.get("output_tokens") or 0)
+                        tok5 += tokens
+                    if ts >= today_start_ms:
+                        reqs_today += 1
+                        tok_today += tokens
                 elif rec.get("error") == "HTTP 429":
                     if (now_ms - ts) <= 5 * 3600 * 1000:
                         err5 += 1
+                    if ts >= today_start_ms:
+                        err_today += 1
                     if last429 is None or ts > last429:
                         last429 = ts
     except Exception:
         return {}
     return {
+        "reqsToday": reqs_today,
+        "tokensToday": tok_today,
+        "err429_today": err_today,
         "reqs5h": reqs5,
         "reqs24h": reqs24,
         "tokens5h": tok5,
         "tokens24h": tok24,
         "err429_5h": err5,
         "last429Local": time.strftime("%m-%d %H:%M:%S", time.localtime(last429 / 1000)) if last429 else None,
+        "nightFree": is_night_free,
     }
 
 
@@ -1128,9 +1144,21 @@ async def api_rate_limit():
             nickname = (session.get("account") or {}).get("nickname") or ""
     except Exception:
         pass
+
+    tz8 = datetime.timezone(datetime.timedelta(hours=8))
+    now_dt = datetime.datetime.now(tz8)
+    is_night_free = (now_dt.hour >= 23 or now_dt.hour < 8)
+
     return {
         "models": models,
         "rollingUsage": {m: _rolling_usage(m) for m in snapshot or {}},
+        "nightFree": is_night_free,
+        "nightWindow": {
+            "active": is_night_free,
+            "start": "23:00",
+            "end": "08:00",
+            "desc": "23:00–次日08:00 免费调用",
+        },
         "nickname": nickname,
         "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
     }

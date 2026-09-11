@@ -46,6 +46,27 @@ test('P0-3 usage.js 与 index.html 保持拥有独立的 btn-refresh-usage', () 
   assert.strictEqual(
     usageJs.includes('btn-refresh-usage'),
     true,
-    'usage.js 必须监听 btn-refresh-usage'
+    'usage.js 必须绑定独立的 btn-refresh-usage'
   );
 });
+
+test('B1 accounts.js 覆盖 nightFree、reqsToday 与 expired 状态呈现', () => {
+  const accountsJs = fs.readFileSync(path.join(rootDir, 'src', 'accounts.js'), 'utf-8');
+
+  assert.strictEqual(
+    accountsJs.includes('nightFree'),
+    true,
+    'accounts.js 必须处理 nightFree 夜间免费标识'
+  );
+  assert.strictEqual(
+    accountsJs.includes('reqsToday'),
+    true,
+    'accounts.js 必须处理 reqsToday 今日统计字段'
+  );
+  assert.strictEqual(
+    accountsJs.includes('expired'),
+    true,
+    'accounts.js 必须处理 expired 恢复状态'
+  );
+});
+
