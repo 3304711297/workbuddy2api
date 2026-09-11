@@ -18,8 +18,8 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-python -m pytest tests/ -q          # Python：183 passed 为当前基线
-npm test                            # 前端：12 passed（node --test）
+python -m pytest tests/ -q          # Python：205 passed 为当前基线
+npm test                            # 前端：32 passed（node --test）
 cd src-tauri && cargo test          # Rust：24 passed
 ```
 
@@ -170,8 +170,12 @@ workbuddy2api.exe (GUI)
 - **多账号调度（已交付，2026-09-11）**：
   `AccountRotator`（converter.py）支持三模式 `off`（默认）/ `failover`（429/6004 自动切号重试）/
   `roundrobin`（按请求数轮询）；账号级冷却 `_ACCOUNT_COOLDOWNS[(uid, model)]`；
-  切号原子写 `active_uid`，外部凭 mtime 感知无需重启；CLI 参数 `--rotate-mode` / `--rotate-count`。
-  GUI 策略卡在「账号与资产」页，配置存 `settings.json`，`proxy_start` 仅在非 off 时透传给内核。
+  切号原子写 `active_uid`，外部凭 mtime 感知无需重启；CLI 参数 `--rotate-mode` / `--rotate-count`
+  （仅作 settings.json 不可读时的启动兜底默认值）。
+  **调度策略为运行时热读**：`converter.py` 每次请求经 `_get_rotator()` 读 `settings.json`
+  （`load_app_settings()`，按 mtime+size 签名缓存），GUI 改完**无需重启内核**即生效；
+  `/api/rate_limit` 的 `rotation.config_source` 字段可观测（`hot`=已热加载 / `default`=回退兜底）。
+  GUI 策略卡在「账号与资产」页，配置存 `settings.json`，`proxy_start` 始终透传参数（兜底用途）。
   ⚠️ 改这块先读第 4 节「AppConfig 整对象覆盖写盘」两条铁律。
 - **今日用量与夜间限免窗口（A2/A3/B1/C1/C2 已完成，2026-09-11 交付）**：
   已在 `converter.py`、`src/accounts.js`、`token-stats` 插件落地：自然日（UTC+8）今日用量（`reqsToday`/`tokensToday`/`err429_today`）优先展示，兼容 5h/24h；动态感知 `23:00–08:00` 免费时段并打上「🌙 夜间限免中」徽章。提交 `83ef9e2`（c2o 仓） / `894f500`（hermes 仓 hermes 分支）。
