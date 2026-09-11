@@ -103,13 +103,12 @@ export async function loadAccountsData() {
   }
 }
 
-// 读取后端持久化的轮换配置并同步到策略卡（单账号时自动灰化提示）
+// 读取后端持久化的轮换配置并同步到策略卡（仅用于初始化/保存后回读）
+// ⚠️ 此函数会把磁盘值**强制回写**到下拉框，因此绝不能在 change 事件里调用——
+// 否则用户刚选中的值会在读盘后被立刻改回旧值（表现为「闪一下就跳回原样」）。
 async function syncRotationPolicyCard(accountCount) {
-  const badge = document.getElementById('rotation-status-badge');
   const select = document.getElementById('select-rotate-mode');
   const countInput = document.getElementById('input-rotate-count');
-  const wrapCount = document.getElementById('wrap-rotate-count');
-  const hint = document.getElementById('rotation-policy-hint');
   if (!select) return;
 
   try {
@@ -118,13 +117,25 @@ async function syncRotationPolicyCard(accountCount) {
       if (cfg.rotate_mode && ['off', 'failover', 'roundrobin'].includes(cfg.rotate_mode)) {
         select.value = cfg.rotate_mode;
       }
-      if (cfg.rotate_count) {
+      if (cfg.rotate_count && countInput) {
         countInput.value = String(cfg.rotate_count);
       }
     }
   } catch (e) {
     console.warn('读取轮换配置失败:', e);
   }
+
+  renderRotationPolicyUI(accountCount);
+}
+
+// 纯 UI 渲染：依据**当前控件值**刷新徽章与提示文案，不接触磁盘、不改动控件值。
+// change 事件、切换账号后刷新都必须走这里。
+function renderRotationPolicyUI(accountCount) {
+  const badge = document.getElementById('rotation-status-badge');
+  const select = document.getElementById('select-rotate-mode');
+  const wrapCount = document.getElementById('wrap-rotate-count');
+  const hint = document.getElementById('rotation-policy-hint');
+  if (!select) return;
 
   const isMulti = accountCount >= 2;
   const mode = select.value;
@@ -160,9 +171,9 @@ async function syncRotationPolicyCard(accountCount) {
   }
 }
 
-// 保存轮换策略：走 save_app_settings，保留其余既有配置字段
-// ⚠️ save_app_settings 是整对象覆盖写盘；这里必须先读磁盘真源再合并，且不能依赖内存缓存，
-// 否则与「设置」页的 persistSettings 互相覆盖（rotation 配置闪回 off 的根因）。
+// 保存轮换策略：走 save_app_settings
+// ⚠️ save_app_settings 是整对象覆盖写盘，因此以读回的配置对象为基底做**浅合并**
+// （展开原对象再覆盖 rotate_* 两个字段），这样将来给 AppConfig 加字段也不会漏。
 async function saveRotationPolicy() {
   const select = document.getElementById('select-rotate-mode');
   const countInput = document.getElementById('input-rotate-count');
@@ -174,19 +185,11 @@ async function saveRotationPolicy() {
 
   if (btn) btn.disabled = true;
   try {
-    // 以磁盘真源为基底做字段合并，只改动 rotate_*，其余原样保留
-    const cfg = await invokeTauri('get_app_settings');
-    const next = {
-      close_action: cfg?.close_action || 'hide_to_tray',
-      auto_start_proxy: Boolean(cfg?.auto_start_proxy),
-      show_debug_console: Boolean(cfg?.show_debug_console),
-      port: Number(cfg?.port) || 8787,
-      desensitize: cfg?.desensitize !== false,
-      rotate_mode: mode,
-      rotate_count: count,
-    };
+    // 以磁盘真源为基底做浅合并，只改动 rotate_*，其余字段原样保留
+    const cfg = (await invokeTauri('get_app_settings')) || {};
+    const next = { ...cfg, rotate_mode: mode, rotate_count: count };
     await invokeTauri('save_app_settings', { settings: next });
-    // 写盘后立即回读校验，确认没有被 serde default 抹回默认值
+    // 写盘后立即回读校验，确认确实落盘（而非静默失败）
     const verify = await invokeTauri('get_app_settings');
     if (verify?.rotate_mode !== mode || Number(verify?.rotate_count) !== count) {
       showToast('保存未生效：配置被其他页面覆盖，请重试', 'error');
@@ -402,8 +405,8 @@ export function initRotationPolicy() {
   const select = document.getElementById('select-rotate-mode');
   const saveBtn = document.getElementById('btn-save-rotation');
   if (!select) return;
-  // 切换模式时即时更新提示文案与阈值输入框可见性
-  select.addEventListener('change', () => syncRotationPolicyCard(state.accountsList?.length || 0));
+  // 切换模式时只刷新 UI（纯渲染），绝不回读磁盘覆盖用户刚选的值
+  select.addEventListener('change', () => renderRotationPolicyUI(state.accountsList?.length || 0));
   saveBtn?.addEventListener('click', saveRotationPolicy);
 }
 

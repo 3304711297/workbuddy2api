@@ -78,3 +78,27 @@ test('accounts.js 调度策略卡不再声称单账号模式时也允许保存�
     '单账号提示语缺失或语义被改弱'
   );
 });
+
+test('change 事件只做纯渲染，绝不回读磁盘覆盖用户选择（闪回根因）', () => {
+  const start = ACCOUNTS_JS.indexOf('export function initRotationPolicy()');
+  assert.ok(start > -1, '未找到 initRotationPolicy');
+  const block = ACCOUNTS_JS.slice(start, start + 500);
+
+  assert.ok(
+    block.includes('renderRotationPolicyUI'),
+    'change 事件必须调用纯渲染函数 renderRotationPolicyUI'
+  );
+  assert.ok(
+    !block.includes('syncRotationPolicyCard'),
+    'change 事件严禁调用 syncRotationPolicyCard —— 它会读盘并强制回写 select.value，导致用户选择被立刻改回旧值'
+  );
+});
+
+test('存在纯渲染函数 renderRotationPolicyUI 且不触碰磁盘', () => {
+  const start = ACCOUNTS_JS.indexOf('function renderRotationPolicyUI(');
+  assert.ok(start > -1, '未找到 renderRotationPolicyUI');
+  const block = ACCOUNTS_JS.slice(start, start + 1600);
+  assert.ok(!block.includes('invokeTauri'), 'renderRotationPolicyUI 必须是纯渲染，不得调用 invokeTauri');
+  assert.ok(!block.includes('select.value ='), 'renderRotationPolicyUI 不得改写 select.value');
+});
+
