@@ -101,7 +101,7 @@ pub async fn auth_poll(state: String) -> Result<TokenPollResult, String> {
                 let acct_resp = client
                     .get(acct_url)
                     .header("Authorization", format!("Bearer {token}"))
-                    .header("User-Agent", "codebuddy2openai/2.0")
+                    .header("User-Agent", "workbuddy2api/2.0")
                     .send()
                     .await;
 
@@ -207,7 +207,7 @@ pub async fn accounts_refresh_token(uid: Option<String>) -> Result<String, Strin
         .header("X-Refresh-Token", refresh_token)
         .header("X-Auth-Refresh-Source", "plugin")
         .header("X-User-Id", uid_str)
-        .header("User-Agent", "codebuddy2openai/2.0")
+        .header("User-Agent", "workbuddy2api/2.0")
         .body("{}")
         .send()
         .await

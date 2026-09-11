@@ -63,7 +63,11 @@ test('converter.py 注册 rotate_mode / rotate_count 配置与 CLI 参数', () =
   assert.ok(CONVERTER_PY.includes('"rotate_count"'), 'CONFIG 缺少 rotate_count');
   assert.ok(CONVERTER_PY.includes('--rotate-mode'), '缺少 --rotate-mode CLI 参数');
   assert.ok(CONVERTER_PY.includes('--rotate-count'), '缺少 --rotate-count CLI 参数');
-  assert.ok(CONVERTER_PY.includes('WORKBUDDY2API_ROTATE_MODE'), '缺少 WORKBUDDY2API_ROTATE_MODE 环境变量支持');
+  // 环境变量经 _env_compat 读取（新名 WORKBUDDY2API_* 优先，旧名 CODEBUDDY2OPENAI_* 兜底）
+  assert.ok(
+    CONVERTER_PY.includes('_env_compat("ROTATE_MODE"'),
+    'rotate_mode 未经 _env_compat 读取（应兼容新旧环境变量名）'
+  );
 });
 
 test('converter.py 轮换默认关闭（off）且支持三种模式', () => {
@@ -71,6 +75,6 @@ test('converter.py 轮换默认关闭（off）且支持三种模式', () => {
   assert.ok(CONVERTER_PY.includes('"failover"'), '缺少 failover 模式');
   assert.ok(CONVERTER_PY.includes('"roundrobin"'), '缺少 roundrobin 模式');
   // 默认值必须是 off（不改变既有单账号行为）
-  const m = CONVERTER_PY.match(/"rotate_mode":\s*os\.environ\.get\([^)]*"off"\)/);
+  const m = CONVERTER_PY.match(/"rotate_mode": _env_compat\("ROTATE_MODE", "off"\)/);
   assert.ok(m, 'rotate_mode 默认值必须为 off');
 });

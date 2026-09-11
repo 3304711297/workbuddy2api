@@ -1,6 +1,6 @@
 /**
- * CodeBuddy2OpenAI 前端主交互逻辑 (对标 EasyCLIProxyAPI 标准)
- * 具备：全局状态机、多账号管理、内嵌资产积分渲染、Agent 一键配置、接口连通性测试
+ * WorkBuddy2API 前端主交互逻辑 (对标 EasyCLIProxyAPI 标准)
+ * 具备：全局状态机、多账号管理、内嵌资产积分渲染、Agent 接入引导、接口连通性测试
  *
  * 本文件是唯一入口：只负责按原顺序装配各功能模块，不承载业务逻辑。
  * 模块划分见同目录各文件；共享状态在 state.js，纯工具在 utils.js。

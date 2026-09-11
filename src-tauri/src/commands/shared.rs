@@ -16,6 +16,14 @@ pub(super) fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// 读取环境变量（带项目改名兼容）：新名 `WORKBUDDY2API_<suffix>` 优先，
+/// 回退旧名 `C2O_<suffix>`（CodeBuddy2OpenAI 时代前缀）。
+///
+/// 项目更名后保留旧前缀，避免既有用户环境行为静默失效。
+pub(super) fn env_compat(suffix: &str) -> Option<String> {
+    env_nonempty(&format!("WORKBUDDY2API_{suffix}")).or_else(|| env_nonempty(&format!("C2O_{suffix}")))
+}
+
 // ---------------------------------------------------------------------------
 // 统一 HTTP 客户端构造：本机环回直连优先
 // ---------------------------------------------------------------------------

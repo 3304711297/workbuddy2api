@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, Optional
 
-logger = logging.getLogger("codebuddy2openai.token_refresher")
+logger = logging.getLogger("workbuddy2api.token_refresher")
 
 
 class BackgroundTokenRefresher:
@@ -39,7 +39,7 @@ class BackgroundTokenRefresher:
         self._get_session_callback = get_session_callback
         self._check_interval_seconds = float(check_interval_seconds)
         self._threshold_seconds = float(threshold_seconds)
-        self.logger = logger or logging.getLogger("codebuddy2openai.token_refresher")
+        self.logger = logger or logging.getLogger("workbuddy2api.token_refresher")
         self._base_retry_seconds = float(base_retry_seconds)
         self._max_retry_seconds = float(max_retry_seconds)
 

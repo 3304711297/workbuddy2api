@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::{Manager, State};
 
-use super::shared::{env_nonempty, local_app_dir, user_home};
+use super::shared::{env_compat, local_app_dir, user_home};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TestChatResult {
@@ -20,9 +20,9 @@ pub struct TestChatResult {
     pub error: Option<String>,
 }
 
-/// Python 解释器定位：`C2O_PYTHON` 环境变量优先 → 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留现机行为）→ PATH 中的 python
+/// Python 解释器定位：`WORKBUDDY2API_PYTHON`（兼容旧名 `C2O_PYTHON`）环境变量优先 → 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留现机行为）→ PATH 中的 python
 fn resolve_python_interpreter() -> PathBuf {
-    if let Some(p) = env_nonempty("C2O_PYTHON").map(PathBuf::from).filter(|p| p.exists()) {
+    if let Some(p) = env_compat("PYTHON").map(PathBuf::from).filter(|p| p.exists()) {
         return p;
     }
     // 内置解释器路径从用户主目录派生，等价于原开发机绝对路径但不再硬编码用户名
@@ -59,8 +59,8 @@ pub fn proxy_start(
 
     let python = resolve_python_interpreter();
 
-    // converter.py 定位：`C2O_CONVERTER` 环境变量优先 → 资源目录 → 可执行文件目录逐级向上 → 当前工作目录兜底
-    let script = match env_nonempty("C2O_CONVERTER")
+    // converter.py 定位：`WORKBUDDY2API_CONVERTER`（兼容旧名 `C2O_CONVERTER`）环境变量优先 → 资源目录 → 可执行文件目录逐级向上 → 当前工作目录兜底
+    let script = match env_compat("CONVERTER")
         .map(PathBuf::from)
         .filter(|p| p.exists())
     {
@@ -215,7 +215,7 @@ pub fn proxy_clear_logs() -> Result<String, String> {
     Ok("日志已清空".into())
 }
 
-/// 打开应用数据目录（%LOCALAPPDATA%\codebuddy2openai，即日志文件所在目录）。
+/// 打开应用数据目录（%LOCALAPPDATA%\workbuddy2api，即日志文件所在目录）。
 /// 目录不存在时先创建（local_app_dir 内部已保证），再用资源管理器打开；失败返回错误信息。
 #[tauri::command]
 pub fn open_logs_dir() -> Result<(), String> {
@@ -521,7 +521,7 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
 // 用量统计（usage_summary）：聚合 converter 每请求写出的 JSONL 用量文件
 // ---------------------------------------------------------------------------
 
-/// 用量统计文件路径：%LOCALAPPDATA%\codebuddy2openai\usage\usage.jsonl（proxy_start 传给 converter）
+/// 用量统计文件路径：%LOCALAPPDATA%\workbuddy2api\usage\usage.jsonl（proxy_start 传给 converter）
 fn usage_log_path() -> PathBuf {
     local_app_dir().join("usage").join("usage.jsonl")
 }

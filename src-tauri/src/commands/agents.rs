@@ -1,6 +1,6 @@
 //! Agent 状态检测与手动接入引导（Hermes & ZCode）。
 //!
-//! Hermes 不再由 CodeBuddy2OpenAI 自动改写 config.yaml；这里只读当前端点并生成
+//! Hermes 不再由 WorkBuddy2API 自动改写 config.yaml；这里只读当前端点并生成
 //! 用户可复制的手动配置说明。ZCode 同样只返回手动接入引导。
 
 use serde::{Deserialize, Serialize};
@@ -251,9 +251,9 @@ pub fn hermes_endpoint_guide(port: u16) -> Result<HermesEndpointGuide, String> {
             format!("打开 Hermes 配置文件：{}", path.display()),
             "在顶层 model: 节中填写或修改 provider、default、base_url、api_key；不要删除其它配置。".into(),
             format!("base_url 填：{target_base_url}"),
-            "api_key 填：local（CodeBuddy2OpenAI 回环端点使用固定本地密钥）".into(),
+            "api_key 填：local（WorkBuddy2API 回环端点使用固定本地密钥）".into(),
             "default 可填 auto，也可填 /v1/models 返回的具体模型 ID。".into(),
-            "保存后重启 Hermes，或在模型选择器中刷新模型列表；刷新前请先启动 CodeBuddy2OpenAI 服务。".into(),
+            "保存后重启 Hermes，或在模型选择器中刷新模型列表；刷新前请先启动 WorkBuddy2API 服务。".into(),
         ],
     })
 }

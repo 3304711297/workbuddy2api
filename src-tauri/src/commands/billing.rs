@@ -389,7 +389,7 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
         .header("Authorization", format!("Bearer {token}"))
         .header("X-User-Id", acct_uid)
         .header("Content-Type", "application/json")
-        .header("User-Agent", "codebuddy2openai/2.0")
+        .header("User-Agent", "workbuddy2api/2.0")
         .body("{}")
         .send()
         .await

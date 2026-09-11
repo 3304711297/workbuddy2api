@@ -170,7 +170,7 @@ pub(crate) fn run_resize_worker_with_sink<F>(
 }
 
 fn window_state_path() -> PathBuf {
-    // 复用 commands 的路径工具：%LOCALAPPDATA%\codebuddy2openai
+    // 复用 commands 的路径工具：%LOCALAPPDATA%\workbuddy2api
     commands::local_app_dir().join("window.json")
 }
 
@@ -321,7 +321,7 @@ pub fn run_app() {
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().expect("应用图标缺失"))
-                .tooltip("CodeBuddy2OpenAI 桌面控制台")
+                .tooltip("WorkBuddy2API 桌面控制台")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app_handle, event| {

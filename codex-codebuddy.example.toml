@@ -24,7 +24,7 @@
 [model_providers.codebuddy]
 name = "CodeBuddy (via local converter)"
 base_url = "http://127.0.0.1:8787/v1"
-env_key = "CODEBUDDY2OPENAI_KEY"   # 转换器未启用 --api-key 时，可随便填一个环境变量名
+env_key = "WORKBUDDY2API_KEY"   # 转换器未启用 --api-key 时，可随便填一个环境变量名
 # 注意：本接口是 OpenAI chat 协议（/v1/chat/completions）。
 # 新版 Codex CLI 因不再支持该 wire_api 而无法使用，请用 ZCode / Cherry Studio 等 OpenAI 兼容客户端。
 

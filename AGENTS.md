@@ -108,7 +108,7 @@ workbuddy2api.exe (GUI)
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
 - **并发削峰平滑器 (`request_pacer.py`)**：
-  基于 `asyncio.Semaphore` 与单调时钟调度槽，支持环境变量 `CODEBUDDY2OPENAI_MAX_CONCURRENCY`（默认 5）与 `CODEBUDDY2OPENAI_MIN_INTERVAL_MS`（默认 50ms）削平并发脉冲。流式与非流式请求均在上下文周期内自动持槽与平滑释放。
+  基于 `asyncio.Semaphore` 与单调时钟调度槽，支持环境变量 `WORKBUDDY2API_MAX_CONCURRENCY`（默认 5，兼容旧名 `CODEBUDDY2OPENAI_MAX_CONCURRENCY`）与 `WORKBUDDY2API_MIN_INTERVAL_MS`（默认 50ms，兼容旧名）削平并发脉冲。流式与非流式请求均在上下文周期内自动持槽与平滑释放。环境变量统一经 `_env_compat()` 读取：新名优先，旧名兜底，避免升级后行为静默变化。
 - **后台主动令牌续期 (`token_refresher.py`)**：
   由 FastAPI `lifespan` 生命周期管控，后台每 300s 巡检活跃账号凭据，剩余有效时间小于 1800s（30 分钟）时主动触发异步续期并防重入，避免用户请求遭遇被动刷新时延。
 

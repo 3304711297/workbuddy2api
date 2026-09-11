@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-codebuddy2openai — 把 CodeBuddy / WorkBuddy 的订阅暴露成标准 OpenAI 兼容 API。
+workbuddy2api — 把 CodeBuddy / WorkBuddy 的订阅暴露成标准 OpenAI 兼容 API。
 
 原理（直连后端，原生 function calling）：
   - 读取本机已登录的 CodeBuddy 桌面端凭据（auth 文件里的 token / uid / enterpriseId）。
@@ -71,7 +71,7 @@ except ImportError:
 
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
-USER_AGENT = "codebuddy2openai/2.0"
+USER_AGENT = "workbuddy2api/2.0"
 
 # ---------------------------------------------------------------------------
 # 平台相关：定位 auth 目录与 WSL 宿主穿透
@@ -182,6 +182,17 @@ def _accounts_file() -> Path:
                 return cb
 
     return local_wb
+
+
+def _env_compat(suffix: str, default: str = "") -> str:
+    """读取环境变量，新名 WORKBUDDY2API_<suffix> 优先，回退旧名 CODEBUDDY2OPENAI_<suffix>。
+
+    项目改名后仍兼容既有用户环境变量，避免升级后行为静默变化。
+    """
+    v = os.environ.get(f"WORKBUDDY2API_{suffix}")
+    if v is None or v == "":
+        v = os.environ.get(f"CODEBUDDY2OPENAI_{suffix}")
+    return v if v not in (None, "") else default
 
 
 def _app_settings_file() -> Path:
@@ -920,11 +931,11 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "log_payloads": False, "usage_log": None, "unsafe_expose": False,
                 "desensitize": False, "wsl": False, "scan_all_users": False,
                 # 多账号凭据轮换：默认 off 关闭；failover (限流自动故障转移) / roundrobin (按请求轮询分摊)
-                "rotate_mode": os.environ.get("WORKBUDDY2API_ROTATE_MODE", os.environ.get("CODEBUDDY2OPENAI_ROTATE_MODE", "off")).lower(),
-                "rotate_count": int(os.environ.get("WORKBUDDY2API_ROTATE_COUNT", os.environ.get("CODEBUDDY2OPENAI_ROTATE_COUNT", "1"))),
+                "rotate_mode": _env_compat("ROTATE_MODE", "off").lower(),
+                "rotate_count": int(_env_compat("ROTATE_COUNT", "1")),
                 # 流式 tool_calls 损坏防御（实验性阻塞聚合重试）：默认关闭（优先原生真流式透传，杜绝 60s/140s 超时）
-                # 可通过 --repair-stream-tools 或环境变量 CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS=1 开启
-                "repair_stream_tools": os.environ.get("CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes"),
+                # 可通过 --repair-stream-tools 或环境变量 WORKBUDDY2API_REPAIR_STREAM_TOOLS=1 开启（兼容旧名 CODEBUDDY2OPENAI_*）
+                "repair_stream_tools": _env_compat("REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes"),
                 # 剥掉流式 delta 里的空 content:""/reasoning_content:""（GLM reasoning 周期
                 # 会被 AI SDK 当成"文本开始"提前掐断，产生上百个碎片 Thought 块）。
                 # 借鉴 DistPub/workbuddy2api；WORKBUDDY_STRIP_EMPTY_DELTA=0 关闭。
@@ -935,8 +946,8 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
 
 # 并发削峰与流量节奏平滑器
 _REQUEST_PACER = RequestPacer(
-    max_concurrency=int(os.environ.get("CODEBUDDY2OPENAI_MAX_CONCURRENCY", "5")),
-    min_interval_ms=float(os.environ.get("CODEBUDDY2OPENAI_MIN_INTERVAL_MS", "50")),
+    max_concurrency=int(_env_compat("MAX_CONCURRENCY", "5")),
+    min_interval_ms=float(_env_compat("MIN_INTERVAL_MS", "50")),
 ) if RequestPacer else None
 
 # 后台主动令牌续期任务
@@ -951,8 +962,8 @@ async def lifespan(app: FastAPI):
         if cred is not None:
             _TOKEN_REFRESHER = BackgroundTokenRefresher(
                 credential_manager=cred,
-                check_interval_seconds=float(os.environ.get("CODEBUDDY2OPENAI_REFRESH_INTERVAL", "300")),
-                threshold_seconds=float(os.environ.get("CODEBUDDY2OPENAI_REFRESH_THRESHOLD", "1800")),
+                check_interval_seconds=float(_env_compat("REFRESH_INTERVAL", "300")),
+                threshold_seconds=float(_env_compat("REFRESH_THRESHOLD", "1800")),
             )
             _TOKEN_REFRESHER.start()
             _log("后台主动令牌续期任务已启动 (巡检间隔: 300s, 提前续期阈值: 1800s)")
@@ -1063,7 +1074,7 @@ def _log(msg: str, level: str = "info"):
 
 def _log_payload(msg: str):
     """记录完整请求/响应 body 或原始 SSE。
-    必须显式指定 --log-payloads（或环境变量 CODEBUDDY2OPENAI_LOG_PAYLOADS=1）
+    必须显式指定 --log-payloads（或环境变量 WORKBUDDY2API_LOG_PAYLOADS=1，兼容旧名 CODEBUDDY2OPENAI_LOG_PAYLOADS）
     且 log_level 为 trace 时才会落盘，防止高级调试模式下将长会话 Prompt 正文写入日志文件。
     """
     if CONFIG.get("log_payloads"):
@@ -1076,7 +1087,7 @@ def _truncate(s: str, n: int = 80) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 用量统计（--usage-log / 环境变量 CODEBUDDY2OPENAI_USAGE_LOG）
+# 用量统计（--usage-log / 环境变量 WORKBUDDY2API_USAGE_LOG，兼容旧名 CODEBUDDY2OPENAI_USAGE_LOG）
 # 每个聊天请求（流式与非流式）完成时追加一行 JSONL，供桌面端 usage_summary 聚合。
 # 铁律：统计写盘整体 try/except 静默失败，任何异常不得影响请求本身的响应。
 # ---------------------------------------------------------------------------
@@ -2941,23 +2952,23 @@ def preflight() -> bool:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="CodeBuddy -> OpenAI 兼容转换器（直连后端）")
+    ap = argparse.ArgumentParser(description="WorkBuddy2API — CodeBuddy/WorkBuddy 转 OpenAI + Anthropic 兼容端点（直连后端）")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--api-key", default=os.environ.get("CODEBUDDY2OPENAI_KEY", ""),
+    ap.add_argument("--api-key", default=_env_compat("KEY", ""),
                     help="可选：要求客户端携带的 API key（非回环监听时强制要求，回环默认不校验）")
     ap.add_argument("--unsafe-expose", action="store_true",
                     help="当监听非回环地址（如 0.0.0.0）且未设置 --api-key 时，显式确认以无鉴权方式向网络暴露服务（高风险）")
     ap.add_argument("--log", default=None, metavar="PATH",
                     help="开启日志并写到该文件（如 --log converter.log 或 --log /tmp/cb.log）。"
                          "不传则不记日志。")
-    ap.add_argument("--log-level", default=os.environ.get("CODEBUDDY2OPENAI_LOG_LEVEL", "info"),
+    ap.add_argument("--log-level", default=_env_compat("LOG_LEVEL", "info"),
                     choices=["info", "debug", "trace"],
                     help="日志详细级别：info（默认，仅记录请求摘要与耗时，不落盘 prompt/response 正文）；"
                          "debug（含错误响应详情）；trace（完整记录请求体与响应流，自动脱敏 Token/Key）。")
     ap.add_argument("--log-payloads", action="store_true",
                     help="在 trace 日志级别下，额外将完整请求体（含 prompt）、响应体及原始 SSE 落盘。"
-                         "默认关闭以避免长会话 Prompt 正文写入日志文件。可通过 CODEBUDDY2OPENAI_LOG_PAYLOADS=1 开启。")
+                         "默认关闭以避免长会话 Prompt 正文写入日志文件。可通过 WORKBUDDY2API_LOG_PAYLOADS=1 开启（兼容旧名 CODEBUDDY2OPENAI_LOG_PAYLOADS）。")
     ap.add_argument("--usage-log", default=None, metavar="PATH",
                     help="开启用量统计：每个聊天请求（流式/非流式）完成后向该文件追加一行 JSONL"
                          "（ts/model/ok/input_tokens/output_tokens/latency_ms/ttft_ms/error/retry_count/retry_reason）。"
@@ -2989,7 +3000,7 @@ def main():
         if not args.api_key and not args.unsafe_expose:
             sys.stderr.write(
                 f"\n[安全拒绝] 服务绑定至非回环地址 (http://{args.host}:{args.port}) 时，"
-                "必须配置 --api-key（或环境变量 CODEBUDDY2OPENAI_KEY）进行访问鉴权。\n"
+                "必须配置 --api-key（或环境变量 WORKBUDDY2API_KEY）进行访问鉴权。\n"
                 "若在受信任的隔离网络环境中确实需要无鉴权暴露，请显式指定 --unsafe-expose 启动参数。\n\n"
             )
             sys.exit(1)
@@ -3005,19 +3016,19 @@ def main():
     CONFIG["unsafe_expose"] = args.unsafe_expose
     CONFIG["desensitize"] = args.desensitize
     CONFIG["wsl"] = args.wsl
-    CONFIG["scan_all_users"] = args.scan_all_users or os.environ.get("CODEBUDDY2OPENAI_SCAN_ALL_USERS", "").lower() in ("1", "true", "yes")
+    CONFIG["scan_all_users"] = args.scan_all_users or _env_compat("SCAN_ALL_USERS", "").lower() in ("1", "true", "yes")
     if args.repair_stream_tools is not None:
         CONFIG["repair_stream_tools"] = args.repair_stream_tools
     else:
-        CONFIG["repair_stream_tools"] = os.environ.get("CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes")
+        CONFIG["repair_stream_tools"] = _env_compat("REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes")
     if args.rotate_mode:
         CONFIG["rotate_mode"] = args.rotate_mode.lower()
     if args.rotate_count is not None:
         CONFIG["rotate_count"] = max(1, args.rotate_count)
-    CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
+    CONFIG["log_path"] = args.log if args.log else _env_compat("LOG", "") or None
     CONFIG["log_level"] = args.log_level
-    CONFIG["log_payloads"] = args.log_payloads or os.environ.get("CODEBUDDY2OPENAI_LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
-    CONFIG["usage_log"] = args.usage_log if args.usage_log else os.environ.get("CODEBUDDY2OPENAI_USAGE_LOG")
+    CONFIG["log_payloads"] = args.log_payloads or _env_compat("LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
+    CONFIG["usage_log"] = args.usage_log if args.usage_log else (_env_compat("USAGE_LOG", "") or None)
     init_cred()
 
     if not args.skip_check:

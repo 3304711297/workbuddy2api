@@ -24,7 +24,7 @@ def _mock_backend(payload: dict, status: int = 200) -> httpx.MockTransport:
         assert request.url.host == "copilot.tencent.com"
         assert request.url.path == "/billing/meter/get-user-resource-summary"
         assert request.headers["Content-Type"] == "application/json"
-        assert request.headers["User-Agent"] == "codebuddy2openai/2.0"
+        assert request.headers["User-Agent"] == "workbuddy2api/2.0"
         assert request.headers["X-User-Id"] == "u1"
         assert request.headers["Authorization"].startswith("Bearer tok")
         assert json.loads(request.content) == {}
