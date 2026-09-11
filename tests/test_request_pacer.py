@@ -143,8 +143,16 @@ def test_metrics_accuracy():
 
 
 def test_global_min_interval():
+    """全局最小间隔：第 k 个请求的起跑不得早于 t_base + k*interval。
+
+    断言模型说明（勿改回相邻差值）：事件循环的唤醒抖动只会把起跑推后、
+    绝不会提前，因此「相对 t_base 的下界」对抖动免疫；而相邻差值断言
+    （旧版 diff2 >= 0.04）会被前后两次唤醒延迟的不对称打穿——实测 CI
+    上 lag2 - lag3 ≈ 19ms 即造成 0.031s 假性失败。
+    """
     async def _run():
         interval_ms = 50.0
+        interval_sec = interval_ms / 1000.0
         pacer = RequestPacer(max_concurrency=5, min_interval_ms=interval_ms)
 
         timestamps = []
@@ -153,17 +161,18 @@ def test_global_min_interval():
             async with pacer.acquire():
                 timestamps.append(time.monotonic())
 
-        # Dispatch 3 requests concurrently
+        # 基线时刻在请求入队前捕获：首个请求的起跑必 >= t_base，
+        # 之后每个全局请求的预占刻度再各加一个 interval。
+        t_base = time.monotonic()
         tasks = [asyncio.create_task(worker()) for _ in range(3)]
         await asyncio.gather(*tasks)
 
         assert len(timestamps) == 3
-        diff1 = timestamps[1] - timestamps[0]
-        diff2 = timestamps[2] - timestamps[1]
-
-        # Expected spacing around 50ms (0.05s); allow small timing tolerance (>= 40ms)
-        assert diff1 >= 0.04, f"diff1 too short: {diff1:.4f}s"
-        assert diff2 >= 0.04, f"diff2 too short: {diff2:.4f}s"
+        for k, ts in enumerate(timestamps):
+            floor = t_base + k * interval_sec
+            assert ts >= floor - 1e-3, (
+                f"request #{k} started too early: +{ts - t_base:.4f}s "
+                f"< expected +{k * interval_sec:.4f}s")
 
     asyncio.run(_run())
 
