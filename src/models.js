@@ -169,7 +169,9 @@ window.openModelEdit = (modelId) => {
     }
     const sourceHint = m.efforts_source === 'catalog'
       ? '（档位矩阵来自内置覆盖表，上游此接口未下发完整档位）'
-      : '';
+      : m.efforts_source === 'merged'
+        ? '（上游只下发部分档位，已按内置覆盖表补全）'
+        : '';
     html += `
       <div class="zguide-field" style="margin-top: 12px;">
         <span class="zguide-label">思考强度 (Reasoning) ${esc(sourceHint)}</span>

@@ -18,9 +18,9 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-python -m pytest tests/ -q          # Python：177 passed 为当前基线
+python -m pytest tests/ -q          # Python：183 passed 为当前基线
 npm test                            # 前端：12 passed（node --test）
-cd src-tauri && cargo test          # Rust：15 passed
+cd src-tauri && cargo test          # Rust：24 passed
 ```
 
 **改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust
@@ -67,12 +67,22 @@ codebuddy2openai.exe (GUI)
   不能只看单测。
 - **思考档位矩阵（`billing.rs` 的 `EFFORT_CATALOG`）**：上游 `/v2/enterprises/personal/models`
   对 `deepseek-v4.1-flash`、`deepseek-v4-pro` 等只下发扁平 `reasoning:{"effort":"high"}`，
-  **不含** `supportedEfforts` / `canDisableThinking`；完整矩阵只在官方客户端另一路
-  `/v3/config` 下发。故 `EFFORT_CATALOG` 是覆盖表兜底，判定顺序固定为
-  **上游完整矩阵 > 覆盖表 > 扁平值**，`efforts_source` 字段回传给前端标注来源。
-  改这张表必须同步 `tests/test_model_effort_matrix.py` 的 `OFFICIAL_MATRIX`
-  （该表取自官方客户端 `cloud_product_config_cache` 实测，是唯一真源）。
-  **不要**把它改成强制覆盖上游——否则上游日后补全矩阵时会被本地旧值压住。
+  **不含** `supportedEfforts` / `canDisableThinking`；完整矩阵只在官方客户端另两路下发
+  （`cloud_product_config_cache` 云端最新 21 模型 / 客户端基线 `product.json` 49 模型）。
+  解析口径由 `resolve_reasoning_matrix()` 统一实现，四种来源标记：
+
+  | 标记 | 触发条件 | 档位来源 |
+  |---|---|---|
+  | `upstream` | 上游下发非子集矩阵（含未知档位） | 上游原样保留 |
+  | `merged` | 上游只下发覆盖表的**严格子集**（半截矩阵） | 按覆盖表补全 |
+  | `catalog` | 上游完全没下发 | 覆盖表 |
+  | `upstream` | 覆盖表也没有，退回扁平 `effort` | 单值 |
+
+  改这张表必须同步 `tests/test_model_effort_matrix.py` 的 `CLOUD_MATRIX` +
+  `BASELINE_MATRIX` + `CATALOG_SOURCES`——三者共同构成「官方唯一真源」，
+  测试会校验每个条目都有声明来源。**不要**把它改成强制覆盖上游（会压住上游
+  日后新增的档位），也不要退化成「非空即上游」（半截矩阵会压回已确认能力）。
+  Rust 侧配套单测在 `billing.rs::reasoning_matrix_tests`。
 - **「默认」档语义 = 透传，不是本地默认值**：控制台思考强度选「默认」时
   `model_settings.json` 里不写 `reasoning_effort` 键，`converter.py` 因而不改写
   请求体，客户端（如 Hermes `agent.reasoning_effort=ultra`）下发什么就发什么。

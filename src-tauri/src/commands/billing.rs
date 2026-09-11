@@ -37,9 +37,11 @@ pub struct ModelMetaItem {
 /// 而官方客户端另一路 `/v3/config` 下发的是完整矩阵。若只按上游扁平值渲染，
 /// 控制台会把 `deepseek-v4.1-flash` 等模型误显示为「仅 high、不可关闭思考」。
 ///
-/// **口径**：上游给了完整 `supportedEfforts` 就以上游为准（`efforts_source=upstream`）；
-/// 只有缺失时才落到本表（`catalog=catalog`）。本表由 2026-09-11 官方客户端
-/// `cloud_product_config_cache` 实测提取，仅作缺失时兜底，不做强制覆盖。
+/// **口径**：上游下发了**非子集**矩阵就以上游为准（`efforts_source=upstream`）；
+/// 上游只给了本表的严格子集（半截矩阵）→ 按本表补全（`efforts_source=merged`）；
+/// 上游完全没给 → 落到本表（`efforts_source=catalog`）。本表由 2026-09-11 官方
+/// 客户端两处实测提取（`cloud_product_config_cache` 与客户端基线 `product.json`），
+/// 来源逐项标注在 `tests/test_model_effort_matrix.py` 的 `CATALOG_SOURCES`。
 struct EffortCatalog {
     id: &'static str,
     efforts: &'static [&'static str],
@@ -61,6 +63,41 @@ const EFFORT_CATALOG: &[EffortCatalog] = &[
 
 fn lookup_effort_catalog(model_id: &str) -> Option<&'static EffortCatalog> {
     EFFORT_CATALOG.iter().find(|c| c.id == model_id)
+}
+
+/// 解析思考档位矩阵，返回 `(档位列表, 来源标记)`。
+///
+/// 判定顺序：
+/// 1. 上游下发了**非子集**矩阵 → `upstream`（上游权威，含上游新增的未知档位）
+/// 2. 上游只下发了覆盖表的**严格子集** → 判为半截矩阵，按覆盖表补全 → `merged`
+///    （防上游偶发丢档位把已确认的能力压回去；控制台选项仅作显式覆盖用）
+/// 3. 上游完全没下发 → 覆盖表 → `catalog`
+/// 4. 覆盖表也没有 → 退回扁平 `effort` 字段 → `upstream`
+fn resolve_reasoning_matrix(
+    upstream_efforts: Vec<String>,
+    flat_effort: Option<&str>,
+    catalog: Option<&EffortCatalog>,
+) -> (Vec<String>, String) {
+    if !upstream_efforts.is_empty() {
+        if let Some(c) = catalog {
+            let all_known = upstream_efforts.iter().all(|e| c.efforts.contains(&e.as_str()));
+            if all_known && c.efforts.len() > upstream_efforts.len() {
+                let full = c.efforts.iter().map(|s| s.to_string()).collect();
+                return (full, "merged".to_string());
+            }
+        }
+        return (upstream_efforts, "upstream".to_string());
+    }
+
+    if let Some(c) = catalog {
+        return (c.efforts.iter().map(|s| s.to_string()).collect(), "catalog".to_string());
+    }
+
+    if let Some(ef) = flat_effort {
+        return (vec![ef.to_string()], "upstream".to_string());
+    }
+
+    (Vec::new(), "upstream".to_string())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -166,28 +203,21 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
                 .unwrap_or_else(|| !m.get("onlyReasoning").and_then(|v| v.as_bool()).unwrap_or(false))
         });
 
-        let mut supported_efforts = Vec::new();
+        let mut upstream_efforts = Vec::new();
         if let Some(arr) = reasoning_obj.and_then(|r| r.get("supportedEfforts")).and_then(|v| v.as_array()) {
             for ef in arr {
                 if let Some(s) = ef.as_str() {
-                    supported_efforts.push(s.to_string());
+                    upstream_efforts.push(s.to_string());
                 }
             }
         }
+        let flat_effort = reasoning_obj
+            .and_then(|r| r.get("effort"))
+            .and_then(|v| v.as_str());
 
-        // 档位矩阵来源判定：上游完整下发 > 内置覆盖表 > 扁平 effort 字段兜底
-        let efforts_source: String;
-        if !supported_efforts.is_empty() {
-            efforts_source = "upstream".to_string();
-        } else if let Some(c) = catalog {
-            supported_efforts = c.efforts.iter().map(|s| s.to_string()).collect();
-            efforts_source = "catalog".to_string();
-        } else {
-            if let Some(ef) = reasoning_obj.and_then(|r| r.get("effort")).and_then(|v| v.as_str()) {
-                supported_efforts.push(ef.to_string());
-            }
-            efforts_source = "upstream".to_string();
-        }
+        // 档位矩阵来源判定：上游非子集矩阵 > 半截矩阵按覆盖表补全(merged) > 覆盖表 > 扁平值
+        let (supported_efforts, efforts_source) =
+            resolve_reasoning_matrix(upstream_efforts, flat_effort, catalog);
 
         let default_effort = reasoning_obj.and_then(|r| r.get("defaultEffort"))
             .or_else(|| reasoning_obj.and_then(|r| r.get("effort")))
@@ -334,4 +364,106 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
         is_paid_user: data.get("IsPaidUser").and_then(|v| v.as_bool()).unwrap_or(false),
         packages,
     })
+}
+
+
+// ---------------------------------------------------------------------------
+// 单元测试：思考档位矩阵解析口径
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod reasoning_matrix_tests {
+    use super::*;
+
+    fn cat(id: &str) -> Option<&'static EffortCatalog> {
+        lookup_effort_catalog(id)
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// 上游下发完整矩阵（含覆盖表未知的档位）→ 以上游为准，不判为半截。
+    #[test]
+    fn upstream_superset_wins() {
+        let (efforts, source) = resolve_reasoning_matrix(
+            s(&["low", "high", "max", "ultra"]), None, cat("deepseek-v4.1-flash"));
+        assert_eq!(efforts, s(&["low", "high", "max", "ultra"]));
+        assert_eq!(source, "upstream");
+    }
+
+    /// 上游档位与覆盖表等长且完全相同 → 上游（非半截）。
+    #[test]
+    fn upstream_equal_matrix_stays_upstream() {
+        let (efforts, source) = resolve_reasoning_matrix(
+            s(&["low", "high", "max"]), None, cat("deepseek-v4.1-flash"));
+        assert_eq!(efforts, s(&["low", "high", "max"]));
+        assert_eq!(source, "upstream");
+    }
+
+    /// 上游只给覆盖表的严格子集 → 判为半截矩阵，按覆盖表补全。
+    #[test]
+    fn upstream_subset_merges_to_catalog() {
+        let (efforts, source) = resolve_reasoning_matrix(
+            s(&["high"]), None, cat("deepseek-v4.1-flash"));
+        assert_eq!(efforts, s(&["low", "high", "max"]));
+        assert_eq!(source, "merged");
+    }
+
+    /// 上游子集但含覆盖表未知档位 → 不是子集，以上游为准（不丢未知档位）。
+    #[test]
+    fn upstream_subset_with_unknown_effort_wins() {
+        let (efforts, source) = resolve_reasoning_matrix(
+            s(&["high", "turbo"]), None, cat("deepseek-v4.1-flash"));
+        assert_eq!(efforts, s(&["high", "turbo"]));
+        assert_eq!(source, "upstream");
+    }
+
+    /// 上游完全没下发 → 覆盖表。
+    #[test]
+    fn no_upstream_matrix_falls_back_to_catalog() {
+        let (efforts, source) = resolve_reasoning_matrix(
+            Vec::new(), None, cat("deepseek-v4.1-flash"));
+        assert_eq!(efforts, s(&["low", "high", "max"]));
+        assert_eq!(source, "catalog");
+    }
+
+    /// 上游没下发、覆盖表也没有 → 退回扁平 effort 字段。
+    #[test]
+    fn no_upstream_no_catalog_uses_flat_effort() {
+        let (efforts, source) = resolve_reasoning_matrix(
+            Vec::new(), Some("high"), None);
+        assert_eq!(efforts, s(&["high"]));
+        assert_eq!(source, "upstream");
+    }
+
+    /// 三处都空 → 空矩阵，不 panic。
+    #[test]
+    fn all_empty_yields_empty_matrix() {
+        let (efforts, source) = resolve_reasoning_matrix(Vec::new(), None, None);
+        assert!(efforts.is_empty());
+        assert_eq!(source, "upstream");
+    }
+
+    /// 覆盖表与官方实测矩阵逐项一致（防止 Rust 侧与测试注释漂移）。
+    #[test]
+    fn catalog_entries_are_present_and_shaped() {
+        for id in ["deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+                   "glm-5.3", "glm-5.3-flash", "glm-5.2",
+                   "hy3", "hy3-x", "hy4-preview"] {
+            let c = cat(id).unwrap_or_else(|| panic!("覆盖表缺少 {id}"));
+            assert!(!c.efforts.is_empty(), "{id} 档位为空");
+            assert!(c.efforts.contains(&c.default_effort),
+                "{id} 默认档 {} 不在档位列表里", c.default_effort);
+        }
+    }
+
+    /// onlyReasoning 的模型不得开放关闭思考。
+    #[test]
+    fn only_reasoning_models_deny_disable() {
+        for id in ["hy3", "hy3-x", "hy4-preview"] {
+            assert!(!cat(id).unwrap().can_disable_thinking,
+                "{id} 是 onlyReasoning 模型，不应允许关闭思考");
+        }
+    }
 }

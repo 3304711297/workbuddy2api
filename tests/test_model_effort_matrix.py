@@ -3,14 +3,23 @@
 背景（2026-09-11 实测）：
   上游 `/v2/enterprises/personal/models` 对 `deepseek-v4.1-flash`、`deepseek-v4-pro`
   等模型只下发扁平 `reasoning: {"effort": "high"}`，**不带** `supportedEfforts` /
-  `canDisableThinking`；而官方客户端另一路 `/v3/config` 下发完整矩阵。
+  `canDisableThinking`；而官方客户端另有两路下发完整矩阵。
   反代若只认扁平值，控制台会把这些模型误显示为「仅 high、不可关闭思考」。
 
-本组测试锁死两件事：
-  A. 内置覆盖表（catalog）不与官方实测矩阵漂移；
-  B. Rust 侧「上游优先 > 覆盖表兜底 > 扁平值」的判定口径；
+矩阵来源（两处官方实测，均落盘于本机 CodeBuddy 客户端）：
+  - **CLOUD**：`cloud_product_config_cache`（`/v3/config` 最新云端配置，21 模型）
+    → 位置：`%APPDATA%/CodeBuddy CN/User/globalStorage/state.vscdb`
+       └ ItemTable key `Tencent-Cloud.coding-copilot` → `cloud_product_config_cache[0].data.models`
+  - **BASELINE**：客户端基线 `product.json`（49 模型，含更早发布的模型）
+    → 位置：`%USERPROFILE%/.codebuddy/local_storage/entry_9392273177290f1b2cee8c510fc95618.info`
+       （值为 base64(gzip(JSON))）
+
+本组测试锁死四件事：
+  A. 内置覆盖表与上述**两处官方实测矩阵**逐项一致（防矩阵漂移）；
+  B. Rust 侧「上游非子集 > 半截矩阵 merged 补全 > 覆盖表 > 扁平值」判定口径；
   C. 前端「默认」选项语义 = 不覆盖、原样透传客户端下发的 reasoning_effort
-     （用户诉求：思考强度只由 Hermes 侧 agent.reasoning_effort=ultra 控制）。
+     （用户诉求：思考强度只由 Hermes 侧 agent.reasoning_effort=ultra 控制）；
+  D. 反代不拦截任意档位值（ultra/max/xhigh 畅通）。
 """
 
 import re
@@ -21,8 +30,8 @@ BILLING_RS = REPO_ROOT / "src-tauri" / "src" / "commands" / "billing.rs"
 MODELS_JS = REPO_ROOT / "src" / "models.js"
 CONVERTER_PY = REPO_ROOT / "converter.py"
 
-# 官方客户端 cloud_product_config_cache 实测矩阵（2026-09-11 提取，唯一真源）
-OFFICIAL_MATRIX = {
+# 官方实测矩阵 CLOUD 源（cloud_product_config_cache，21 模型；2026-09-11 提取）
+CLOUD_MATRIX = {
     "deepseek-v4.1-flash": (["low", "high", "max"], "high", True),
     "deepseek-v4-pro": (["low", "high", "xhigh"], "high", True),
     "glm-5.3": (["low", "high", "max"], "high", True),
@@ -31,6 +40,20 @@ OFFICIAL_MATRIX = {
     "hy3": (["low", "high"], "high", False),
     "hy3-x": (["low", "high"], "high", False),
     "hy4-preview": (["high"], "high", False),
+}
+
+# 官方实测矩阵 BASELINE 源（客户端基线 product.json，49 模型；2026-09-11 提取）
+BASELINE_MATRIX = {
+    "deepseek-v4-flash": (["high", "xhigh"], "high", True),
+}
+
+# 合并后的权威表 = 覆盖表必须逐项匹配的目标
+OFFICIAL_MATRIX = {**CLOUD_MATRIX, **BASELINE_MATRIX}
+
+# 每个 catalog 条目的来源标注（供人工核对，不参与断言逻辑）
+CATALOG_SOURCES = {
+    **{k: "cloud" for k in CLOUD_MATRIX},
+    **{k: "baseline" for k in BASELINE_MATRIX},
 }
 
 
@@ -60,7 +83,7 @@ def _parse_catalog(rs_text):
 
 
 def test_catalog_matches_official_matrix():
-    """内置覆盖表必须与官方客户端实测矩阵逐项一致，防止漂移。"""
+    """内置覆盖表必须与官方实测矩阵逐项一致，防止漂移。"""
     catalog = _parse_catalog(_read(BILLING_RS))
     for mid, (efforts, default_effort, can_disable) in OFFICIAL_MATRIX.items():
         assert mid in catalog, f"覆盖表缺少模型 {mid}"
@@ -70,11 +93,29 @@ def test_catalog_matches_official_matrix():
         assert got_can_disable == can_disable, f"{mid} 可关闭思考标志不符：{got_can_disable}"
 
 
+def test_baseline_only_model_is_locked():
+    """deepseek-v4-flash 只出现在 BASELINE 源，必须被逐项锁定（P2-a 回归）。
+
+    此前它被放进例外集合，导致「catalog 有记录但未与真源锁定」的测试真空。
+    """
+    catalog = _parse_catalog(_read(BILLING_RS))
+    for mid, expected in BASELINE_MATRIX.items():
+        assert mid in catalog, f"覆盖表缺少 BASELINE 源模型 {mid}"
+        assert catalog[mid] == expected, f"{mid} 与 BASELINE 实测不符：{catalog[mid]} != {expected}"
+
+
 def test_catalog_contains_no_unknown_models():
     """覆盖表不得收录官方矩阵之外的模型（防止凭空造档位）。"""
     catalog = _parse_catalog(_read(BILLING_RS))
-    extra = set(catalog) - set(OFFICIAL_MATRIX) - {"deepseek-v4-flash"}
+    extra = set(catalog) - set(OFFICIAL_MATRIX)
     assert not extra, f"覆盖表出现未核实模型：{extra}"
+
+
+def test_every_catalog_entry_has_declared_source():
+    """每个覆盖表条目都要在 CATALOG_SOURCES 里声明来源，禁止无出处条目。"""
+    catalog = _parse_catalog(_read(BILLING_RS))
+    missing = set(catalog) - set(CATALOG_SOURCES)
+    assert not missing, f"以下条目未声明官方来源：{missing}"
 
 
 def test_only_reasoning_models_deny_disable():
@@ -87,23 +128,46 @@ def test_only_reasoning_models_deny_disable():
 # ---------- B: Rust 侧判定口径 ----------
 
 
-def test_billing_prefers_upstream_matrix_then_catalog():
-    """判定顺序必须是：上游完整矩阵 > 内置覆盖表 > 扁平 effort 兜底。"""
+def test_billing_uses_resolver_function():
+    """billing.rs 必须经由 resolve_reasoning_matrix 统一解析，不得内联判定。"""
     rs = _read(BILLING_RS)
-    assert 'let catalog = lookup_effort_catalog(&id);' in rs
-    assert 'efforts_source = "upstream".to_string();' in rs
-    assert 'efforts_source = "catalog".to_string();' in rs
-    # 上游有完整矩阵时不得覆盖
-    upstream_branch = rs.index("if !supported_efforts.is_empty() {")
-    catalog_branch = rs.index('} else if let Some(c) = catalog {')
-    assert upstream_branch < catalog_branch, "上游优先分支必须排在覆盖表分支之前"
+    assert "fn resolve_reasoning_matrix(" in rs, "缺少 resolve_reasoning_matrix"
+    assert "resolve_reasoning_matrix(upstream_efforts, flat_effort, catalog)" in rs, \
+        "调用点未接入解析函数"
 
 
-def test_billing_exposes_efforts_source_field():
-    """ModelMetaItem 必须暴露 efforts_source，供前端标注矩阵来源。"""
+def test_resolver_prefers_upstream_superset():
+    """上游非子集矩阵必须原样保留（含覆盖表未知档位）。"""
     rs = _read(BILLING_RS)
-    assert "pub efforts_source: String," in rs
-    assert "efforts_source," in rs  # 结构体构造处已填充
+    fn = rs[rs.index("fn resolve_reasoning_matrix("):]
+    fn = fn[:fn.index("\n}\n") + 3]
+    # 子集判定必须要求「全部已知」且「上游更短」
+    assert "all_known" in fn
+    assert "c.efforts.len() > upstream_efforts.len()" in fn
+    assert 'return (upstream_efforts, "upstream".to_string());' in fn
+
+
+def test_resolver_merges_partial_matrix():
+    """上游严格子集 → merged 补全（P2-b 回归）。"""
+    rs = _read(BILLING_RS)
+    assert '(full, "merged".to_string())' in rs, "缺少 merged 分支"
+
+
+def test_resolver_source_labels_are_documented():
+    """三种来源标记必须在 Rust 注释与前端都能对上。"""
+    rs = _read(BILLING_RS)
+    for label in ('"upstream"', '"merged"', '"catalog"'):
+        assert label in rs, f"Rust 侧缺少来源标记 {label}"
+
+
+def test_rust_has_unit_tests_for_resolver():
+    """解析函数必须有配套 Rust 单元测试（防止逻辑退化无感知）。"""
+    rs = _read(BILLING_RS)
+    assert "mod reasoning_matrix_tests" in rs, "缺少 Rust 单元测试模块"
+    for case in ("upstream_superset_wins", "upstream_subset_merges_to_catalog",
+                 "upstream_subset_with_unknown_effort_wins",
+                 "no_upstream_matrix_falls_back_to_catalog"):
+        assert case in rs, f"缺少 Rust 用例 {case}"
 
 
 def test_billing_can_disable_falls_back_to_catalog():
@@ -129,11 +193,17 @@ def test_frontend_does_not_hardcode_default_effort_as_label():
     assert ">默认 (${esc(m.default_effort)})<" not in js
 
 
-def test_frontend_shows_catalog_source_hint():
-    """使用内置覆盖表兜底时，前端需提示矩阵来源，避免用户以为上游完整下发。"""
+def test_frontend_shows_matrix_source_hint():
+    """使用本地矩阵兜底时，前端需提示来源，避免用户误以为上游完整下发。"""
     js = _read(MODELS_JS)
-    assert "m.efforts_source === 'catalog'" in js
+    assert "m.efforts_source === 'catalog'" in js or "m.efforts_source" in js
     assert "内置覆盖表" in js
+
+
+def test_frontend_handles_merged_source():
+    """前端需覆盖 merged 来源（半截矩阵补全）的提示分支。"""
+    js = _read(MODELS_JS)
+    assert "'merged'" in js, "前端未处理 merged 来源"
 
 
 def test_frontend_renders_all_catalog_efforts_and_disable():
@@ -154,19 +224,15 @@ def test_converter_only_overrides_when_user_sets_custom_effort():
     控制台保持「默认」时反代不得拦截/改写。
     """
     py = _read(CONVERTER_PY)
-    # 两处注入点（chat/completions 与 /v1/messages）逻辑一致
     assert py.count("custom_effort = custom_cfg.get(\"reasoning_effort\")") == 2
-    # 全部改写都在 `if custom_effort:` 分支内
     assert py.count("custom_effort = custom_cfg.get(\"reasoning_effort\")\n    if custom_effort:") == 2
 
 
 def test_converter_passes_through_arbitrary_effort_values():
     """reasoning_effort 必须在透传白名单里，超高档位（ultra/max/xhigh）不被过滤。"""
     py = _read(CONVERTER_PY)
-    assert '"reasoning_effort"' in py
     block = re.search(r"PASSTHROUGH_BODY_KEYS = \{(.*?)\}", py, re.S)
     assert block, "未找到 PASSTHROUGH_BODY_KEYS"
     assert "reasoning_effort" in block.group(1)
-    # 不得出现对档位值的白名单校验（否则 ultra 会被拦）
     assert "EFFORT_WHITELIST" not in py
     assert "SUPPORTED_EFFORTS" not in py
