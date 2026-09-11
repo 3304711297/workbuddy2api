@@ -26,6 +26,41 @@ pub struct ModelMetaItem {
     // 用户自定义覆盖项
     pub custom_context_window: Option<i64>,
     pub custom_reasoning_effort: Option<String>,
+    // 档位矩阵来源：upstream=上游下发 / catalog=内置覆盖表兜底
+    pub efforts_source: String,
+}
+
+/// 已知模型的完整思考档位矩阵（兜底覆盖表）。
+///
+/// **为什么需要**：上游 `/v2/enterprises/personal/models` 对部分模型只下发扁平
+/// `reasoning: {"effort": "high"}`（无 `supportedEfforts` / `canDisableThinking`），
+/// 而官方客户端另一路 `/v3/config` 下发的是完整矩阵。若只按上游扁平值渲染，
+/// 控制台会把 `deepseek-v4.1-flash` 等模型误显示为「仅 high、不可关闭思考」。
+///
+/// **口径**：上游给了完整 `supportedEfforts` 就以上游为准（`efforts_source=upstream`）；
+/// 只有缺失时才落到本表（`catalog=catalog`）。本表由 2026-09-11 官方客户端
+/// `cloud_product_config_cache` 实测提取，仅作缺失时兜底，不做强制覆盖。
+struct EffortCatalog {
+    id: &'static str,
+    efforts: &'static [&'static str],
+    default_effort: &'static str,
+    can_disable_thinking: bool,
+}
+
+const EFFORT_CATALOG: &[EffortCatalog] = &[
+    EffortCatalog { id: "deepseek-v4.1-flash", efforts: &["low", "high", "max"], default_effort: "high", can_disable_thinking: true },
+    EffortCatalog { id: "deepseek-v4-pro", efforts: &["low", "high", "xhigh"], default_effort: "high", can_disable_thinking: true },
+    EffortCatalog { id: "deepseek-v4-flash", efforts: &["high", "xhigh"], default_effort: "high", can_disable_thinking: true },
+    EffortCatalog { id: "glm-5.3", efforts: &["low", "high", "max"], default_effort: "high", can_disable_thinking: true },
+    EffortCatalog { id: "glm-5.3-flash", efforts: &["low", "high", "max"], default_effort: "high", can_disable_thinking: true },
+    EffortCatalog { id: "glm-5.2", efforts: &["high", "xhigh"], default_effort: "high", can_disable_thinking: true },
+    EffortCatalog { id: "hy3", efforts: &["low", "high"], default_effort: "high", can_disable_thinking: false },
+    EffortCatalog { id: "hy3-x", efforts: &["low", "high"], default_effort: "high", can_disable_thinking: false },
+    EffortCatalog { id: "hy4-preview", efforts: &["high"], default_effort: "high", can_disable_thinking: false },
+];
+
+fn lookup_effort_catalog(model_id: &str) -> Option<&'static EffortCatalog> {
+    EFFORT_CATALOG.iter().find(|c| c.id == model_id)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -119,8 +154,17 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
 
         let reasoning_obj = m.get("reasoning");
         let supports_reasoning = m.get("supportsReasoning").and_then(|v| v.as_bool()).unwrap_or(false);
-        let can_disable_thinking = reasoning_obj.and_then(|r| r.get("canDisableThinking")).and_then(|v| v.as_bool())
-            .unwrap_or_else(|| !m.get("onlyReasoning").and_then(|v| v.as_bool()).unwrap_or(false));
+        let catalog = lookup_effort_catalog(&id);
+
+        // 上游显式下发的 canDisableThinking 优先；缺失时先看内置覆盖表，再退回 onlyReasoning 推断
+        let upstream_can_disable = reasoning_obj
+            .and_then(|r| r.get("canDisableThinking"))
+            .and_then(|v| v.as_bool());
+        let can_disable_thinking = upstream_can_disable.unwrap_or_else(|| {
+            catalog
+                .map(|c| c.can_disable_thinking)
+                .unwrap_or_else(|| !m.get("onlyReasoning").and_then(|v| v.as_bool()).unwrap_or(false))
+        });
 
         let mut supported_efforts = Vec::new();
         if let Some(arr) = reasoning_obj.and_then(|r| r.get("supportedEfforts")).and_then(|v| v.as_array()) {
@@ -130,16 +174,27 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
                 }
             }
         }
-        if supported_efforts.is_empty() {
+
+        // 档位矩阵来源判定：上游完整下发 > 内置覆盖表 > 扁平 effort 字段兜底
+        let efforts_source: String;
+        if !supported_efforts.is_empty() {
+            efforts_source = "upstream".to_string();
+        } else if let Some(c) = catalog {
+            supported_efforts = c.efforts.iter().map(|s| s.to_string()).collect();
+            efforts_source = "catalog".to_string();
+        } else {
             if let Some(ef) = reasoning_obj.and_then(|r| r.get("effort")).and_then(|v| v.as_str()) {
                 supported_efforts.push(ef.to_string());
             }
+            efforts_source = "upstream".to_string();
         }
+
         let default_effort = reasoning_obj.and_then(|r| r.get("defaultEffort"))
             .or_else(|| reasoning_obj.and_then(|r| r.get("effort")))
             .and_then(|v| v.as_str())
-            .unwrap_or("auto")
-            .to_string();
+            .map(|s| s.to_string())
+            .or_else(|| catalog.map(|c| c.default_effort.to_string()))
+            .unwrap_or_else(|| "auto".to_string());
 
         let desc = m.get("descriptionZh").and_then(|v| v.as_str())
             .or_else(|| m.get("descriptionEn").and_then(|v| v.as_str()))
@@ -179,6 +234,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             tags,
             custom_context_window: custom_ctx,
             custom_reasoning_effort: custom_effort,
+            efforts_source,
         });
     }
 

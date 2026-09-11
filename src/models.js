@@ -49,13 +49,14 @@ function renderModelsTable(list) {
     const creditsBadge = formatMultiplier(m.credits);
 
     // 思考强度：行内只读展示，点击弹出编辑弹窗
+    // 「默认」= 不覆盖，原样透传客户端（Hermes agent.reasoning_effort）下发的值
     const effortText = !m.supports_reasoning
       ? ''
       : m.custom_reasoning_effort === 'disable'
         ? '已关闭思考'
         : (m.custom_reasoning_effort && m.custom_reasoning_effort !== 'default')
           ? `强度: ${m.custom_reasoning_effort}`
-          : `默认 (${m.default_effort})`;
+          : `默认 (跟随客户端)`;
     const effortCell = m.supports_reasoning
       ? `<button class="cell-edit" id="effort-cell-${esc(m.id)}" data-edit-model="${esc(m.id)}" title="点击修改思考强度">${esc(effortText)}</button>`
       : '<span class="muted" style="font-size: 11px;">不支持思考</span>';
@@ -159,17 +160,21 @@ window.openModelEdit = (modelId) => {
     </div>`;
   if (m.supports_reasoning) {
     const currentEffort = m.custom_reasoning_effort || 'default';
-    const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认 (${esc(m.default_effort)})</option>`];
+    const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认（跟随客户端下发值）</option>`];
     for (const ef of m.supported_efforts) {
       options.push(`<option value="${esc(ef)}" ${currentEffort === ef ? 'selected' : ''}>强度: ${esc(ef)}</option>`);
     }
     if (m.can_disable_thinking) {
       options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
     }
+    const sourceHint = m.efforts_source === 'catalog'
+      ? '（档位矩阵来自内置覆盖表，上游此接口未下发完整档位）'
+      : '';
     html += `
       <div class="zguide-field" style="margin-top: 12px;">
-        <span class="zguide-label">思考强度 (Reasoning)</span>
+        <span class="zguide-label">思考强度 (Reasoning) ${esc(sourceHint)}</span>
         <select class="input mono" style="width: 100%;" id="effort-${esc(modelId)}">${options.join('')}</select>
+        <p class="muted" style="font-size: 11px; margin-top: 6px;">默认档位 = 不覆盖，原样透传客户端（如 Hermes 的 reasoning_effort）下发的值；模型默认档为 <code>${esc(m.default_effort)}</code>。</p>
       </div>`;
   } else {
     html += '<p class="muted" style="font-size: 12px; margin-top: 12px;">该模型不支持思考强度调节</p>';
