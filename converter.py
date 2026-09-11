@@ -337,6 +337,11 @@ class CredentialManager:
                 self._refresh()
             return self._session()
 
+    def peek_active_session(self) -> dict:
+        """只读查看当前活跃会话字典，不触发被动同步网络刷新。"""
+        with self._lock:
+            return self._session()
+
     def _is_expired(self) -> bool:
         s = self._session()
         expires_at = (s.get("auth") or {}).get("expiresAt") or 0
@@ -674,7 +679,7 @@ PASSTHROUGH_BODY_KEYS = {
     "max_tokens", "max_completion_tokens", "top_p", "stream",
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort",
-    "verbosity", "reasoning_summary",
+    "verbosity", "reasoning_summary", "chat_template_kwargs",
 }
 
 # ---------------------------------------------------------------------------

@@ -330,6 +330,46 @@ class TestTranslateAnthropicRequest:
         assert res["stop"] == ["STOP", "END"]
         assert res["stream"] is True
 
+    def test_thinking_configuration_translation(self):
+        # 1. enabled with low budget
+        b1 = {
+            "model": "claude-3-7-sonnet-20250219",
+            "messages": [{"role": "user", "content": "solve this"}],
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+        }
+        r1 = translate_anthropic_request(b1)
+        assert r1["chat_template_kwargs"] == {"enable_thinking": True}
+        assert r1["reasoning_effort"] == "low"
+        assert r1["thinking_budget"] == 1024
+
+        # 2. enabled with medium budget
+        b2 = {
+            "model": "claude-3-7-sonnet-20250219",
+            "messages": [{"role": "user", "content": "solve this"}],
+            "thinking": {"type": "enabled", "budget_tokens": 3000},
+        }
+        r2 = translate_anthropic_request(b2)
+        assert r2["reasoning_effort"] == "medium"
+
+        # 3. enabled with high budget
+        b3 = {
+            "model": "claude-3-7-sonnet-20250219",
+            "messages": [{"role": "user", "content": "solve this"}],
+            "thinking": {"type": "enabled", "budget_tokens": 8000},
+        }
+        r3 = translate_anthropic_request(b3)
+        assert r3["reasoning_effort"] == "high"
+
+        # 4. disabled
+        b4 = {
+            "model": "claude-3-7-sonnet-20250219",
+            "messages": [{"role": "user", "content": "solve this"}],
+            "thinking": {"type": "disabled"},
+        }
+        r4 = translate_anthropic_request(b4)
+        assert r4["chat_template_kwargs"] == {"enable_thinking": False}
+        assert r4["reasoning_effort"] == "disable"
+
 
 # ============================================================================
 # 2. Response Translation Tests

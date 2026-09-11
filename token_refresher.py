@@ -81,12 +81,23 @@ class BackgroundTokenRefresher:
             if self._get_session_callback is not None:
                 return self._get_session_callback()
             if self._credential_manager is not None:
+                # 优先尝试只读查看（避免触发同步网络刷新）
+                if hasattr(self._credential_manager, "peek_active_session"):
+                    sess = self._credential_manager.peek_active_session()
+                    if isinstance(sess, dict):
+                        return sess
                 if hasattr(self._credential_manager, "get_active_session"):
-                    return self._credential_manager.get_active_session()
-                elif hasattr(self._credential_manager, "_session"):
-                    return self._credential_manager._session()
-                elif callable(self._credential_manager):
-                    return self._credential_manager()
+                    sess = self._credential_manager.get_active_session()
+                    if isinstance(sess, dict):
+                        return sess
+                if hasattr(self._credential_manager, "_session"):
+                    sess = self._credential_manager._session()
+                    if isinstance(sess, dict):
+                        return sess
+                if callable(self._credential_manager):
+                    sess = self._credential_manager()
+                    if isinstance(sess, dict):
+                        return sess
         except Exception as e:
             self.logger.warning("Failed to retrieve active session: %s", e)
         return None

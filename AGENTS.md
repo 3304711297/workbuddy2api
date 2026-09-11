@@ -129,7 +129,7 @@ codebuddy2openai.exe (GUI)
 ## 7. 已知待办（未实现，别重复造）
 
 - **今日用量与夜间限免窗口（A2/A3/B1/C1/C2 已完成，2026-09-11 交付）**：
-  已在 `converter.py`、`src/accounts.js`、`token-stats` 插件落地：自然日（UTC+8）今日用量（`reqsToday`/`tokensToday`/`err429_today`）优先展示，兼容 5h/24h；动态感知 `23:00–08:00` 免费时段并打上「🌙 夜间限免中」徽章。提交 `83ef9e2` / `894f500`。
+  已在 `converter.py`、`src/accounts.js`、`token-stats` 插件落地：自然日（UTC+8）今日用量（`reqsToday`/`tokensToday`/`err429_today`）优先展示，兼容 5h/24h；动态感知 `23:00–08:00` 免费时段并打上「🌙 夜间限免中」徽章。提交 `83ef9e2`（c2o 仓） / `894f500`（hermes 仓 hermes 分支）。
 - **凭证轮换（P1，已拍板延后至多账号就绪）**：
   当前单账号（`accounts.json` 只有 1 个账号）下 N=1，轮换等于原地不动，故暂不实现。
   token 续期已由 `converter.py:377` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /

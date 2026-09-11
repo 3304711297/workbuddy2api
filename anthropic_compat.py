@@ -337,6 +337,28 @@ def translate_anthropic_request(body: dict) -> dict:
     if "stop_sequences" in body and body["stop_sequences"]:
         openai_req["stop"] = body["stop_sequences"]
 
+    # Thinking / Extended Reasoning 参数贯通
+    if "thinking" in body and isinstance(body["thinking"], dict):
+        th = body["thinking"]
+        th_type = th.get("type")
+        if th_type == "disabled":
+            openai_req["reasoning_effort"] = "disable"
+            openai_req["chat_template_kwargs"] = {"enable_thinking": False}
+        elif th_type == "enabled":
+            budget = th.get("budget_tokens")
+            openai_req["chat_template_kwargs"] = {"enable_thinking": True}
+            if budget is not None and isinstance(budget, (int, float)):
+                b_int = int(budget)
+                openai_req["thinking_budget"] = b_int
+                if b_int <= 1024:
+                    openai_req["reasoning_effort"] = "low"
+                elif b_int <= 4096:
+                    openai_req["reasoning_effort"] = "medium"
+                else:
+                    openai_req["reasoning_effort"] = "high"
+            else:
+                openai_req["reasoning_effort"] = "high"
+
     # Stream flag
     openai_req["stream"] = bool(body.get("stream", False))
 

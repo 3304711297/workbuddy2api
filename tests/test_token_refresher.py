@@ -146,6 +146,33 @@ def test_credential_manager_duck_typing():
     asyncio.run(_run())
 
 
+def test_credential_manager_peek_precedence_over_get_active():
+    async def _run():
+        now = time.time()
+        mock_cm = MagicMock()
+        mock_cm.peek_active_session.return_value = {
+            "auth": {
+                "accessToken": "peek_token",
+                "expiresAt": int((now + 500) * 1000),
+            }
+        }
+        mock_cm.get_active_session = MagicMock()
+        mock_cm._refresh = MagicMock()
+
+        refresher = BackgroundTokenRefresher(
+            credential_manager=mock_cm,
+            threshold_seconds=1800.0,
+        )
+
+        res = await refresher.check_and_refresh()
+        assert res is True
+        mock_cm.peek_active_session.assert_called()
+        mock_cm.get_active_session.assert_not_called()
+        mock_cm._refresh.assert_called_once()
+
+    asyncio.run(_run())
+
+
 def test_credential_manager_plain_sync_class():
     async def _run():
         now = time.time()
