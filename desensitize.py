@@ -106,7 +106,9 @@ _ATTRIBUTION_HEADER_PREFIX = "x-anthropic-billing-header:"
 
 
 def _rewrite_known_fingerprints(text: str) -> str:
-    """将已确认的客户端身份指纹改成中性文本，并移除署名首行。"""
+    """将已确认的客户端身份指纹改成中性文本，并移除署名首行。
+    （精确指纹改写思路借鉴自 IceeAn/codebuddy2api，MIT 许可）
+    """
     text = text.replace(_CLAUDE_CODE_IDENTITY, _NEUTRAL_CLI_IDENTITY)
     text = text.replace(_CLAUDE_CODE_IDENTITY_PREFIX, _NEUTRAL_CLI_IDENTITY)
     text = text.replace(_MAIN_BRANCH_FINGERPRINT, "Main branch:")

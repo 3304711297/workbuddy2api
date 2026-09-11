@@ -35,7 +35,23 @@
   | 脱敏词表品牌词扩张（Claude / Anthropic / OpenAI / Gemini / Kimi / Qwen / Cursor / OpenCode / agent-identity 等） | `desensitize.py` → `SENSITIVE_TERMS` | 竞争品牌词实测触发上游 11128 审核拦截 |
   | 脱敏角色覆盖扩张：`(system,)` → `(system, assistant)` | `converter.py` → `chat_completions` 内 `desensitize_body(...)` 调用点 | assistant 历史回复实测同样触发审核拦截 |
 
-## 3. 上游端点逆向成果的参考
+## 3. IceeAn/codebuddy2api
+
+- **上游仓库**：<https://github.com/IceeAn/codebuddy2api>
+- **许可证**：MIT License（当前代码树自 `bce86ded` 起由维护者独立重写并以 MIT 开源）
+- **版权声明**：
+  ```
+  Copyright (c) 2026 An! / IceeAn contributors
+  ```
+- **借鉴内容与落点**：
+  | 借鉴项 | 移植到本仓库的位置 | 说明 |
+  | --- | --- | --- |
+  | Claude 客户端指纹脱敏与短语改写策略（对已知客户端标识特征句做精确中性替换，消除 `x-anthropic-billing-header:` 等触发源） | `desensitize.py` → `_rewrite_known_fingerprints()` / `desensitize_body()` | 借鉴其对客户端已知特征串做精确替换的思路，彻底解决 Claude Code 等 CLI 工具上游 11128 策略误拦截；本仓库独立实现了两层脱敏结构 |
+  | 凭证生命周期与多账号轮换调度思路（待多账号就绪后按需实施） | `AGENTS.md` / `converter.py`（P1 架构储备） | 参考其令牌管理与多账号平滑轮换的设计思路 |
+- **合规边界说明**：
+  上游原始项目 `xueyue33/codebuddy2api` 无任何开源许可证（All rights reserved）。依照开源合规红线，本仓库严禁搬运任何原始上游未授权代码，仅从 IceeAn 独立重写后的 MIT 当前树借鉴思路与脱敏策略，并在此集中保留致谢与许可声明。
+
+## 4. 上游端点逆向成果的参考
 
 - **每日签到链路**：`POST /v2/billing/meter/checkin-activity-status` 与 `POST /v2/billing/meter/daily-checkin` 的接口形态、业务码语义（1001=今日已领 / 1002=无资格 / 1003=活动已结束）参考了上述两仓库对 WorkBuddy 桌面端的逆向分析结论。本仓库按自身定位实现为 **GUI 手动按钮触发**（`/api/checkin/status`、`/api/checkin/claim`），不包含上游的自动定时签到逻辑。
 
