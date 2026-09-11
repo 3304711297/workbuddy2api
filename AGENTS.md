@@ -88,6 +88,23 @@ workbuddy2api.exe (GUI)
   请求体，客户端（如 Hermes `agent.reasoning_effort=ultra`）下发什么就发什么。
   用户明确要求思考强度只由 Hermes 侧控制，**禁止**在反代加档位值白名单/翻译层，
   也禁止把「默认」渲染成某个具体档位（如 `默认 (high)`）。
+- **`AppConfig` 整对象覆盖写盘（两条铁律，改设置相关代码前必读）**：
+  Rust 的 `save_app_settings` 收到的是**完整 AppConfig 对象**，缺失字段被
+  `#[serde(default)]` 填默认值后**整体覆盖写盘**。由此产生两个已踩过的坑：
+
+  1. **前端 payload 必须带全字段**：`src/settings.js` 的 `buildSettingsPayload()`
+     若漏掉某个字段，用户在设置页的任何操作都会把那个字段抹回默认值
+     （实际发生过：`rotate_mode/rotate_count` 被静默抹回 `off`）。
+     新增 AppConfig 字段时，**必须同步三处**：`lib.rs` 结构体、`settings.js` 的
+     payload、`accounts.js` 里各自负责写该字段的保存函数。
+     `tests/test_settings_payload_contract.test.js` 会从 Rust 结构体反射提取字段全集
+     做断言，漏了会红。
+  2. **禁止在 `change` 事件里调用「读盘 + 回写控件」的函数**：`accounts.js` 的
+     `syncRotationPolicyCard()` 会读磁盘并强制回写 `select.value`；若挂在 change 上，
+     用户刚选中的值会被立刻改回旧值（表现为「闪一下就跳回原样」，且保存按钮根本
+     没机会点）。已拆分为纯渲染的 `renderRotationPolicyUI()`（change 专用）与
+     读盘的 `syncRotationPolicyCard()`（仅初始化/保存后回读用）。
+     **改动交互控件时，先确认回调是纯渲染还是带副作用。**
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
 - **并发削峰平滑器 (`request_pacer.py`)**：
@@ -150,24 +167,19 @@ workbuddy2api.exe (GUI)
 
 ## 7. 已知待办（未实现，别重复造）
 
+- **多账号调度（已交付，2026-09-11）**：
+  `AccountRotator`（converter.py）支持三模式 `off`（默认）/ `failover`（429/6004 自动切号重试）/
+  `roundrobin`（按请求数轮询）；账号级冷却 `_ACCOUNT_COOLDOWNS[(uid, model)]`；
+  切号原子写 `active_uid`，外部凭 mtime 感知无需重启；CLI 参数 `--rotate-mode` / `--rotate-count`。
+  GUI 策略卡在「账号与资产」页，配置存 `settings.json`，`proxy_start` 仅在非 off 时透传给内核。
+  ⚠️ 改这块先读第 4 节「AppConfig 整对象覆盖写盘」两条铁律。
 - **今日用量与夜间限免窗口（A2/A3/B1/C1/C2 已完成，2026-09-11 交付）**：
   已在 `converter.py`、`src/accounts.js`、`token-stats` 插件落地：自然日（UTC+8）今日用量（`reqsToday`/`tokensToday`/`err429_today`）优先展示，兼容 5h/24h；动态感知 `23:00–08:00` 免费时段并打上「🌙 夜间限免中」徽章。提交 `83ef9e2`（c2o 仓） / `894f500`（hermes 仓 hermes 分支）。
-- **凭证轮换（P1，已拍板延后至多账号就绪）**：
-  当前单账号（`accounts.json` 只有 1 个账号）下 N=1，轮换等于原地不动，故暂不实现。
-  token 续期已由 `converter.py:377` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /
-  `refreshExpiresIn` 90 天），单账号场景无缺口。
-
-  **触发条件**：`accounts.json` 里 `accounts` 字典 ≥2 个账号时启动实施。
-
-  **实施要点（已确认，勿重复调研）**：
-  - 账号结构 `{"active_uid": uid, "accounts": {uid: {auth, account}}}`；
-    取活跃会话走 `_load_active_session(cfg) -> (uid, session)`（`converter.py:149`）。
-  - 切换即改 `active_uid`（`CredentialManager._load_if_stale()` 已按 mtime 感知外部切换，
-    改文件即可被下一次调用读到，无需重启）。
-  - 轮换时机：上游 429 / code 6004 冷却时切下一个账号（冷却状态现成，
-    `_RATE_LIMIT_STATE` + `/api/rate_limit`）。
-  - **必须 opt-in 且默认关闭**（`--rotate N` 之类），纯手动触发——
-    09-08 用户已裁定：不接受任何定时/自动的上游交互。
-  - 参考实现见 `IceeAn/codebuddy2api`（MIT，看门条目 `c2api-upstream-iceean`）；
-    只借思路不搬文件，取代码须出自其当前树并署名（合规红线见第 5 节）。
+- **凭证轮换（P1，**已交付** 2026-09-11，见上方「多账号调度」条目）**：
+  多账号就位后按既定要点实施完毕（`AccountRotator` + GUI 策略卡）。
+  token 续期由 `converter.py` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /
+  `refreshExpiresIn` 90 天）；激活的账号在 `_refresh_session_tokens()` 中按 uid 定向续期。
+  设计约束（仍然有效）：**必须 opt-in 且默认关闭**，不做定时/自动的上游交互
+  （09-08 用户裁定）；参考 `IceeAn/codebuddy2api`（MIT，看门条目 `c2api-upstream-iceean`），
+  只借思路不搬文件，取代码须出自其当前树并署名（合规红线见第 5 节）。
 
