@@ -143,26 +143,45 @@ def auth_dirs() -> list[Path]:
 
 
 def _accounts_file() -> Path:
-    """accounts.json 路径，与桌面端 Rust local_app_dir() 同源（调用时读环境变量，便于测试）。"""
+    """accounts.json 路径，与桌面端 Rust local_app_dir() 同源（优先 workbuddy2api，回退兼容 codebuddy2openai）。"""
     base = os.environ.get("LOCALAPPDATA")
     if base:
-        return Path(base) / "codebuddy2openai" / "accounts.json"
+        wb = Path(base) / "workbuddy2api" / "accounts.json"
+        if wb.is_file():
+            return wb
+        cb = Path(base) / "codebuddy2openai" / "accounts.json"
+        if cb.is_file():
+            return cb
+        return wb
+
     if sys.platform == "win32":
-        return Path.home() / "AppData" / "Local" / "codebuddy2openai" / "accounts.json"
+        home_local = Path.home() / "AppData" / "Local"
+        wb = home_local / "workbuddy2api" / "accounts.json"
+        if wb.is_file():
+            return wb
+        cb = home_local / "codebuddy2openai" / "accounts.json"
+        if cb.is_file():
+            return cb
+        return wb
 
     # Linux / WSL
-    local_acc = Path.home() / ".local" / "share" / "codebuddy2openai" / "accounts.json"
-    if local_acc.is_file():
-        return local_acc
+    local_wb = Path.home() / ".local" / "share" / "workbuddy2api" / "accounts.json"
+    local_cb = Path.home() / ".local" / "share" / "codebuddy2openai" / "accounts.json"
+    if local_wb.is_file():
+        return local_wb
+    if local_cb.is_file():
+        return local_cb
 
-    # WSL 穿透：读取 Windows 宿主已保存的桌面端多账号状态
     if _is_wsl() or CONFIG.get("wsl"):
         for win_local in _wsl_win_local_appdata():
-            candidate = win_local / "codebuddy2openai" / "accounts.json"
-            if candidate.is_file():
-                return candidate
+            wb = win_local / "workbuddy2api" / "accounts.json"
+            if wb.is_file():
+                return wb
+            cb = win_local / "codebuddy2openai" / "accounts.json"
+            if cb.is_file():
+                return cb
 
-    return local_acc
+    return local_wb
 
 
 def _load_active_session(cfg: dict) -> tuple[str, dict]:
@@ -471,11 +490,17 @@ class CredentialManager:
 # ---------------------------------------------------------------------------
 
 def _model_settings_file() -> str:
-    # %LOCALAPPDATA% 优先，缺省时从用户主目录派生（避免硬编码具体用户路径）
+    # %LOCALAPPDATA% 优先，缺省时从用户主目录派生。优先 workbuddy2api，若无且 codebuddy2openai 存在则回退
     base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-    d = os.path.join(base, "codebuddy2openai")
+    wb_file = os.path.join(base, "workbuddy2api", "model_settings.json")
+    if os.path.exists(wb_file):
+        return wb_file
+    cb_file = os.path.join(base, "codebuddy2openai", "model_settings.json")
+    if os.path.exists(cb_file):
+        return cb_file
+    d = os.path.join(base, "workbuddy2api")
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "model_settings.json")
+    return wb_file
 
 
 def _load_model_settings() -> dict:
@@ -773,7 +798,7 @@ async def lifespan(app: FastAPI):
         _log("后台主动令牌续期任务已停止")
 
 
-app = FastAPI(title="codebuddy2openai", version="2.0", lifespan=lifespan)
+app = FastAPI(title="workbuddy2api", version="2.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------

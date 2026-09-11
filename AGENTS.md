@@ -1,4 +1,4 @@
-# AGENTS.md — codebuddy2openai 维护协议
+# AGENTS.md — workbuddy2api 维护协议
 
 给 AI Agent（与未来的自己）看的仓库操作手册。改这个仓库前先读这里，能少踩几个坑。
 
@@ -43,7 +43,7 @@ npm run build && cd src-tauri && cargo tauri build --no-bundle
 进程链长这样，别误杀：
 
 ```
-codebuddy2openai.exe (GUI)
+workbuddy2api.exe (GUI)
   └─ python.exe
        └─ converter.py --desensitize --usage-log   ← 8787 监听
 ```
@@ -131,8 +131,7 @@ codebuddy2openai.exe (GUI)
 
 ## 5. 外部依赖与合规红线
 
-- **凭据来源**：优先读 `%LOCALAPPDATA%/codebuddy2openai/accounts.json`（桌面端维护，
-  含 `active_uid` + `accounts` 字典），回退到 legacy `.info` 文件。
+- **凭据来源**：优先读 `%LOCALAPPDATA%/workbuddy2api/accounts.json`（回退兼容 `%LOCALAPPDATA%/codebuddy2openai/accounts.json`，含 `active_uid` + `accounts` 字典），回退到 legacy `.info` 文件。
 - **Turing Shield SDK**（`X-Device-Token`）：只扫描 `%LOCALAPPDATA%`/`%APPDATA%`/
   `%ProgramFiles%`/`%USERPROFILE%` 下的 WorkBuddy 安装目录，**各磁盘根目录默认不扫**
   （防伪造 SDK 导致本地代码执行）。用户可用 `WORKBUDDY_TURING_SDK_DIR` 显式指定。

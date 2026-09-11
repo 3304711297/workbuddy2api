@@ -1,7 +1,7 @@
 [package]
-name = "codebuddy2openai"
+name = "workbuddy2api"
 version = "0.2.1"
-description = "CodeBuddy2OpenAI 桌面控制台 — 独立登录/账号管理/反代托管，无需 WorkBuddy 桌面端"
+description = "WorkBuddy2API 桌面控制台 — 独立登录/账号管理/反代托管，无需 WorkBuddy 桌面端"
 edition = "2021"
 
 [build-dependencies]

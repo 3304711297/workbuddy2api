@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    codebuddy2openai::run_app();
+    workbuddy2api::run_app();
 }

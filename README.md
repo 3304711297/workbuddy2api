@@ -120,7 +120,7 @@ flowchart TD
 
 双击桌面生成的 **`WorkBuddy2API`** 快捷方式，或直接运行编译产物：
 ```bash
-src-tauri/target/release/codebuddy2openai.exe
+src-tauri/target/release/workbuddy2api.exe
 ```
 
 1. **授权登录**：进入「授权新账号」页面，点击开始授权，浏览器将自动唤起腾讯登录页，完成授权后客户端自动保存凭据并切到账号面板。

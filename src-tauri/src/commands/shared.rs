@@ -68,7 +68,22 @@ pub(super) fn user_home() -> PathBuf {
 }
 
 pub(crate) fn local_app_dir() -> PathBuf {
-    let p = local_appdata().join("codebuddy2openai");
+    let p = local_appdata().join("workbuddy2api");
+    if !p.exists() {
+        let legacy = local_appdata().join("codebuddy2openai");
+        if legacy.exists() {
+            let _ = std::fs::create_dir_all(&p);
+            if let Ok(entries) = std::fs::read_dir(&legacy) {
+                for entry in entries.flatten() {
+                    let dest = p.join(entry.file_name());
+                    if !dest.exists() {
+                        let _ = std::fs::copy(entry.path(), dest);
+                    }
+                }
+            }
+            return p;
+        }
+    }
     let _ = std::fs::create_dir_all(&p);
     p
 }

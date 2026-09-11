@@ -12,7 +12,8 @@ import { checkHealth } from './service.js';
 // index.html <head> 内联脚本已在 DOM 渲染前设置 dataset.theme 防闪烁，
 // 此处负责读取当前值、同步按钮选中态，并把原生窗口底色与主题对齐。
 // ---------------------------------------------------------------------------
-const THEME_STORAGE_KEY = 'codebuddy2openai.theme';
+const THEME_STORAGE_KEY = 'workbuddy2api.theme';
+const LEGACY_THEME_STORAGE_KEY = 'codebuddy2openai.theme';
 
 // 各主题对应的原生窗口底色（与 CSS --bg-app 保持一致，防原生窗口闪白/闪黑）
 const THEME_NATIVE_BG = {
@@ -48,7 +49,7 @@ function applyTheme(theme, persist = false) {
 
 export function initTheme() {
   let saved = null;
-  try { saved = localStorage.getItem(THEME_STORAGE_KEY); } catch (e) { /* 忽略 */ }
+  try { saved = localStorage.getItem(THEME_STORAGE_KEY) || localStorage.getItem(LEGACY_THEME_STORAGE_KEY); } catch (e) { /* 忽略 */ }
   const prefersLight = window.matchMedia?.('(prefers-color-scheme: light)')?.matches;
   const initial = (saved === 'light' || saved === 'dark') ? saved : (prefersLight ? 'light' : 'dark');
   applyTheme(initial, false); // 初始不写入 localStorage，保留“跟随系统”语义

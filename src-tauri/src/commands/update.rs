@@ -33,12 +33,12 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-const RELEASE_API: &str = "https://api.github.com/repos/3304711297/codebuddy2openai/releases/latest";
+const RELEASE_API: &str = "https://api.github.com/repos/3304711297/workbuddy2api/releases/latest";
 
 /// 拉取最新 release 元数据；proxy 传 Some 时走显式代理
 async fn fetch_latest_release(proxy: Option<&str>) -> Result<serde_json::Value, String> {
     let mut builder = reqwest::Client::builder()
-        .user_agent("codebuddy2openai-gui")
+        .user_agent("workbuddy2api-gui")
         .timeout(Duration::from_secs(10));
     match proxy {
         // 显式指定代理（回退路径）：正常吃该代理
