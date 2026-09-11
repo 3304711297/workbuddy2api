@@ -362,10 +362,25 @@
             <table class="data-table models-table">
               <thead>
                 <tr>
-                  <th>模型</th>
-                  <th>计费倍率</th>
+                  <th id="th-sort-model" class="sortable-th" title="点击按模型首字母排序">
+                    <span style="display: inline-flex; align-items: center;">
+                      模型 <span id="sort-icon-model" class="sort-indicator">↕</span>
+                    </span>
+                  </th>
+                  <th id="th-sort-credits" class="sortable-th" title="点击按计费倍率排序（从高到低 / 从低到高）">
+                    <span style="display: inline-flex; align-items: center;">
+                      计费倍率 <span id="sort-icon-credits" class="sort-indicator">↕</span>
+                    </span>
+                  </th>
                   <th>参数（上下文 / 思考）</th>
-                  <th>标签</th>
+                  <th id="th-filter-tags" style="position: relative;">
+                    <div class="th-filter-wrapper" id="btn-toggle-tag-filter" title="点击按标签筛选模型">
+                      <span>标签</span>
+                      <span id="tag-filter-active-badge" class="badge badge-info" style="display: none; font-size: 10px; padding: 1px 5px;"></span>
+                      <span id="tag-filter-arrow" style="font-size: 10px; opacity: 0.6; margin-left: 2px;">▼</span>
+                    </div>
+                    <div id="tag-filter-dropdown" class="tag-filter-menu" hidden></div>
+                  </th>
                 </tr>
               </thead>
               <tbody id="models-table-body">

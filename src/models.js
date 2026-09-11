@@ -7,6 +7,12 @@
 import { state } from './state.js';
 import { esc, showToast, invokeTauri } from './utils.js';
 
+let rawModelsList = [];
+let currentModelsList = [];
+let sortField = null; // 'id' | 'credits' | null
+let sortOrder = null; // 'asc' | 'desc' | null
+let selectedTagFilter = 'ALL';
+
 export async function loadModelsMatrix() {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
@@ -14,11 +20,174 @@ export async function loadModelsMatrix() {
 
   try {
     const list = await invokeTauri('models_fetch_all');
-    renderModelsTable(list);
+    rawModelsList = (list || []).map(m => {
+      // 过滤掉无实际业务区分意义的内部 craft 标签
+      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft');
+      return m;
+    });
+    updateTagFilterDropdown();
+    applyAndRender();
   } catch (e) {
     console.warn('获取全量模型列表失败，降级展示基础模型:', e);
     renderFallbackModels();
   }
+}
+
+function getMultiplierNum(m) {
+  if (!m.credits || m.credits === '—') return -1;
+  const match = String(m.credits).match(/(\d+(?:\.\d+)?)/);
+  return match ? parseFloat(match[1]) : -1;
+}
+
+function applyAndRender() {
+  let list = [...rawModelsList];
+
+  // 1. 标签筛选
+  if (selectedTagFilter !== 'ALL') {
+    list = list.filter(m => (m.tags || []).includes(selectedTagFilter));
+  }
+
+  // 2. 排序（按首字母 / 按倍率）
+  if (sortField === 'id') {
+    list.sort((a, b) => {
+      const cmp = (a.id || '').localeCompare(b.id || '');
+      return sortOrder === 'asc' ? cmp : -cmp;
+    });
+  } else if (sortField === 'credits') {
+    list.sort((a, b) => {
+      const diff = getMultiplierNum(b) - getMultiplierNum(a);
+      if (diff !== 0) {
+        return sortOrder === 'desc' ? diff : -diff;
+      }
+      return (a.id || '').localeCompare(b.id || '');
+    });
+  }
+
+  updateSortHeadersUI();
+  updateTagFilterHeaderUI();
+  renderModelsTable(list);
+}
+
+function updateSortHeadersUI() {
+  const modelIcon = document.getElementById('sort-icon-model');
+  const creditsIcon = document.getElementById('sort-icon-credits');
+  const thModel = document.getElementById('th-sort-model');
+  const thCredits = document.getElementById('th-sort-credits');
+
+  if (modelIcon) {
+    if (sortField === 'id') {
+      modelIcon.textContent = sortOrder === 'asc' ? 'A→Z ▲' : 'Z→A ▼';
+      modelIcon.classList.add('active');
+      thModel?.classList.add('sorted');
+    } else {
+      modelIcon.textContent = '↕';
+      modelIcon.classList.remove('active');
+      thModel?.classList.remove('sorted');
+    }
+  }
+
+  if (creditsIcon) {
+    if (sortField === 'credits') {
+      creditsIcon.textContent = sortOrder === 'desc' ? '高→低 ▼' : '低→高 ▲';
+      creditsIcon.classList.add('active');
+      thCredits?.classList.add('sorted');
+    } else {
+      creditsIcon.textContent = '↕';
+      creditsIcon.classList.remove('active');
+      thCredits?.classList.remove('sorted');
+    }
+  }
+}
+
+function updateTagFilterDropdown() {
+  const dropdown = document.getElementById('tag-filter-dropdown');
+  if (!dropdown) return;
+
+  const tagCounts = {};
+  for (const m of rawModelsList) {
+    for (const t of m.tags || []) {
+      if (t) tagCounts[t] = (tagCounts[t] || 0) + 1;
+    }
+  }
+
+  const sortedTags = Object.keys(tagCounts).sort((a, b) => {
+    const order = { '双端': 1, 'WorkBuddy': 2, 'CodeBuddy': 3 };
+    const oa = order[a] || 99;
+    const ob = order[b] || 99;
+    if (oa !== ob) return oa - ob;
+    return a.localeCompare(b);
+  });
+
+  let itemsHtml = `
+    <div class="tag-filter-item ${selectedTagFilter === 'ALL' ? 'active' : ''}" data-filter-tag="ALL">
+      <span>全部标签</span>
+      <span class="count-badge">${rawModelsList.length}</span>
+    </div>
+  `;
+
+  for (const tag of sortedTags) {
+    itemsHtml += `
+      <div class="tag-filter-item ${selectedTagFilter === tag ? 'active' : ''}" data-filter-tag="${esc(tag)}">
+        <span>${esc(tag)}</span>
+        <span class="count-badge">${tagCounts[tag]}</span>
+      </div>
+    `;
+  }
+
+  dropdown.innerHTML = itemsHtml;
+}
+
+function updateTagFilterHeaderUI() {
+  const badge = document.getElementById('tag-filter-active-badge');
+  const arrow = document.getElementById('tag-filter-arrow');
+  const btn = document.getElementById('btn-toggle-tag-filter');
+
+  if (badge) {
+    if (selectedTagFilter !== 'ALL') {
+      badge.textContent = `${selectedTagFilter} ✕`;
+      badge.style.display = 'inline-block';
+      if (arrow) arrow.style.display = 'none';
+      btn?.classList.add('filter-active');
+    } else {
+      badge.style.display = 'none';
+      if (arrow) arrow.style.display = 'inline-block';
+      btn?.classList.remove('filter-active');
+    }
+  }
+}
+
+export function setTagFilter(tag) {
+  selectedTagFilter = tag;
+  updateTagFilterDropdown();
+  applyAndRender();
+  const dropdown = document.getElementById('tag-filter-dropdown');
+  if (dropdown) dropdown.hidden = true;
+}
+
+export function toggleModelSort() {
+  if (sortField !== 'id') {
+    sortField = 'id';
+    sortOrder = 'asc';
+  } else if (sortOrder === 'asc') {
+    sortOrder = 'desc';
+  } else {
+    sortField = null;
+    sortOrder = null;
+  }
+  applyAndRender();
+}
+
+export function toggleCreditsSort() {
+  if (sortField !== 'credits') {
+    sortField = 'credits';
+    sortOrder = 'desc'; // 默认从大到小排
+  } else if (sortOrder === 'desc') {
+    sortOrder = 'asc';  // 再点一次从小到大
+  } else {
+    sortField = null;
+    sortOrder = null;
+  }
+  applyAndRender();
 }
 
 function formatMultiplier(raw) {
@@ -32,15 +201,13 @@ function formatMultiplier(raw) {
   return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span>`;
 }
 
-let currentModelsList = [];
-
 function renderModelsTable(list) {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
   currentModelsList = list || [];
 
   if (!list || list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted" style="text-align: center; padding: 20px;">未获取到模型数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="muted" style="text-align: center; padding: 20px;">没有符合筛选条件的模型</td></tr>`;
     return;
   }
 
@@ -70,8 +237,10 @@ function renderModelsTable(list) {
       </button>
     `;
 
-    // 标签（描述已按需求移除）
-    const tagsHtml = m.tags.map(t => `<span class="badge badge-info" style="font-size: 10px; margin-right: 3px;">${esc(t)}</span>`).join('');
+    // 标签：支持点击快速按标签筛选
+    const tagsHtml = (m.tags || []).map(t =>
+      `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`
+    ).join('');
 
     return `
       <tr>
@@ -211,8 +380,55 @@ export function initModelsAndCopy() {
     if (e.key === 'Escape' && !document.getElementById('model-edit-overlay')?.hidden) closeModelEdit();
   });
 
-  // 模型表格行内编辑按钮事件委托（data-edit-model，替代 inline onclick 字符串拼接注入风险）
+  // 表头排序事件：点击“模型”首字母排序
+  document.getElementById('th-sort-model')?.addEventListener('click', () => {
+    toggleModelSort();
+  });
+
+  // 表头排序事件：点击“计费倍率”排序（高->低，低->高）
+  document.getElementById('th-sort-credits')?.addEventListener('click', () => {
+    toggleCreditsSort();
+  });
+
+  // 表头标签筛选下拉展开/收起
+  const btnTagFilter = document.getElementById('btn-toggle-tag-filter');
+  const tagDropdown = document.getElementById('tag-filter-dropdown');
+  btnTagFilter?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // 若点击的是选中的标签 ✕，则直接清空筛选恢复全部
+    if (e.target.id === 'tag-filter-active-badge' || e.target.closest('#tag-filter-active-badge')) {
+      setTagFilter('ALL');
+      return;
+    }
+    if (tagDropdown) {
+      tagDropdown.hidden = !tagDropdown.hidden;
+    }
+  });
+
+  // 标签筛选菜单点击选项
+  tagDropdown?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const item = e.target.closest('[data-filter-tag]');
+    if (item) {
+      setTagFilter(item.dataset.filterTag);
+    }
+  });
+
+  // 点击外部自动收起标签筛选下拉菜单
+  document.addEventListener('click', (e) => {
+    const th = document.getElementById('th-filter-tags');
+    if (th && !th.contains(e.target)) {
+      if (tagDropdown) tagDropdown.hidden = true;
+    }
+  });
+
+  // 模型表格事件委托：行内编辑按钮与标签快速筛选
   document.getElementById('models-table-body')?.addEventListener('click', (e) => {
+    const tagEl = e.target.closest('.clickable-tag[data-filter-tag]');
+    if (tagEl) {
+      setTagFilter(tagEl.dataset.filterTag);
+      return;
+    }
     const btn = e.target.closest('[data-edit-model]');
     if (btn) window.openModelEdit(btn.dataset.editModel);
   });

@@ -304,7 +304,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
         if let Some(tag_arr) = m.get("tags").and_then(|v| v.as_array()) {
             for t in tag_arr {
                 if let Some(ts) = t.as_str() {
-                    if !ts.starts_with("badge:") && ts != source_tag {
+                    if !ts.starts_with("badge:") && ts != source_tag && ts.to_lowercase() != "craft" {
                         tags.push(ts.to_string());
                     }
                 }
