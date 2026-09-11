@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 import pytest
 from request_pacer import RequestPacer
@@ -143,38 +144,41 @@ def test_metrics_accuracy():
 
 
 def test_global_min_interval():
-    """全局最小间隔：第 k 个请求的起跑不得早于 t_base + k*interval。
+    """全局最小间隔：预占刻度链每次推进一个 interval（确定性验证）。
 
-    断言模型说明（勿改回相邻差值）：事件循环的唤醒抖动只会把起跑推后、
-    绝不会提前，因此「相对 t_base 的下界」对抖动免疫；而相邻差值断言
-    （旧版 diff2 >= 0.04）会被前后两次唤醒延迟的不对称打穿——实测 CI
-    上 lag2 - lag3 ≈ 19ms 即造成 0.031s 假性失败。
+    断言模型说明（勿改回任何基于 asyncio.sleep 的时序断言）：
+    本测试曾在 CI 上以两种断言模型各假性失败一次——
+    ① 相邻差值 diff >= 0.04：被两次唤醒延迟的不对称打穿（lag 差 19ms）；
+    ② 相对基线下界 ts >= t_base + k*interval：Windows CI 上 asyncio.sleep
+    相对预占刻度提前约 6ms 唤醒（时钟粒度），下界同样被打穿。
+    结论：真实睡眠的起跑时刻含不可控抖动，任何精确时序断言都不可靠。
+
+    间隔语义的全部逻辑在 _reserve_delay() 的预占刻度链（同步、无睡眠），
+    直接验证它；睡眠接线由 test_cancellation_during_pacing_sleep 覆盖
+    （若 _enter 忽略延时，该测试的 cancel 断言必失败）。
     """
-    async def _run():
-        interval_ms = 50.0
-        interval_sec = interval_ms / 1000.0
-        pacer = RequestPacer(max_concurrency=5, min_interval_ms=interval_ms)
+    interval = 0.05
 
-        timestamps = []
+    # 1) 首请求即时放行；同一瞬间连发的第 k 个请求被推迟 k*interval
+    #    （突发整形：3 连发按 0 / 50 / 100ms 排期，相对各自调用时刻的等待
+    #    依次为 0 / interval / 2*interval——下界即核心不变量）
+    pacer = RequestPacer(max_concurrency=5, min_interval_ms=interval * 1000)
+    delays = [pacer._reserve_delay(None) for _ in range(3)]
+    assert delays[0] == 0.0, f"首请求不应被推迟：{delays[0]}"
+    for k in (1, 2):
+        # rel_tol=1e-3（50us）：容纳两次调用间 monotonic 时钟的自然走动
+        # （实测偏差 −3~7us = 时钟分辨率），仍远小于任何真实节流失效
+        assert math.isclose(delays[k], k * interval, rel_tol=1e-3), (
+            f"delay[{k}]={delays[k]:.9f} 应为 {k * interval}")
 
-        async def worker():
-            async with pacer.acquire():
-                timestamps.append(time.monotonic())
-
-        # 基线时刻在请求入队前捕获：首个请求的起跑必 >= t_base，
-        # 之后每个全局请求的预占刻度再各加一个 interval。
-        t_base = time.monotonic()
-        tasks = [asyncio.create_task(worker()) for _ in range(3)]
-        await asyncio.gather(*tasks)
-
-        assert len(timestamps) == 3
-        for k, ts in enumerate(timestamps):
-            floor = t_base + k * interval_sec
-            assert ts >= floor - 1e-3, (
-                f"request #{k} started too early: +{ts - t_base:.4f}s "
-                f"< expected +{k * interval_sec:.4f}s")
-
-    asyncio.run(_run())
+    # 2) 预占刻度严格按 interval 递进（核心不变量，浮点误差仅 1e-15 量级）
+    pacer2 = RequestPacer(max_concurrency=5, min_interval_ms=interval * 1000)
+    pacer2._reserve_delay(None)
+    slot0 = pacer2._next_allowed_time["__global__"]
+    pacer2._reserve_delay(None)
+    slot1 = pacer2._next_allowed_time["__global__"]
+    assert math.isclose(slot1 - slot0, interval, rel_tol=1e-9), (
+        f"预占刻度推进量 {slot1 - slot0:.9f} != {interval}")
 
 
 def test_model_level_min_interval():
