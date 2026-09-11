@@ -108,10 +108,12 @@ pub fn proxy_start(
     if desensitize {
         cmd.arg("--desensitize");
     }
-    if cfg.rotate_mode != "off" && !cfg.rotate_mode.is_empty() {
-        cmd.arg("--rotate-mode").arg(&cfg.rotate_mode);
-        cmd.arg("--rotate-count").arg(cfg.rotate_count.to_string());
-    }
+    // 多账号调度：内核会在每次请求时热读 settings.json 决定实际行为，
+    // 这里透传参数仅作为「settings.json 不可读时」的启动默认值兜底，
+    // 因此始终传递（即便 off），保证行为可预期。
+    let rotate_mode = if cfg.rotate_mode.is_empty() { "off".to_string() } else { cfg.rotate_mode.clone() };
+    cmd.arg("--rotate-mode").arg(&rotate_mode);
+    cmd.arg("--rotate-count").arg(cfg.rotate_count.to_string());
     // 用量统计：每次聊天请求完成后由 converter 向该文件追加一行 JSONL，供 usage_summary 聚合
     let usage_dir = local_app_dir().join("usage");
     let _ = std::fs::create_dir_all(&usage_dir);

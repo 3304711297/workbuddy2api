@@ -11,6 +11,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const SETTINGS_JS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'settings.js'), 'utf-8');
 const ACCOUNTS_JS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'accounts.js'), 'utf-8');
 const LIB_RS = fs.readFileSync(path.join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf-8');
+const CONVERTER_PY = fs.readFileSync(path.join(REPO_ROOT, 'converter.py'), 'utf-8');
 
 // 从 Rust AppConfig 中提取所有字段名（pub xxx:），作为前端 payload 必须覆盖的契约集
 function extractAppConfigFields() {
@@ -101,4 +102,35 @@ test('存在纯渲染函数 renderRotationPolicyUI 且不触碰磁盘', () => {
   assert.ok(!block.includes('invokeTauri'), 'renderRotationPolicyUI 必须是纯渲染，不得调用 invokeTauri');
   assert.ok(!block.includes('select.value ='), 'renderRotationPolicyUI 不得改写 select.value');
 });
+
+test('保存策略后不再声称需要重启（热读契约）', () => {
+  // 内核已改为热读 settings.json，UI 不得再提示「需重启服务生效」
+  assert.ok(
+    !ACCOUNTS_JS.includes('需重启服务生效'),
+    'UI 仍提示需重启——热读模式下应当即时生效'
+  );
+  assert.ok(
+    ACCOUNTS_JS.includes('即时生效'),
+    '保存成功提示应明确「即时生效」'
+  );
+  assert.ok(
+    ACCOUNTS_JS.includes('config_source'),
+    '保存后应回显内核运行态（config_source=hot 表示已热加载）'
+  );
+});
+
+test('converter.py 实现 settings.json 热读（免重启生效）', () => {
+  assert.ok(CONVERTER_PY.includes('def load_app_settings('), '缺少 load_app_settings 热读函数');
+  assert.ok(CONVERTER_PY.includes('_settings_sig'), '缺少 mtime+size 签名缓存机制');
+  // rotator 必须以磁盘配置为准，CLI 仅兜底
+  const start = CONVERTER_PY.indexOf('def _get_rotator()');
+  assert.ok(start > -1, '未找到 _get_rotator');
+  const block = CONVERTER_PY.slice(start, start + 1200);
+  assert.ok(block.includes('load_app_settings()'), '_get_rotator 必须热读 settings.json');
+  assert.ok(
+    block.indexOf('load_app_settings()') < block.indexOf('CONFIG.get("rotate_mode")'),
+    'settings.json 必须优先于 CLI 参数（顺序反了会退回需重启的旧行为）'
+  );
+});
+
 

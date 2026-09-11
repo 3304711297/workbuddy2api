@@ -44,10 +44,18 @@ test('Rust AppConfig 含 rotate_mode / rotate_count 且带 serde default（旧�
   assert.ok(LIB_RS.includes('#[serde(default = "default_rotate_count")]'), 'rotate_count 缺少 serde default');
 });
 
-test('proxy.rs 仅在非 off 时向内核透传轮换参数', () => {
+test('proxy.rs 始终向内核透传轮换参数（作为 settings.json 不可读时的兜底默认值）', () => {
   assert.ok(PROXY_RS.includes('"--rotate-mode"'), 'proxy.rs 未透传 --rotate-mode');
   assert.ok(PROXY_RS.includes('"--rotate-count"'), 'proxy.rs 未透传 --rotate-count');
-  assert.ok(PROXY_RS.includes('cfg.rotate_mode != "off"'), 'proxy.rs 未对 off 模式做短路');
+  // 热读模式下参数仅作兜底，因此必须无条件传递（不再对 off 做短路）
+  assert.ok(
+    !PROXY_RS.includes('cfg.rotate_mode != "off"'),
+    'proxy.rs 不应再对 off 短路——内核以 settings.json 为运行时真源，参数只是兜底'
+  );
+  assert.ok(
+    PROXY_RS.includes('if cfg.rotate_mode.is_empty()'),
+    'proxy.rs 需对空字符串做归一处理'
+  );
 });
 
 test('converter.py 注册 rotate_mode / rotate_count 配置与 CLI 参数', () => {

@@ -184,6 +184,46 @@ def _accounts_file() -> Path:
     return local_wb
 
 
+def _app_settings_file() -> Path:
+    """桌面端 settings.json 路径（与 Rust local_app_dir() 同源）。"""
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "workbuddy2api" / "settings.json"
+    if sys.platform == "win32":
+        return Path.home() / "AppData" / "Local" / "workbuddy2api" / "settings.json"
+    return Path.home() / ".local" / "share" / "workbuddy2api" / "settings.json"
+
+
+_settings_sig: tuple[float, int] = (0.0, 0)
+_settings_cache: dict = {}
+
+
+def load_app_settings(force: bool = False) -> dict:
+    """热读桌面端 settings.json（按 mtime+size 签名缓存）。
+
+    GUI 修改调度策略后无需重启内核即可生效：每次取用前比对签名，
+    文件未变则走缓存，避免每请求都读盘。
+    """
+    global _settings_sig, _settings_cache
+    p = _app_settings_file()
+    try:
+        st = p.stat()
+    except OSError:
+        _settings_sig = (0.0, 0)
+        _settings_cache = {}
+        return {}
+    sig = (st.st_mtime, st.st_size)
+    if not force and sig == _settings_sig and _settings_cache:
+        return _settings_cache
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        _settings_cache = data if isinstance(data, dict) else {}
+    except Exception as e:
+        _log(f"读取 settings.json 失败，沿用上次配置：{e}", level="debug")
+    _settings_sig = sig
+    return _settings_cache
+
+
 def _load_active_session(cfg: dict) -> tuple[str, dict]:
     """从 accounts.json 结构中取活跃账号会话，返回 (uid, session)。
 
@@ -1452,15 +1492,28 @@ _ACCOUNT_ROTATOR: Optional[AccountRotator] = None
 
 
 def _get_rotator() -> AccountRotator:
+    """获取账号调度器，配置以 GUI 的 settings.json 为运行时真源。
+
+    优先级：settings.json（热读，改完即生效）> CLI 参数/环境变量（启动默认值）。
+    这样用户在控制台切换调度策略后，无需重启内核即可生效。
+    """
     global _ACCOUNT_ROTATOR
-    mode = CONFIG.get("rotate_mode", "off")
-    count = CONFIG.get("rotate_count", 1)
+    disk = load_app_settings()
+    mode = str(disk.get("rotate_mode") or CONFIG.get("rotate_mode") or "off").lower()
+    if mode not in ("off", "failover", "roundrobin"):
+        mode = "off"
+    try:
+        count = int(disk.get("rotate_count") or CONFIG.get("rotate_count") or 1)
+    except (TypeError, ValueError):
+        count = int(CONFIG.get("rotate_count") or 1)
+    count = max(1, count)
+
     if _ACCOUNT_ROTATOR is None:
         _ACCOUNT_ROTATOR = AccountRotator(cred_mgr=CONFIG.get("cred"), mode=mode, rotate_count=count)
     else:
         _ACCOUNT_ROTATOR.cred_mgr = CONFIG.get("cred")
         _ACCOUNT_ROTATOR.mode = mode
-        _ACCOUNT_ROTATOR.rotate_count = max(1, count)
+        _ACCOUNT_ROTATOR.rotate_count = count
     return _ACCOUNT_ROTATOR
 
 
@@ -1567,6 +1620,8 @@ async def api_rate_limit():
         "rotate_count": rotator.rotate_count,
         "accounts_count": len(all_accs),
         "active_uid": getattr(CONFIG.get("cred"), "get_active_uid", lambda: "")() if CONFIG.get("cred") else "",
+        # 配置来源标注：hot = 已从 settings.json 热读到（改完即生效）；default = 回退到启动参数
+        "config_source": "hot" if load_app_settings().get("rotate_mode") else "default",
     }
 
     return {

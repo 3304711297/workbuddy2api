@@ -198,11 +198,26 @@ async function saveRotationPolicy() {
     }
     showToast(
       mode === 'off'
-        ? '已关闭多账号调度策略'
-        : `调度策略已保存：${mode === 'failover' ? '限流自动避让' : '负载均衡轮询'}（需重启服务生效）`,
+        ? '已关闭多账号调度策略（即时生效）'
+        : `调度策略已保存：${mode === 'failover' ? '限流自动避让' : '负载均衡轮询'}（即时生效）`,
       'success'
     );
     await syncRotationPolicyCard(state.accountsList.length);
+    // 拉一次内核运行时状态，确认热读已生效（config_source=hot 表示无需重启）
+    try {
+      const rl = await fetchRateLimit();
+      const live = rl?.rotation;
+      if (live && live.mode) {
+        const srcTag = live.config_source === 'hot' ? '内核已热加载' : '内核待刷新';
+        const consistent = live.mode === mode;
+        showToast(
+          consistent
+            ? `内核运行态确认：${live.mode} · ${srcTag}`
+            : `内核运行态为 ${live.mode}（预期 ${mode}），请检查`,
+          consistent ? 'success' : 'warning'
+        );
+      }
+    } catch { /* 反代未启动时静默跳过 */ }
   } catch (e) {
     showToast(`保存失败: ${e.message || e}`, 'error');
   } finally {
