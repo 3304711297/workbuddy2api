@@ -30,6 +30,7 @@
 - 🖥️ **独立现代化桌面 GUI (Tauri v2 + 原生深色设计)**：提供直观的服务看板、端口设置、实时延迟测试与状态指示。
 - 🔑 **无需安装原版 WorkBuddy**：集成浏览器 OAuth 授权全自动轮询流程，直接扫码/验证码登录获取凭据。
 - 👥 **多账号管理与切换**：凭据统一持久化于本地数据库，支持一键切换活跃账号、手动刷新 Token 与账号删除。
+- 🔀 **多账号智能调度（三模式可选）**：`off`（默认关闭）/ `failover`（遇 429 / 6004 自动切号重试）/ `roundrobin`（按请求数轮询分摊）；账号级冷却隔离（按「账号 + 模型」维度）；调度策略运行时热读 `settings.json`，GUI 改完**免重启内核**即生效；`/api/rate_limit` 的 `rotation.config_source` 字段可观测当前策略来源（`hot`=已热加载 / `default`=回退兜底）。
 - 📊 **内嵌真实积分资产看板与夜间限免感知**：
   - 逆向对接腾讯官方计量计费接口，实时掌握账户剩余积分、资源包配额明细与使用进度条；
   - **自然日今日用量统计**：自动统计当日请求数（`reqsToday`）、消耗 Token 数（`tokensToday`）与 429 频控次数；
@@ -56,7 +57,7 @@
 | **模型列表探测** | `GET /v1/models` | OpenAI 格式标准模型列表（动态拉取上游全部模型） | `Authorization: Bearer local` |
 | **服务健康与探活** | `GET /health` | 本地健康检测 / 心跳探测（安全收窄，不泄露敏感身份信息） | 无需鉴权 |
 | **用量统计与积分概览** | `GET /api/usage_summary` | 当前账号积分余额、今日用量（请求数/Token/429） | `Authorization: Bearer local` |
-| **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） | `Authorization: Bearer local` |
+| **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） + 多账号调度配置来源（`rotation.config_source`） | `Authorization: Bearer local` |
 
 ---
 
@@ -294,7 +295,7 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   - **每日签到**（端点逆向成果参考两仓库）：`/v2/billing/meter/daily-checkin` 链路，本项目按自身定位实现为 GUI 手动按钮触发，不做自动定时签到。
 - 以下功能与架构思路借鉴自活跃衍生项目 [IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)（当前重写树为 MIT 开源）：
   - **Claude 客户端指纹脱敏与精准改写层（P0 已落地）**：借鉴其对已知客户端特征句做中性改写的思路（`_rewrite_known_fingerprints`），改写 Claude Code 身份短语、移除 `x-anthropic-billing-header:` 等触发源，彻底解决上游 11128 安全策略拦截；
-  - **多凭证轮换与活跃会话架构思路（P1 储备）**：参考其凭据生命周期感知与平滑轮换设计，待多账号就绪后按需引入。
+  - **多凭证轮换与账号调度（已交付，2026-09-11）**：参考其凭据生命周期感知与平滑轮换设计，已交付多账号调度（failover / roundrobin 双模式 + 账号级冷却 + 策略热读免重启）。
 - 本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。
 
 ---
