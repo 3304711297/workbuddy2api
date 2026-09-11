@@ -325,6 +325,25 @@
                 <button id="btn-remove-zcode" class="btn btn-secondary btn-sm">清理文件残留</button>
               </div>
             </div>
+
+            <!-- Claude Code CLI 卡片 -->
+            <div class="card agent-card">
+              <div class="agent-card-header">
+                <div class="agent-icon" style="background: linear-gradient(135deg, #d97706, #b45309); color: white; font-weight: bold;">C</div>
+                <div>
+                  <h3 class="agent-name">Claude Code CLI</h3>
+                  <p class="muted agent-sub">Anthropic 官方编码智能体终端工具</p>
+                </div>
+                <span class="badge badge-success">原生协议就绪</span>
+              </div>
+              <p class="agent-desc">内核已内置 Anthropic Messages API（<code>POST /v1/messages</code>），无需第三方中转工具，直接设置环境变量即可直连。</p>
+              <div class="agent-path-text">兼容端点: <span class="mono">http://127.0.0.1:8787/v1</span></div>
+              <div id="claude-guide" hidden></div>
+              <div class="divider"></div>
+              <div class="agent-actions">
+                <button id="btn-guide-claude" class="btn btn-primary btn-sm">终端直连引导</button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -370,8 +389,24 @@
           <!-- 代码集成示例 -->
           <div class="card" style="margin-top: 16px;">
             <div class="card-header-flex">
-              <h3 class="card-title">Python 接入示例 (OpenAI SDK)</h3>
-              <button class="btn btn-sm btn-secondary" data-copy="code-python">复制代码</button>
+              <h3 class="card-title">Claude Code CLI 与 Python 接入示例</h3>
+              <div style="display: flex; gap: 8px;">
+                <button class="btn btn-sm btn-secondary" data-copy="code-claude">复制 Claude CLI 命令</button>
+                <button class="btn btn-sm btn-secondary" data-copy="code-python">复制 OpenAI SDK 代码</button>
+              </div>
+            </div>
+            <div style="margin-bottom: 6px; font-size: 11px; color: var(--text-secondary);">
+              <strong>Claude Code CLI 直连 (Anthropic Messages API)：</strong>
+            </div>
+            <pre class="code-block"><code id="code-claude"># Linux / macOS / Git Bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
+export ANTHROPIC_API_KEY="local"
+claude --model deepseek-v4.1-flash
+
+# PowerShell
+$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8787"; $env:ANTHROPIC_API_KEY="local"; claude --model deepseek-v4.1-flash</code></pre>
+            <div style="margin: 12px 0 6px; font-size: 11px; color: var(--text-secondary);">
+              <strong>Python OpenAI SDK：</strong>
             </div>
             <pre class="code-block"><code id="code-python">from openai import OpenAI
 

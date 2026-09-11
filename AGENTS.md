@@ -11,16 +11,16 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 | 段 | 位置 | 规模 | 语言 |
 |---|---|---|---|
-| 反代内核 | `converter.py`, `desensitize.py`, `turing_helper.cjs` | ~2.5k 行 | Python / Node |
-| 桌面前端 | `index.html`, `src/*.js`（14 个 ES module） | ~1.7k 行 | 原生 JS + Vite |
+| 反代内核 | `converter.py`, `anthropic_compat.py`, `anthropic_stream.py`, `token_refresher.py`, `request_pacer.py`, `desensitize.py`, `turing_helper.cjs` | ~3.5k 行 | Python / Node |
+| 桌面前端 | `index.html`, `src/*.js`（14 个 ES module） | ~1.8k 行 | 原生 JS + Vite |
 | Rust 后端 | `src-tauri/src/`（`commands/` 7 文件） | ~2.7k 行 | Rust |
 
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-python -m pytest tests/ -q          # Python：110 passed 为当前基线
-npm test                            # 前端：4/4（node --test）
-cd src-tauri && cargo test          # Rust
+python -m pytest tests/ -q          # Python：163 passed 为当前基线
+npm test                            # 前端：12 passed（node --test）
+cd src-tauri && cargo test          # Rust：15 passed
 ```
 
 **改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust
@@ -65,6 +65,12 @@ codebuddy2openai.exe (GUI)
   `x-anthropic-billing-header:`、`"You are Claude Code, Anthropic's official CLI"`、
   `"Main branch (you will usually use this for PRs):"`。改动后需实测模型可调用性，
   不能只看单测。
+- **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
+  采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
+- **并发削峰平滑器 (`request_pacer.py`)**：
+  基于 `asyncio.Semaphore` 与单调时钟调度槽，支持环境变量 `CODEBUDDY2OPENAI_MAX_CONCURRENCY`（默认 5）与 `CODEBUDDY2OPENAI_MIN_INTERVAL_MS`（默认 50ms）削平并发脉冲。流式与非流式请求均在上下文周期内自动持槽与平滑释放。
+- **后台主动令牌续期 (`token_refresher.py`)**：
+  由 FastAPI `lifespan` 生命周期管控，后台每 300s 巡检活跃账号凭据，剩余有效时间小于 1800s（30 分钟）时主动触发异步续期并防重入，避免用户请求遭遇被动刷新时延。
 
   **风控拦截机制（2026-09-10 实测，判断要不要扩脱敏范围时看这里）**：
 

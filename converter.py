@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
@@ -45,6 +46,24 @@ try:
 except ImportError:  # 模块缺失时降级为不脱敏
     def desensitize_body(body, roles=("system",)):
         return body
+
+try:
+    from anthropic_compat import translate_anthropic_request, translate_openai_response_to_anthropic
+    from anthropic_stream import AnthropicStreamTranslator
+except ImportError:
+    translate_anthropic_request = None
+    translate_openai_response_to_anthropic = None
+    AnthropicStreamTranslator = None
+
+try:
+    from request_pacer import RequestPacer
+except ImportError:
+    RequestPacer = None
+
+try:
+    from token_refresher import BackgroundTokenRefresher
+except ImportError:
+    BackgroundTokenRefresher = None
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -662,7 +681,6 @@ PASSTHROUGH_BODY_KEYS = {
 # FastAPI 应用
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="codebuddy2openai", version="2.0")
 CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
                 "log_payloads": False, "usage_log": None, "unsafe_expose": False,
@@ -677,6 +695,38 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 # 流式推理净化与穿插解耦：实时流式下发 reasoning，并在 tool_calls 参数流中剥离混入的 reasoning
                 # （避免工具参数 JSON 被截断/污染）。WORKBUDDY_COALESCE_REASONING=0 关闭。
                 "coalesce_reasoning": os.environ.get("WORKBUDDY_COALESCE_REASONING", "1") not in ("0", "false", "no")}  # cred: CredentialManager | None
+
+# 并发削峰与流量节奏平滑器
+_REQUEST_PACER = RequestPacer(
+    max_concurrency=int(os.environ.get("CODEBUDDY2OPENAI_MAX_CONCURRENCY", "5")),
+    min_interval_ms=float(os.environ.get("CODEBUDDY2OPENAI_MIN_INTERVAL_MS", "50")),
+) if RequestPacer else None
+
+# 后台主动令牌续期任务
+_TOKEN_REFRESHER: Optional[Any] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _TOKEN_REFRESHER
+    if BackgroundTokenRefresher is not None:
+        cred = CONFIG.get("cred")
+        if cred is not None:
+            _TOKEN_REFRESHER = BackgroundTokenRefresher(
+                credential_manager=cred,
+                check_interval_seconds=float(os.environ.get("CODEBUDDY2OPENAI_REFRESH_INTERVAL", "300")),
+                threshold_seconds=float(os.environ.get("CODEBUDDY2OPENAI_REFRESH_THRESHOLD", "1800")),
+            )
+            _TOKEN_REFRESHER.start()
+            _log("后台主动令牌续期任务已启动 (巡检间隔: 300s, 提前续期阈值: 1800s)")
+    yield
+    if _TOKEN_REFRESHER is not None:
+        await _TOKEN_REFRESHER.stop()
+        _TOKEN_REFRESHER = None
+        _log("后台主动令牌续期任务已停止")
+
+
+app = FastAPI(title="codebuddy2openai", version="2.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -1258,31 +1308,53 @@ async def chat_completions(request: Request,
 
     has_tools = bool(payload.get("tools"))
     need_tool_repair = client_wants_stream and has_tools and CONFIG.get("repair_stream_tools", True)
+    pacer_ctx = _REQUEST_PACER.acquire(model_name) if _REQUEST_PACER else None
 
     if client_wants_stream and not need_tool_repair:
+        async def _paced_stream():
+            try:
+                if pacer_ctx:
+                    await pacer_ctx.__aenter__()
+                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid):
+                    yield chunk
+            finally:
+                if pacer_ctx:
+                    await pacer_ctx.__aexit__(None, None, None)
+
         return StreamingResponse(
-            _stream_upstream(url, headers, body, model_name, t0, rid),
+            _paced_stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     if client_wants_stream and need_tool_repair:
+        async def _paced_safe_stream():
+            try:
+                if pacer_ctx:
+                    await pacer_ctx.__aenter__()
+                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid):
+                    yield chunk
+            finally:
+                if pacer_ctx:
+                    await pacer_ctx.__aexit__(None, None, None)
+
         return StreamingResponse(
-            _safe_stream_upstream(url, headers, body, model_name, t0, rid),
+            _paced_safe_stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
     try:
-        async with httpx.AsyncClient(timeout=300) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
-                if r.status_code != 200:
-                    raw = await r.aread()
-                    _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-                    _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}", level="debug")
-                    raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
-                collected, ttft_ms = await _collect_stream(r, t0)
+        async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
+            async with httpx.AsyncClient(timeout=300) as c:
+                async with c.stream("POST", url, headers=headers, json=body) as r:
+                    if r.status_code != 200:
+                        raw = await r.aread()
+                        _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
+                        _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}", level="debug")
+                        raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
+                    collected, ttft_ms = await _collect_stream(r, t0)
     except HTTPException as e:
         # 上游错误（非 200 等）：记一条失败统计（ok=false）后原样抛出，不改变既有错误语义
         _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
@@ -1309,6 +1381,162 @@ async def chat_completions(request: Request,
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms)
     return JSONResponse(content=collected)
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+    anthropic_version: Optional[str] = Header(default=None, alias="anthropic-version"),
+):
+    """Anthropic Messages 协议兼容端点（支持 Claude Code CLI / Cline 等工具原生接入）。"""
+    auth_key = x_api_key or authorization
+    try:
+        _check_auth(auth_key, auth_key)
+    except HTTPException as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"type": "error", "error": {"type": "authentication_error", "message": "invalid api key"}},
+        )
+    cred = _cred()
+
+    try:
+        raw_body = await request.json()
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"type": "error", "error": {"type": "invalid_request_error", "message": f"bad json: {e}"}},
+        )
+
+    if translate_anthropic_request is None or translate_openai_response_to_anthropic is None:
+        return JSONResponse(
+            status_code=500,
+            content={"type": "error", "error": {"type": "api_error", "message": "anthropic_compat module not available"}},
+        )
+
+    try:
+        payload = translate_anthropic_request(raw_body)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"type": "error", "error": {"type": "invalid_request_error", "message": str(e)}},
+        )
+
+    client_wants_stream = bool(payload.get("stream"))
+    model_name = payload.get("model", "auto")
+    mapped_model = MODEL_MAP.get(model_name, model_name)
+
+    body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
+    body.setdefault("model", "auto")
+    body["stream"] = True
+    if "stream_options" not in body:
+        body["stream_options"] = {"include_usage": True}
+
+    if CONFIG.get("desensitize"):
+        body = desensitize_body(body, roles=("system", "assistant"))
+
+    body["model"] = mapped_model
+
+    user_settings = _load_model_settings()
+    custom_cfg = user_settings.get(model_name) or user_settings.get(mapped_model) or {}
+
+    custom_effort = custom_cfg.get("reasoning_effort")
+    if custom_effort:
+        if custom_effort == "disable":
+            body.pop("reasoning_effort", None)
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        else:
+            body["reasoning_effort"] = custom_effort
+            if "chat_template_kwargs" not in body:
+                body["chat_template_kwargs"] = {"enable_thinking": True}
+
+    custom_ctx = custom_cfg.get("context_window")
+    if custom_ctx and isinstance(custom_ctx, int) and custom_ctx > 0:
+        if "max_tokens" not in body:
+            body["max_tokens"] = min(custom_ctx, 64000)
+
+    rid = os.urandom(4).hex()
+    _log(f"[{rid}] ▶ ANTHROPIC /v1/messages {model_name} | stream={client_wants_stream}")
+
+    headers = cred.get_headers()
+    url = f"{BACKEND}/v2/chat/completions"
+    t0 = time.time()
+
+    pacer_ctx = _REQUEST_PACER.acquire(model_name) if _REQUEST_PACER else None
+
+    if client_wants_stream:
+        async def _anthropic_stream_gen():
+            translator = AnthropicStreamTranslator(model=raw_body.get("model", model_name))
+            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid)
+            buf = ""
+            try:
+                if pacer_ctx:
+                    await pacer_ctx.__aenter__()
+                async for chunk in upstream_gen:
+                    text = chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else str(chunk)
+                    buf += text
+                    lines = buf.split("\n")
+                    buf = lines.pop()
+                    for line in lines:
+                        ln = line.strip()
+                        if ln:
+                            for ev in translator.feed_line(ln):
+                                yield ev.encode("utf-8")
+                if buf.strip():
+                    for ev in translator.feed_line(buf.strip()):
+                        yield ev.encode("utf-8")
+                for ev in translator.finalize():
+                    yield ev.encode("utf-8")
+            finally:
+                if pacer_ctx:
+                    await pacer_ctx.__aexit__(None, None, None)
+
+        return StreamingResponse(
+            _anthropic_stream_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # 非流式
+    try:
+        async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
+            async with httpx.AsyncClient(timeout=300) as c:
+                async with c.stream("POST", url, headers=headers, json=body) as r:
+                    if r.status_code != 200:
+                        raw = await r.aread()
+                        _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
+                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                        _record_rate_limit(model_name, raw.decode("utf-8", "replace"))
+                        raise HTTPException(
+                            status_code=r.status_code,
+                            detail={"type": "error", "error": {"type": "api_error", "message": raw.decode("utf-8", "replace")[:500]}},
+                        )
+                    collected, ttft_ms = await _collect_stream(r, t0)
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
+        _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail={"type": "error", "error": {"type": "api_error", "message": f"upstream error: {e}"}},
+        )
+    except Exception as e:
+        _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
+        raise
+
+    _log_finish(model_name, t0, collected, rid)
+    _u = collected.get("usage") or {}
+    _record_usage(model_name, True, t0,
+                  input_tokens=_u.get("prompt_tokens"),
+                  output_tokens=_u.get("completion_tokens"),
+                  ttft_ms=ttft_ms)
+
+    anthropic_resp = translate_openai_response_to_anthropic(collected)
+    if "model" in raw_body:
+        anthropic_resp["model"] = raw_body["model"]
+    return JSONResponse(content=anthropic_resp)
 
 
 def _last_user_text(messages: list) -> str:
@@ -2303,6 +2531,7 @@ def main():
     sys.stderr.write(f"\n✅ 监听 http://{args.host}:{args.port}（直连后端，原生 function calling）\n")
     sys.stderr.write("   GET  /v1/models\n")
     sys.stderr.write("   POST /v1/chat/completions   (原生 tools/tool_calls，支持流式)\n")
+    sys.stderr.write("   POST /v1/messages           (Anthropic Messages 协议，支持 Claude Code 等)\n")
     sys.stderr.write("   GET  /health\n")
     sys.stderr.write("   GET  /api/usage_summary     (当前账号积分概览，Hermes 配额看板数据源)\n")
     sys.stderr.write("   GET  /api/rate_limit        (上游频率限制 6004 状态与滚动用量，Hermes 配额看板数据源)\n")

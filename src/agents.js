@@ -99,6 +99,42 @@ function renderZcodeGuide(guide) {
   wrap.hidden = false;
 }
 
+function renderClaudeGuide(port) {
+  const wrap = document.getElementById('claude-guide');
+  if (!wrap) return;
+  const baseUrl = `http://127.0.0.1:${port || 8787}`;
+  const bashCmd = `export ANTHROPIC_BASE_URL="${baseUrl}"\nexport ANTHROPIC_API_KEY="local"\nclaude --model deepseek-v4.1-flash`;
+  const psCmd = `$env:ANTHROPIC_BASE_URL="${baseUrl}"; $env:ANTHROPIC_API_KEY="local"; claude --model deepseek-v4.1-flash`;
+
+  const field = (label, value) => `
+    <div class="zguide-field">
+      <span class="zguide-label">${esc(label)}</span>
+      <span class="zguide-value" data-copy="${esc(value)}" title="点击复制">${esc(value)}</span>
+    </div>`;
+
+  wrap.innerHTML = `
+    <div class="zcode-guide-panel" style="margin-top: 10px;">
+      ${field('Base URL（ANTHROPIC_BASE_URL）', baseUrl)}
+      ${field('API Key（ANTHROPIC_API_KEY）', 'local')}
+      ${field('原生端点路径', `${baseUrl}/v1/messages`)}
+      ${field('推荐模型', 'deepseek-v4.1-flash')}
+      <div class="zguide-field">
+        <span class="zguide-label">Bash 终端直连命令（点击复制）</span>
+        <pre class="zguide-value" data-copy="${esc(bashCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(bashCmd)}</pre>
+      </div>
+      <div class="zguide-field">
+        <span class="zguide-label">PowerShell 直连命令（点击复制）</span>
+        <pre class="zguide-value" data-copy="${esc(psCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(psCmd)}</pre>
+      </div>
+      <ol class="zguide-steps">
+        <li>内核已内置 Anthropic Messages API，兼容 Claude Code CLI 等工具</li>
+        <li>在终端运行上述命令设置环境变量后，直接执行 <code>claude</code> 即可直连</li>
+        <li>已内建两层指纹脱敏，杜绝上游 11128 风控误拦截</li>
+      </ol>
+    </div>`;
+  wrap.hidden = false;
+}
+
 export function initAgentActions() {
   document.getElementById('btn-guide-hermes')?.addEventListener('click', async () => {
     try {
@@ -145,6 +181,19 @@ export function initAgentActions() {
     } catch (e) {
       showToast(`清理失败: ${e.message || e}`, 'error');
     }
+  });
+
+  document.getElementById('btn-guide-claude')?.addEventListener('click', () => {
+    renderClaudeGuide(state.port);
+  });
+
+  document.getElementById('claude-guide')?.addEventListener('click', async (ev) => {
+    const el = ev.target.closest('[data-copy]');
+    if (!el) return;
+    const ok = await copyToClipboard(el.dataset.copy);
+    el.classList.add('copied');
+    showToast(ok ? '已复制' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
+    setTimeout(() => el.classList.remove('copied'), 1500);
   });
 
   document.getElementById('btn-refresh-agents')?.addEventListener('click', loadAgentsStatus);
