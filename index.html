@@ -269,6 +269,36 @@
             <!-- 动态渲染 -->
           </div>
 
+          <!-- 多账号调度与轮换策略卡片 -->
+          <div id="card-rotation-policy" class="card" style="margin-top: 16px;">
+            <div class="card-header-flex">
+              <div>
+                <h3 class="card-title">多账号调度与轮换策略</h3>
+                <p class="card-desc">当配置多个账号时，可自动按策略进行故障避让或负载均衡调度</p>
+              </div>
+              <span id="rotation-status-badge" class="badge badge-info">单账号模式</span>
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 12px;">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <label class="field-label" style="margin: 0; white-space: nowrap;">调度策略：</label>
+                <select id="select-rotate-mode" class="input mono" style="min-width: 180px;">
+                  <option value="off">关闭 (单账号模式)</option>
+                  <option value="failover">限流自动避让 (推荐)</option>
+                  <option value="roundrobin">按请求轮流负载均衡</option>
+                </select>
+              </div>
+              <div id="wrap-rotate-count" style="display: none; align-items: center; gap: 8px;">
+                <label class="field-label" style="margin: 0; white-space: nowrap;">每</label>
+                <input id="input-rotate-count" type="number" class="input mono" min="1" max="100" value="1" style="width: 60px; text-align: center;" />
+                <span class="muted" style="font-size: 12px;">次请求轮换</span>
+              </div>
+              <button id="btn-save-rotation" class="btn btn-primary btn-sm">保存策略</button>
+            </div>
+            <p class="muted field-hint" id="rotation-policy-hint" style="margin-top: 8px; font-size: 11px;">
+              默认关闭。开启「限流自动避让」后，当当前账号遇到 429 或 6004 冷却时，内核会自动切换至下一个就绪账号并重试，保障请求不中断。
+            </p>
+          </div>
+
           <!-- 多账号列表 -->
           <h3 class="sub-section-title" style="margin-top: 24px;">全部已保存账号</h3>
           <div id="accounts-list" class="accounts-grid">

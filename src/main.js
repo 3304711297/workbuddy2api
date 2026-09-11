@@ -20,7 +20,7 @@ import { initLogs } from './logs.js';
 import { initUsage } from './usage.js';
 import { initUpdateCheck } from './update-check.js';
 import { initConfirmDialog } from './utils.js';
-import { initAccountsDelegation } from './accounts.js';
+import { initAccountsDelegation, initRotationPolicy } from './accounts.js';
 
 // ---------------------------------------------------------------------------
 // 初始化入口
@@ -46,6 +46,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initUpdateCheck();
   initConfirmDialog();
   initAccountsDelegation();
+  initRotationPolicy();
 
   // 监听 Tauri 事件广播（托盘启动/停止/重启时即时响应）
   if (window.__TAURI__?.event?.listen) {

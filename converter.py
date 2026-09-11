@@ -200,6 +200,42 @@ def _load_active_session(cfg: dict) -> tuple[str, dict]:
     return active_uid, session
 
 
+def _read_all_accounts() -> tuple[str, dict[str, dict]]:
+    """读取 accounts.json 中的活跃 UID 与所有账号字典。"""
+    acc_path = _accounts_file()
+    if not acc_path.is_file():
+        return "", {}
+    try:
+        cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+        active_uid = cfg.get("active_uid") or ""
+        accounts = cfg.get("accounts") or {}
+        if isinstance(accounts, dict):
+            return active_uid, accounts
+    except Exception:
+        pass
+    return "", {}
+
+
+def _set_active_account(target_uid: str) -> bool:
+    """原子更新 accounts.json 的 active_uid。"""
+    acc_path = _accounts_file()
+    if not acc_path.is_file():
+        return False
+    try:
+        cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+        if target_uid not in cfg.get("accounts", {}):
+            return False
+        cfg["active_uid"] = target_uid
+        tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
+        with open(tmp_acc, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_acc, acc_path)
+        return True
+    except Exception as e:
+        _log(f"切换 active_uid 失败: {e}")
+        return False
+
+
 def find_auth_file() -> Path | None:
     # 优先使用桌面客户端同步维护的 workbuddy-desktop.info
     for d in auth_dirs():
@@ -470,6 +506,92 @@ class CredentialManager:
                 self._refresh()
             s = self._session()
             return self._build_headers_from(s.get("auth") or {}, s.get("account") or {})
+
+    def get_active_uid(self) -> str:
+        s = self._session()
+        account = s.get("account") or {}
+        return str(account.get("uid") or "")
+
+    def list_all_accounts(self) -> list[tuple[str, dict]]:
+        active_uid, accounts = _read_all_accounts()
+        if not accounts and self.path:
+            s = self._session()
+            uid = (s.get("account") or {}).get("uid") or "default"
+            return [(str(uid), s)]
+        return list(accounts.items())
+
+    def get_headers_for_uid(self, uid: str) -> dict:
+        with self._lock:
+            active_uid, accounts = _read_all_accounts()
+            if not accounts:
+                return self.get_headers()
+            session = accounts.get(uid)
+            if not session or not isinstance(session, dict):
+                return self.get_headers()
+            auth = session.get("auth") or {}
+            account = session.get("account") or {}
+            expires_at = auth.get("expiresAt") or 0
+            if expires_at and time.time() * 1000 >= (expires_at - 60_000):
+                self._refresh_session_tokens(uid, session)
+                _, accounts = _read_all_accounts()
+                session = accounts.get(uid, session)
+                auth = session.get("auth") or {}
+                account = session.get("account") or {}
+            return self._build_headers_from(auth, account)
+
+    def switch_active_account(self, uid: str) -> bool:
+        with self._lock:
+            ok = _set_active_account(uid)
+            if ok:
+                try:
+                    self._cached = self._read_raw()
+                    acc_path = _accounts_file()
+                    if acc_path.is_file():
+                        self._mtime = acc_path.stat().st_mtime
+                except Exception:
+                    pass
+            return ok
+
+    def _refresh_session_tokens(self, uid: str, session: dict):
+        auth = session.get("auth") or {}
+        account = session.get("account") or {}
+        refresh_token = auth.get("refreshToken", "")
+        if not refresh_token:
+            return
+        headers = self._build_headers_from(auth, account)
+        headers["X-Refresh-Token"] = refresh_token
+        headers["X-Auth-Refresh-Source"] = "plugin"
+        url = f"{BACKEND}/v2/plugin/auth/token/refresh"
+        try:
+            with httpx.Client(timeout=15) as c:
+                r = c.post(url, headers=headers, json={})
+            data = r.json()
+        except Exception as e:
+            _log(f"刷新账号 {uid[:8]}... 异常: {e}")
+            return
+        if data.get("code") != 0 or not data.get("data"):
+            _log(f"刷新账号 {uid[:8]}... 响应异常: {data.get('msg', data)}")
+            return
+        new_auth = data["data"]
+        new_auth["domain"] = new_auth.get("domain") or auth.get("domain")
+        new_auth["lastRefreshTime"] = int(time.time() * 1000)
+        if not new_auth.get("expiresAt") and new_auth.get("expiresIn"):
+            new_auth["expiresAt"] = int(time.time() * 1000) + new_auth["expiresIn"] * 1000
+        if not new_auth.get("refreshExpiresAt") and new_auth.get("refreshExpiresIn"):
+            new_auth["refreshExpiresAt"] = int(time.time() * 1000) + new_auth["refreshExpiresIn"] * 1000
+
+        acc_path = _accounts_file()
+        if acc_path.is_file():
+            try:
+                cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+                if uid in cfg.get("accounts", {}):
+                    cfg["accounts"][uid]["auth"] = new_auth
+                    tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
+                    with open(tmp_acc, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_acc, acc_path)
+            except Exception as e:
+                _log(f"写回刷新 token 失败: {e}")
 
     def summary(self) -> dict:
         s = self._session()
@@ -757,6 +879,9 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
                 "log_payloads": False, "usage_log": None, "unsafe_expose": False,
                 "desensitize": False, "wsl": False, "scan_all_users": False,
+                # 多账号凭据轮换：默认 off 关闭；failover (限流自动故障转移) / roundrobin (按请求轮询分摊)
+                "rotate_mode": os.environ.get("WORKBUDDY2API_ROTATE_MODE", os.environ.get("CODEBUDDY2OPENAI_ROTATE_MODE", "off")).lower(),
+                "rotate_count": int(os.environ.get("WORKBUDDY2API_ROTATE_COUNT", os.environ.get("CODEBUDDY2OPENAI_ROTATE_COUNT", "1"))),
                 # 流式 tool_calls 损坏防御（实验性阻塞聚合重试）：默认关闭（优先原生真流式透传，杜绝 60s/140s 超时）
                 # 可通过 --repair-stream-tools 或环境变量 CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS=1 开启
                 "repair_stream_tools": os.environ.get("CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes"),
@@ -1140,6 +1265,7 @@ async def api_usage_summary(
 # 上游频率限制状态（仅记录真实发生的 6004 报文，不做任何推测）：
 #   {model: {"code":6004, "message":…, "resetAtMs":…, "firstSeenMs":…, "lastSeenMs":…}}
 _RATE_LIMIT_STATE: dict[str, dict] = {}
+_ACCOUNT_COOLDOWNS: dict[tuple[str, str], dict] = {}
 _RATE_LIMIT_LOCK = threading.Lock()
 
 # 6004 报文：{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-08 22:11:33 UTC+8 重置，…"}
@@ -1148,31 +1274,194 @@ _RATE_LIMIT_RE = re.compile(
 )
 
 
-def _record_rate_limit(model: str, err_text: str) -> None:
+def _is_account_cooldown(uid: str, model: str) -> bool:
+    if not uid:
+        return False
+    now_ms = time.time() * 1000
+    with _RATE_LIMIT_LOCK:
+        entry = _ACCOUNT_COOLDOWNS.get((uid, model))
+        if not entry:
+            return False
+        if entry.get("resetAtMs", 0) <= now_ms:
+            _ACCOUNT_COOLDOWNS.pop((uid, model), None)
+            return False
+        return True
+
+
+def _record_rate_limit(model: str, err_text: str, uid: str | None = None) -> None:
     """从上游错误体里识别 6004 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
     m = _RATE_LIMIT_RE.search(err_text or "")
     if not m:
-        return
-    try:
-        reset_ms = int(
-            datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-            .replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
-            .timestamp()
-            * 1000
-        )
-    except Exception:
-        return
+        if "429" in (err_text or "") or "Too Many Requests" in (err_text or ""):
+            reset_ms = int((time.time() + 60) * 1000)
+            reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
+        else:
+            return
+    else:
+        try:
+            reset_ms = int(
+                datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+                .timestamp()
+                * 1000
+            )
+            reset_local = m.group(1)[11:]
+        except Exception:
+            return
+    now_ms = int(time.time() * 1000)
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)
         entry = {
             "code": 6004,
             "message": (err_text or "")[:300],
             "resetAtMs": reset_ms,
-            "resetLocal": m.group(1)[11:],
-            "firstSeenMs": prev["firstSeenMs"] if prev and prev.get("resetAtMs") == reset_ms else int(time.time() * 1000),
-            "lastSeenMs": int(time.time() * 1000),
+            "resetLocal": reset_local,
+            "firstSeenMs": prev["firstSeenMs"] if prev and prev.get("resetAtMs") == reset_ms else now_ms,
+            "lastSeenMs": now_ms,
         }
         _RATE_LIMIT_STATE[model] = entry
+
+        curr_uid = uid
+        if not curr_uid and CONFIG.get("cred"):
+            try:
+                curr_uid = getattr(CONFIG["cred"], "get_active_uid", lambda: "")()
+            except Exception:
+                pass
+        if curr_uid:
+            _ACCOUNT_COOLDOWNS[(curr_uid, model)] = dict(entry)
+
+
+class AccountRotator:
+    """多账号凭证调度引擎。
+    支持三种轮换模式：
+    - off: 固定使用当前活跃账号（默认）
+    - failover: 限流故障自动避让。当当前账号遇到 429/6004 限流时，自动在账号池中选择下一个未冷却的就绪账号发起重试
+    - roundrobin: 请求级负载均衡轮询。每 N 次请求（或每次）在就绪账号间轮流调度，遭遇限流同样自动故障转移
+    """
+
+    def __init__(self, cred_mgr: Any = None, mode: str = "off", rotate_count: int = 1):
+        self.cred_mgr = cred_mgr
+        self.mode = (mode or "off").lower()
+        self.rotate_count = max(1, rotate_count)
+        self._req_counter = 0
+        self._lock = threading.Lock()
+
+    def get_all_accounts(self) -> list[tuple[str, dict]]:
+        if not self.cred_mgr:
+            return []
+        if hasattr(self.cred_mgr, "list_all_accounts"):
+            return self.cred_mgr.list_all_accounts()
+        if hasattr(self.cred_mgr, "get_active_session"):
+            try:
+                s = self.cred_mgr.get_active_session()
+                uid = (s.get("account") or {}).get("uid") or "default"
+                return [(uid, s)]
+            except Exception:
+                pass
+        return []
+
+    def get_candidate_uids(self, model: str) -> list[str]:
+        all_accs = self.get_all_accounts()
+        if not all_accs:
+            return []
+        ready = [uid for uid, _ in all_accs if not _is_account_cooldown(uid, model)]
+        return ready
+
+    def get_retry_budget(self, model: str) -> int:
+        if self.mode not in ("failover", "roundrobin"):
+            return 1
+        all_accs = self.get_all_accounts()
+        return max(1, min(len(all_accs), 5))
+
+    def select_account(self, model: str) -> tuple[str, dict]:
+        """为即将开始的请求选择账号，返回 (uid, headers)。"""
+        with self._lock:
+            if not self.cred_mgr:
+                raise HTTPException(status_code=503, detail={"error": {"message": "未找到登录凭据，请先在桌面端登录 CodeBuddy/WorkBuddy", "type": "auth_error"}})
+
+            active_uid = getattr(self.cred_mgr, "get_active_uid", lambda: "")()
+            if self.mode == "off":
+                return active_uid, self.cred_mgr.get_headers()
+
+            all_accs = self.get_all_accounts()
+            if len(all_accs) <= 1:
+                return active_uid, self.cred_mgr.get_headers()
+
+            candidates = self.get_candidate_uids(model)
+            if not candidates:
+                return active_uid, self.cred_mgr.get_headers()
+
+            if self.mode == "roundrobin":
+                self._req_counter += 1
+                if self._req_counter % self.rotate_count == 0:
+                    cand_list = candidates
+                    if active_uid in cand_list:
+                        next_idx = (cand_list.index(active_uid) + 1) % len(cand_list)
+                        target_uid = cand_list[next_idx]
+                    else:
+                        target_uid = cand_list[0]
+                    if target_uid != active_uid and hasattr(self.cred_mgr, "switch_active_account"):
+                        self.cred_mgr.switch_active_account(target_uid)
+                        active_uid = target_uid
+                        _log(f"🔄 [多账号轮询] 轮换活跃账号至 UID: {active_uid[:8]}...")
+                headers = self.cred_mgr.get_headers_for_uid(active_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
+                return active_uid, headers
+
+            elif self.mode == "failover":
+                if _is_account_cooldown(active_uid, model) and candidates:
+                    target_uid = candidates[0]
+                    if target_uid != active_uid and hasattr(self.cred_mgr, "switch_active_account"):
+                        self.cred_mgr.switch_active_account(target_uid)
+                        active_uid = target_uid
+                        _log(f"🔄 [限流避让] 当前账号冷却中，自动切换至就绪账号 UID: {active_uid[:8]}...")
+                headers = self.cred_mgr.get_headers_for_uid(active_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
+                return active_uid, headers
+
+            return active_uid, self.cred_mgr.get_headers()
+
+    def record_failure_and_failover(self, current_uid: str, model: str, status_code: int, err_text: str) -> tuple[str, dict] | None:
+        """处理 429/6004；若开启 failover/roundrobin 且有备用账号，自动切号并返回 (new_uid, new_headers)。"""
+        is_rate_limited = (status_code == 429) or ("6004" in (err_text or ""))
+        if not is_rate_limited:
+            return None
+        if self.mode not in ("failover", "roundrobin"):
+            return None
+
+        with self._lock:
+            _record_rate_limit(model, err_text, uid=current_uid)
+            if not self.cred_mgr:
+                return None
+            all_accs = self.get_all_accounts()
+            if len(all_accs) <= 1:
+                return None
+
+            candidates = [u for u in self.get_candidate_uids(model) if u != current_uid]
+            if not candidates:
+                _log(f"⚠️ [多账号调度] 账号 {current_uid[:8] if current_uid else '当前'}... 触发限流，但无其他可用就绪账号（全池冷却）")
+                return None
+
+            next_uid = candidates[0]
+            if hasattr(self.cred_mgr, "switch_active_account"):
+                self.cred_mgr.switch_active_account(next_uid)
+            new_headers = self.cred_mgr.get_headers_for_uid(next_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
+            _log(f"🔄 [故障自动切换] 账号 {current_uid[:8] if current_uid else ''}... 触发 6004/429 限流，切换至备用账号 {next_uid[:8]}... 并重试")
+            return next_uid, new_headers
+
+
+_ACCOUNT_ROTATOR: Optional[AccountRotator] = None
+
+
+def _get_rotator() -> AccountRotator:
+    global _ACCOUNT_ROTATOR
+    mode = CONFIG.get("rotate_mode", "off")
+    count = CONFIG.get("rotate_count", 1)
+    if _ACCOUNT_ROTATOR is None:
+        _ACCOUNT_ROTATOR = AccountRotator(cred_mgr=CONFIG.get("cred"), mode=mode, rotate_count=count)
+    else:
+        _ACCOUNT_ROTATOR.cred_mgr = CONFIG.get("cred")
+        _ACCOUNT_ROTATOR.mode = mode
+        _ACCOUNT_ROTATOR.rotate_count = max(1, count)
+    return _ACCOUNT_ROTATOR
 
 
 def _rolling_usage(model: str) -> dict:
@@ -1271,6 +1560,15 @@ async def api_rate_limit():
     now_dt = datetime.datetime.now(tz8)
     is_night_free = (now_dt.hour >= 23 or now_dt.hour < 8)
 
+    rotator = _get_rotator()
+    all_accs = rotator.get_all_accounts()
+    rotation_info = {
+        "mode": rotator.mode,
+        "rotate_count": rotator.rotate_count,
+        "accounts_count": len(all_accs),
+        "active_uid": getattr(CONFIG.get("cred"), "get_active_uid", lambda: "")() if CONFIG.get("cred") else "",
+    }
+
     return {
         "models": models,
         "rollingUsage": {m: _rolling_usage(m) for m in snapshot or {}},
@@ -1283,6 +1581,7 @@ async def api_rate_limit():
         },
         "nickname": nickname,
         "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "rotation": rotation_info,
     }
 
 
@@ -1374,7 +1673,8 @@ async def chat_completions(request: Request,
     # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）
     _log_payload(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}")
 
-    headers = cred.get_headers()
+    rotator = _get_rotator()
+    uid, headers = rotator.select_account(model_name)
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
@@ -1387,7 +1687,7 @@ async def chat_completions(request: Request,
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
-                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid):
+                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid):
                     yield chunk
             finally:
                 if pacer_ctx:
@@ -1404,7 +1704,7 @@ async def chat_completions(request: Request,
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
-                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid):
+                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid):
                     yield chunk
             finally:
                 if pacer_ctx:
@@ -1417,34 +1717,50 @@ async def chat_completions(request: Request,
         )
 
     # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
-    try:
-        async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-            async with httpx.AsyncClient(timeout=300) as c:
-                async with c.stream("POST", url, headers=headers, json=body) as r:
-                    if r.status_code != 200:
-                        raw = await r.aread()
-                        _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-                        _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}", level="debug")
-                        raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
-                    collected, ttft_ms = await _collect_stream(r, t0)
-    except HTTPException as e:
-        # 上游错误（非 200 等）：记一条失败统计（ok=false）后原样抛出，不改变既有错误语义
-        _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
-        # 6004 频率限制：从 detail 原始报文提取重置时刻（detail 可能是 dict 或 str）
+    retry_budget = rotator.get_retry_budget(model_name)
+    collected = None
+    ttft_ms = None
+
+    for attempt in range(retry_budget):
         try:
-            _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
-            _record_rate_limit(model_name, _dl)
-        except Exception:
-            pass
-        raise
-    except httpx.HTTPError as e:
-        _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
-        _record_usage(model_name, False, t0, error=f"upstream error: {e}")
-        raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
-    except Exception as e:
-        # 兜底：未预期异常同样记失败统计，再原样抛出
-        _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
-        raise
+            async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
+                async with httpx.AsyncClient(timeout=300) as c:
+                    async with c.stream("POST", url, headers=headers, json=body) as r:
+                        if r.status_code != 200:
+                            raw = await r.aread()
+                            err_str = raw.decode('utf-8', 'replace')
+                            _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
+                            _log(f"[{rid}] ── ERROR BODY ──\n{err_str}", level="debug")
+                            _record_rate_limit(model_name, err_str, uid=uid)
+                            if attempt < retry_budget - 1:
+                                failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
+                                if failover:
+                                    uid, headers = failover
+                                    continue
+                            raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
+                        collected, ttft_ms = await _collect_stream(r, t0)
+                        break
+        except HTTPException as e:
+            if attempt >= retry_budget - 1:
+                _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
+                try:
+                    _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
+                    _record_rate_limit(model_name, _dl, uid=uid)
+                except Exception:
+                    pass
+                raise
+        except httpx.HTTPError as e:
+            if attempt < retry_budget - 1:
+                failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
+                if failover:
+                    uid, headers = failover
+                    continue
+            _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
+            _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+            raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
+        except Exception as e:
+            _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
+            raise
     _log_finish(model_name, t0, collected, rid)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
@@ -1531,7 +1847,8 @@ async def anthropic_messages(
     rid = os.urandom(4).hex()
     _log(f"[{rid}] ▶ ANTHROPIC /v1/messages {model_name} | stream={client_wants_stream}")
 
-    headers = cred.get_headers()
+    rotator = _get_rotator()
+    uid, headers = rotator.select_account(model_name)
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
@@ -1540,7 +1857,7 @@ async def anthropic_messages(
     if client_wants_stream:
         async def _anthropic_stream_gen():
             translator = AnthropicStreamTranslator(model=raw_body.get("model", model_name))
-            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid)
+            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid)
             buf = ""
             try:
                 if pacer_ctx:
@@ -1571,32 +1888,50 @@ async def anthropic_messages(
         )
 
     # 非流式
-    try:
-        async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-            async with httpx.AsyncClient(timeout=300) as c:
-                async with c.stream("POST", url, headers=headers, json=body) as r:
-                    if r.status_code != 200:
-                        raw = await r.aread()
-                        _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
-                        _record_rate_limit(model_name, raw.decode("utf-8", "replace"))
-                        raise HTTPException(
-                            status_code=r.status_code,
-                            detail={"type": "error", "error": {"type": "api_error", "message": raw.decode("utf-8", "replace")[:500]}},
-                        )
-                    collected, ttft_ms = await _collect_stream(r, t0)
-    except HTTPException:
-        raise
-    except httpx.HTTPError as e:
-        _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
-        _record_usage(model_name, False, t0, error=f"upstream error: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail={"type": "error", "error": {"type": "api_error", "message": f"upstream error: {e}"}},
-        )
-    except Exception as e:
-        _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
-        raise
+    retry_budget = rotator.get_retry_budget(model_name)
+    collected = None
+    ttft_ms = None
+
+    for attempt in range(retry_budget):
+        try:
+            async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
+                async with httpx.AsyncClient(timeout=300) as c:
+                    async with c.stream("POST", url, headers=headers, json=body) as r:
+                        if r.status_code != 200:
+                            raw = await r.aread()
+                            err_str = raw.decode('utf-8', 'replace')
+                            _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
+                            _record_rate_limit(model_name, err_str, uid=uid)
+                            if attempt < retry_budget - 1:
+                                failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
+                                if failover:
+                                    uid, headers = failover
+                                    continue
+                            _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                            raise HTTPException(
+                                status_code=r.status_code,
+                                detail={"type": "error", "error": {"type": "api_error", "message": raw.decode("utf-8", "replace")[:500]}},
+                            )
+                        collected, ttft_ms = await _collect_stream(r, t0)
+                        break
+        except HTTPException:
+            if attempt >= retry_budget - 1:
+                raise
+        except httpx.HTTPError as e:
+            if attempt < retry_budget - 1:
+                failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
+                if failover:
+                    uid, headers = failover
+                    continue
+            _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
+            _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+            raise HTTPException(
+                status_code=502,
+                detail={"type": "error", "error": {"type": "api_error", "message": f"upstream error: {e}"}},
+            )
+        except Exception as e:
+            _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
+            raise
 
     _log_finish(model_name, t0, collected, rid)
     _u = collected.get("usage") or {}
@@ -1842,7 +2177,8 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
 
 
 async def _safe_stream_upstream(url: str, headers: dict, body: dict,
-                                model_name: str = "?", t0: float = 0.0, rid: str = ""):
+                                model_name: str = "?", t0: float = 0.0, rid: str = "",
+                                rotator: Optional[Any] = None, uid: str = ""):
     """针对带 tools 的流式请求，进行聚合校验与防损坏重试，再伪流式下发。
 
     解决上游 Issue #3：腾讯后端（copilot.tencent.com）在流式返回 tool_calls 时偶发
@@ -1854,14 +2190,23 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     ttft_ms = None
     retry_count = 0
     retry_reason = None
+    curr_uid = uid
+    curr_headers = dict(headers)
 
     for attempt in range(1, max_attempts + 1):
         try:
             async with httpx.AsyncClient(timeout=300) as c:
-                async with c.stream("POST", url, headers=headers, json=body) as r:
+                async with c.stream("POST", url, headers=curr_headers, json=body) as r:
                     if r.status_code != 200:
                         raw = await r.aread()
-                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
+                        err_str = raw.decode("utf-8", "replace")
+                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
+                        _record_rate_limit(model_name, err_str, uid=curr_uid)
+                        if rotator:
+                            failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
+                            if failover:
+                                curr_uid, curr_headers = failover
+                                continue
                         _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}",
                                       retry_count=retry_count, retry_reason=retry_reason)
                         yield _err_event(raw, r.status_code)
@@ -2253,7 +2598,8 @@ class _SseLineBuffer:
 
 
 async def _stream_upstream(url: str, headers: dict, body: dict,
-                           model_name: str = "?", t0: float = 0.0, rid: str = ""):
+                           model_name: str = "?", t0: float = 0.0, rid: str = "",
+                           rotator: Optional[Any] = None, uid: str = ""):
     """把后端 SSE 原样转发给客户端（后端已是标准 OpenAI SSE，含 tool_calls）。
 
     同时轻量解析流，统计 finish_reason / tool_calls / usage 用于日志，不阻塞转发。
@@ -2324,32 +2670,46 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             out += coal.feed(cleaned)
         return out
 
-    try:
-        async with httpx.AsyncClient(timeout=None) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
-                if r.status_code != 200:
-                    err = await r.aread()
-                    _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err.decode('utf-8','replace'),200)}")
-                    _log(f"{prefix}── ERROR BODY ──\n{err.decode('utf-8','replace')}", level="debug")
-                    # 上游错误：先记一条失败统计（tokens 未知填 null）再返回错误事件
-                    _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
-                    # 6004 频率限制：记录重置时刻，供 /api/rate_limit 自曝
-                    _record_rate_limit(model_name, err.decode("utf-8", "replace"))
-                    yield _err_event(err, r.status_code)
-                    return
-                async for chunk in r.aiter_bytes():
-                    if chunk:
-                        raw_parts.append(chunk)
-                        # 空段清洗 + reasoning 合并后转发（借鉴 DistPub/workbuddy2api）
-                        for evt in _feed_and_coalesce(chunk):
-                            yield evt
-                # 流尾兜底：残余行与残余 reasoning
-                for evt in coal.flush():
-                    yield evt
-    except httpx.HTTPError as e:
-        _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-        err_msg = f"upstream error: {e}"
-        yield _err_event(str(e).encode(), 502)
+    retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
+    curr_uid = uid
+    curr_headers = dict(headers)
+
+    for attempt in range(retry_budget):
+        try:
+            async with httpx.AsyncClient(timeout=None) as c:
+                async with c.stream("POST", url, headers=curr_headers, json=body) as r:
+                    if r.status_code != 200:
+                        err = await r.aread()
+                        err_str = err.decode("utf-8", "replace")
+                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
+                        _log(f"{prefix}── ERROR BODY ──\n{err_str}", level="debug")
+                        _record_rate_limit(model_name, err_str, uid=curr_uid)
+                        if rotator and attempt < retry_budget - 1:
+                            failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
+                            if failover:
+                                curr_uid, curr_headers = failover
+                                continue
+                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                        yield _err_event(err, r.status_code)
+                        return
+                    async for chunk in r.aiter_bytes():
+                        if chunk:
+                            raw_parts.append(chunk)
+                            for evt in _feed_and_coalesce(chunk):
+                                yield evt
+                    for evt in coal.flush():
+                        yield evt
+                    break
+        except httpx.HTTPError as e:
+            if rotator and attempt < retry_budget - 1:
+                failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
+                if failover:
+                    curr_uid, curr_headers = failover
+                    continue
+            _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+            err_msg = f"upstream error: {e}"
+            yield _err_event(str(e).encode(), 502)
+            return
 
     # 流结束：输出完成日志
     elapsed = time.time() - t0 if t0 else 0
@@ -2562,6 +2922,10 @@ def main():
                          "注意：长思考或大输出模型可能导致首字延迟增加。默认关闭（原生真流式直通）。")
     ap.add_argument("--no-repair-stream-tools", action="store_false", dest="repair_stream_tools",
                     help="禁用流式 tool_calls 损坏防御，强制全量原始 SSE 直通。")
+    ap.add_argument("--rotate-mode", choices=["off", "failover", "roundrobin"], default=None,
+                    help="多账号凭证调度模式：off (关闭轮换，固定当前活跃账号) / failover (限流自动避让下一个健康账号) / roundrobin (按请求数轮询分摊)。默认 off。")
+    ap.add_argument("--rotate-count", type=int, default=None,
+                    help="在 roundrobin 模式下，每 N 次请求轮换一次账号。默认 1。")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     args = ap.parse_args()
 
@@ -2591,6 +2955,10 @@ def main():
         CONFIG["repair_stream_tools"] = args.repair_stream_tools
     else:
         CONFIG["repair_stream_tools"] = os.environ.get("CODEBUDDY2OPENAI_REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes")
+    if args.rotate_mode:
+        CONFIG["rotate_mode"] = args.rotate_mode.lower()
+    if args.rotate_count is not None:
+        CONFIG["rotate_count"] = max(1, args.rotate_count)
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
     CONFIG["log_level"] = args.log_level
     CONFIG["log_payloads"] = args.log_payloads or os.environ.get("CODEBUDDY2OPENAI_LOG_PAYLOADS", "").lower() in ("1", "true", "yes")

@@ -96,9 +96,104 @@ export async function loadAccountsData() {
     state.accountsList = acctList;
 
     renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData, rateLimitData);
-    renderAccountsGrid(acctList);
+    renderAccountsGrid(acctList, rateLimitData);
+    await syncRotationPolicyCard(acctList.length);
   } catch (e) {
     container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${esc(e.message || e)}</div>`;
+  }
+}
+
+// 读取后端持久化的轮换配置并同步到策略卡（单账号时自动灰化提示）
+async function syncRotationPolicyCard(accountCount) {
+  const badge = document.getElementById('rotation-status-badge');
+  const select = document.getElementById('select-rotate-mode');
+  const countInput = document.getElementById('input-rotate-count');
+  const wrapCount = document.getElementById('wrap-rotate-count');
+  const hint = document.getElementById('rotation-policy-hint');
+  if (!select) return;
+
+  try {
+    const cfg = await invokeTauri('get_app_settings');
+    if (cfg) {
+      if (cfg.rotate_mode && ['off', 'failover', 'roundrobin'].includes(cfg.rotate_mode)) {
+        select.value = cfg.rotate_mode;
+      }
+      if (cfg.rotate_count) {
+        countInput.value = String(cfg.rotate_count);
+      }
+    }
+  } catch (e) {
+    console.warn('读取轮换配置失败:', e);
+  }
+
+  const isMulti = accountCount >= 2;
+  const mode = select.value;
+
+  if (badge) {
+    if (!isMulti) {
+      badge.textContent = '单账号模式';
+      badge.className = 'badge badge-info';
+    } else if (mode === 'off') {
+      badge.textContent = '多账号 · 未启用调度';
+      badge.className = 'badge badge-info';
+    } else if (mode === 'failover') {
+      badge.textContent = `多账号 · 限流避让 (${accountCount} 账号)`;
+      badge.className = 'badge badge-valid';
+    } else {
+      badge.textContent = `多账号 · 负载均衡 (${accountCount} 账号)`;
+      badge.className = 'badge badge-valid';
+    }
+  }
+
+  if (wrapCount) {
+    wrapCount.style.display = mode === 'roundrobin' ? 'flex' : 'none';
+  }
+
+  if (hint) {
+    hint.textContent = !isMulti
+      ? '当前仅保存 1 个账号，轮换调度无效（N=1 等价原地不动）。请先在「授权新账号」添加第二个账号后启用。'
+      : mode === 'off'
+        ? '当前关闭调度，所有请求固定走「当前活跃」账号。切换活跃账号可在下方账号卡片点击「设为活跃」。'
+        : mode === 'failover'
+          ? '已开启限流避让：当前账号遇到 429/6004 冷却时，内核自动切换至下一个就绪账号并重试，无需手动干预。'
+          : '已开启负载均衡：每 N 次请求在就绪账号间轮流调度，分摊单账号频控压力；遭遇限流同样自动故障转移。';
+  }
+}
+
+// 保存轮换策略：走 save_app_settings，保留其余既有配置字段
+async function saveRotationPolicy() {
+  const select = document.getElementById('select-rotate-mode');
+  const countInput = document.getElementById('input-rotate-count');
+  const btn = document.getElementById('btn-save-rotation');
+  if (!select) return;
+
+  const mode = select.value;
+  const count = Math.max(1, Math.min(100, parseInt(countInput?.value, 10) || 1));
+
+  if (btn) btn.disabled = true;
+  try {
+    const cfg = await invokeTauri('get_app_settings');
+    const next = {
+      close_action: cfg?.close_action || 'hide_to_tray',
+      auto_start_proxy: Boolean(cfg?.auto_start_proxy),
+      show_debug_console: Boolean(cfg?.show_debug_console),
+      port: Number(cfg?.port) || 8787,
+      desensitize: cfg?.desensitize !== false,
+      rotate_mode: mode,
+      rotate_count: count,
+    };
+    await invokeTauri('save_app_settings', { settings: next });
+    showToast(
+      mode === 'off'
+        ? '已关闭多账号调度策略'
+        : `调度策略已保存：${mode === 'failover' ? '限流自动避让' : '负载均衡轮询'}（需重启服务生效）`,
+      'success'
+    );
+    await syncRotationPolicyCard(state.accountsList.length);
+  } catch (e) {
+    showToast(`保存失败: ${e.message || e}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -238,7 +333,8 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
   });
 }
 
-function renderAccountsGrid(list) {
+// 账号卡片渲染：携带轮换调度状态（活跃 / 就绪 / 冷却中）
+function renderAccountsGrid(list, rateLimit) {
   const grid = document.getElementById('accounts-list');
   if (!grid) return;
 
@@ -247,17 +343,34 @@ function renderAccountsGrid(list) {
     return;
   }
 
+  // 冷却模型列表（state==='limited' 且属该账号时视为冷却中）——按账号名匹配有限，
+  // 这里统一按「全局存在 6004 冷却记录」提示，避免多账号下错误归因
+  const limitedModels = rateLimit && rateLimit.models
+    ? Object.entries(rateLimit.models).filter(([, e]) => e.state === 'limited').map(([m]) => m)
+    : [];
+  const coolingTip = limitedModels.length > 0
+    ? `<div class="muted" style="font-size:10px; margin-top:4px;">⏳ 上游冷却模型: ${esc(limitedModels.slice(0, 3).join(', '))}${limitedModels.length > 3 ? ` 等 ${limitedModels.length} 个` : ''}</div>`
+    : '';
+
+  const multi = list.length >= 2;
+
   grid.innerHTML = list.map(a => `
     <div class="account-item-card ${a.is_active ? 'is-active' : ''}">
       <div class="account-item-header">
         <strong>${esc(a.nickname || '未命名')}</strong>
-        ${a.is_active ? '<span class="badge badge-running">使用中</span>' : `<button class="btn btn-secondary btn-sm" data-act="switch" data-uid="${esc(a.uid)}">设为活跃</button>`}
+        ${a.is_active
+          ? `<span class="badge badge-running">${multi ? '● 活跃中' : '使用中'}</span>`
+          : `<span class="badge badge-info">${a.token_expired ? '已过期' : '○ 待机就绪'}</span>`}
       </div>
       <div class="mono muted" style="font-size: 11px;">${esc(a.uid)}</div>
       <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 4px;">
-        <span class="${a.token_expired ? 'text-danger' : 'text-success'}">${a.token_expired ? '已过期' : '凭据有效'}</span>
-        ${!a.is_active ? `<button class="btn btn-danger btn-sm" data-act="delete" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">删除</button>` : ''}
+        <span class="${a.token_expired ? 'text-danger' : 'text-success'}">${a.token_expired ? '凭据已过期' : '凭据有效'}</span>
+        <span style="display: flex; gap: 6px;">
+          ${!a.is_active ? `<button class="btn btn-secondary btn-sm" data-act="switch" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">设为活跃</button>` : ''}
+          ${!a.is_active ? `<button class="btn btn-danger btn-sm" data-act="delete" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">删除</button>` : ''}
+        </span>
       </div>
+      ${a.is_active ? coolingTip : ''}
     </div>
   `).join('');
 }
@@ -272,6 +385,16 @@ export function initAccountsDelegation() {
     if (btn.dataset.act === 'switch') window.switchAccount(btn.dataset.uid);
     if (btn.dataset.act === 'delete') window.deleteAccount(btn.dataset.uid);
   });
+}
+
+// 多账号调度策略卡：下拉切换与保存
+export function initRotationPolicy() {
+  const select = document.getElementById('select-rotate-mode');
+  const saveBtn = document.getElementById('btn-save-rotation');
+  if (!select) return;
+  // 切换模式时即时更新提示文案与阈值输入框可见性
+  select.addEventListener('change', () => syncRotationPolicyCard(state.accountsList?.length || 0));
+  saveBtn?.addEventListener('click', saveRotationPolicy);
 }
 
 window.switchAccount = async (uid) => {

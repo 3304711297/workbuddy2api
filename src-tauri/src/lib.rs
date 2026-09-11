@@ -41,6 +41,12 @@ pub struct AppConfig {
     /// 是否对上游响应做脱敏处理；serde default 保证旧 settings.json 缺字段时反序列化兼容
     #[serde(default = "default_desensitize")]
     pub desensitize: bool,
+    /// 多账号轮换模式：off | failover | roundrobin
+    #[serde(default = "default_rotate_mode")]
+    pub rotate_mode: String,
+    /// 轮询请求阈值（默认 1）
+    #[serde(default = "default_rotate_count")]
+    pub rotate_count: u32,
 }
 
 fn default_proxy_port() -> u16 {
@@ -51,6 +57,14 @@ fn default_desensitize() -> bool {
     true
 }
 
+fn default_rotate_mode() -> String {
+    "off".to_string()
+}
+
+fn default_rotate_count() -> u32 {
+    1
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -59,6 +73,8 @@ impl Default for AppConfig {
             show_debug_console: false, // 默认为静默不显示窗口
             port: default_proxy_port(),
             desensitize: default_desensitize(),
+            rotate_mode: default_rotate_mode(),
+            rotate_count: default_rotate_count(),
         }
     }
 }

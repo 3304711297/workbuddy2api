@@ -108,6 +108,10 @@ pub fn proxy_start(
     if desensitize {
         cmd.arg("--desensitize");
     }
+    if cfg.rotate_mode != "off" && !cfg.rotate_mode.is_empty() {
+        cmd.arg("--rotate-mode").arg(&cfg.rotate_mode);
+        cmd.arg("--rotate-count").arg(cfg.rotate_count.to_string());
+    }
     // 用量统计：每次聊天请求完成后由 converter 向该文件追加一行 JSONL，供 usage_summary 聚合
     let usage_dir = local_app_dir().join("usage");
     let _ = std::fs::create_dir_all(&usage_dir);
