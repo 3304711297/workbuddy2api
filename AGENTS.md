@@ -145,7 +145,7 @@ codebuddy2openai.exe (GUI)
 ## 6. 提交与 CI
 
 - 提交信息用中文 + conventional 前缀（`feat:` / `fix:` / `docs:` / `chore:`）。
-- push 后**必须盯 CI 到绿**：`gh run list -R 3304711297/codebuddy2openai --limit 3`。
+- push 后**必须盯 CI 到绿**：`gh run list -R 3304711297/workbuddy2api --limit 3`。
   CI 覆盖 Build frontend / pytest / 前端单测 / cargo check / cargo test。
 - 推送若报 `Recv failure`，改走 Karing 代理（`127.0.0.1:3067`）；两种都试。
 
