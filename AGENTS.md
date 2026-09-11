@@ -18,7 +18,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-python -m pytest tests/ -q          # Python：163 passed 为当前基线
+python -m pytest tests/ -q          # Python：177 passed 为当前基线
 npm test                            # 前端：12 passed（node --test）
 cd src-tauri && cargo test          # Rust：15 passed
 ```
@@ -65,6 +65,19 @@ codebuddy2openai.exe (GUI)
   `x-anthropic-billing-header:`、`"You are Claude Code, Anthropic's official CLI"`、
   `"Main branch (you will usually use this for PRs):"`。改动后需实测模型可调用性，
   不能只看单测。
+- **思考档位矩阵（`billing.rs` 的 `EFFORT_CATALOG`）**：上游 `/v2/enterprises/personal/models`
+  对 `deepseek-v4.1-flash`、`deepseek-v4-pro` 等只下发扁平 `reasoning:{"effort":"high"}`，
+  **不含** `supportedEfforts` / `canDisableThinking`；完整矩阵只在官方客户端另一路
+  `/v3/config` 下发。故 `EFFORT_CATALOG` 是覆盖表兜底，判定顺序固定为
+  **上游完整矩阵 > 覆盖表 > 扁平值**，`efforts_source` 字段回传给前端标注来源。
+  改这张表必须同步 `tests/test_model_effort_matrix.py` 的 `OFFICIAL_MATRIX`
+  （该表取自官方客户端 `cloud_product_config_cache` 实测，是唯一真源）。
+  **不要**把它改成强制覆盖上游——否则上游日后补全矩阵时会被本地旧值压住。
+- **「默认」档语义 = 透传，不是本地默认值**：控制台思考强度选「默认」时
+  `model_settings.json` 里不写 `reasoning_effort` 键，`converter.py` 因而不改写
+  请求体，客户端（如 Hermes `agent.reasoning_effort=ultra`）下发什么就发什么。
+  用户明确要求思考强度只由 Hermes 侧控制，**禁止**在反代加档位值白名单/翻译层，
+  也禁止把「默认」渲染成某个具体档位（如 `默认 (high)`）。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
 - **并发削峰平滑器 (`request_pacer.py`)**：
