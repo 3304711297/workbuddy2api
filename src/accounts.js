@@ -161,6 +161,8 @@ async function syncRotationPolicyCard(accountCount) {
 }
 
 // 保存轮换策略：走 save_app_settings，保留其余既有配置字段
+// ⚠️ save_app_settings 是整对象覆盖写盘；这里必须先读磁盘真源再合并，且不能依赖内存缓存，
+// 否则与「设置」页的 persistSettings 互相覆盖（rotation 配置闪回 off 的根因）。
 async function saveRotationPolicy() {
   const select = document.getElementById('select-rotate-mode');
   const countInput = document.getElementById('input-rotate-count');
@@ -172,6 +174,7 @@ async function saveRotationPolicy() {
 
   if (btn) btn.disabled = true;
   try {
+    // 以磁盘真源为基底做字段合并，只改动 rotate_*，其余原样保留
     const cfg = await invokeTauri('get_app_settings');
     const next = {
       close_action: cfg?.close_action || 'hide_to_tray',
@@ -183,6 +186,13 @@ async function saveRotationPolicy() {
       rotate_count: count,
     };
     await invokeTauri('save_app_settings', { settings: next });
+    // 写盘后立即回读校验，确认没有被 serde default 抹回默认值
+    const verify = await invokeTauri('get_app_settings');
+    if (verify?.rotate_mode !== mode || Number(verify?.rotate_count) !== count) {
+      showToast('保存未生效：配置被其他页面覆盖，请重试', 'error');
+      await syncRotationPolicyCard(state.accountsList.length);
+      return;
+    }
     showToast(
       mode === 'off'
         ? '已关闭多账号调度策略'

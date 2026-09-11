@@ -29,6 +29,9 @@ node_modules/
 
 # Rust/Tauri 编译产物
 src-tauri/target/
+# 备用 target 目录（在 GUI 占用 exe 时用于旁路构建）——必须忽略，否则会误提交 GB 级产物
+src-tauri/target-*/
+target-*/
 
 # worktrees (superpowers workflow)
 .worktrees/

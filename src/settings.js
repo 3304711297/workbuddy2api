@@ -98,6 +98,11 @@ export function initSettings() {
   };
 
   // 统一构造完整设置对象（契约：save_app_settings 接收含 port/desensitize 的完整对象）
+  // ⚠️ 后端 save_app_settings 是「整对象覆盖写盘」，payload 缺字段会被 serde default 抹回默认值。
+  // 因此任何新增的 AppConfig 字段都必须在此显式带上，否则用户改动会被静默回滚。
+  // rotate_mode / rotate_count 由「账号与资产」页的调度策略卡负责写入，这里只做透传保留。
+  let rotateModeCache = 'off';
+  let rotateCountCache = 1;
   const buildSettingsPayload = () => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
@@ -105,12 +110,22 @@ export function initSettings() {
       auto_start_proxy: chkAutoStart ? chkAutoStart.checked : false,
       show_debug_console: chkDebugConsole ? chkDebugConsole.checked : false,
       port: state.port,
-      desensitize: state.desensitize
+      desensitize: state.desensitize,
+      rotate_mode: rotateModeCache,
+      rotate_count: rotateCountCache
     };
   };
 
   const persistSettings = async () => {
     try {
+      // 写盘前先读一次磁盘真源，避免用陈旧的内存缓存覆盖别处刚写入的轮换配置
+      try {
+        const latest = await invokeTauri('get_app_settings');
+        if (latest) {
+          if (latest.rotate_mode) rotateModeCache = latest.rotate_mode;
+          if (latest.rotate_count) rotateCountCache = latest.rotate_count;
+        }
+      } catch { /* 读取失败则沿用上次已知值 */ }
       await invokeTauri('save_app_settings', { settings: buildSettingsPayload() });
       return true;
     } catch (err) {
