@@ -502,6 +502,14 @@ MODEL_MAP = {
 
 DEFAULT_MODELS = [
     "auto",
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gemini-3.5-flash",
     "hy4-preview",
     "hy4-preview-x",
     "hy3",
@@ -523,6 +531,7 @@ DEFAULT_MODELS = [
     "kimi-k2.6",
     "kimi-k2.5",
     "kimi-k2-thinking",
+    "deepseek-v4.1-flash",
     "deepseek-v4-pro",
     "deepseek-v4-flash",
     "deepseek-v3-2-volc",
@@ -532,6 +541,7 @@ DEFAULT_MODELS = [
 ]
 
 _MODELS_URL = f"{BACKEND}/v2/enterprises/personal/models"
+_WORKBUDDY_MODELS_URL = "https://www.codebuddy.ai/v3/config"
 _MODELS_TRANSPORT_OVERRIDE = None
 _MODELS_CACHE: dict[str, dict] = {}  # uid -> {"models": list[str], "expires_at": float}
 _MODELS_WINDOWS: dict[str, int] = {}  # model_id -> 上游窗口（maxInputTokens/maxAllowedSize）
@@ -618,55 +628,87 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
         "X-User-Id": str(uid),
         "User-Agent": USER_AGENT,
     }
+    endpoints = [
+        ("CodeBuddy", _MODELS_URL),
+        ("WorkBuddy", _WORKBUDDY_MODELS_URL),
+    ]
+
+    async def _fetch_source(client: httpx.AsyncClient, label: str, url: str) -> tuple[list[str], dict[str, int]]:
+        req_headers = dict(headers)
+        if "codebuddy.ai" in url or "workbuddy" in label.lower():
+            req_headers["User-Agent"] = "WorkBuddy/2.0.0"
+        try:
+            r = await client.get(url, headers=req_headers)
+            if r.status_code == 200:
+                try:
+                    body = r.json()
+                except Exception as e:
+                    _log(f"动态模型拉取降级 [{label}]: 响应JSON解析失败 ({_sanitize_log_text(str(e))})", level="debug")
+                    return [], {}
+
+                if isinstance(body, dict) and body.get("code") == 0 and isinstance(body.get("data"), dict):
+                    raw_models = body["data"].get("models")
+                    if isinstance(raw_models, list):
+                        m_list = []
+                        w_map = {}
+                        for m in raw_models:
+                            if isinstance(m, dict):
+                                mid = m.get("id")
+                                if mid and mid != "hunyuan-image-v3.0":
+                                    m_list.append(str(mid))
+                                    w = m.get("maxInputTokens")
+                                    if not isinstance(w, int):
+                                        w = m.get("maxAllowedSize")
+                                    if isinstance(w, int) and w > 0:
+                                        w_map[str(mid)] = w
+                        return m_list, w_map
+                    else:
+                        _log(f"动态模型拉取降级 [{label}]: models字段缺失或非列表 (type={type(raw_models).__name__})", level="debug")
+                else:
+                    err_code = body.get("code") if isinstance(body, dict) else "unknown"
+                    _log(f"动态模型拉取降级 [{label}]: 响应结构异常或业务状态码错误 (code={err_code})", level="debug")
+            else:
+                _log(f"动态模型拉取降级 [{label}]: HTTP {r.status_code}", level="debug")
+        except httpx.TimeoutException as e:
+            _log(f"动态模型拉取降级 [{label}]: 请求超时 ({_sanitize_log_text(str(e))})", level="debug")
+        except httpx.HTTPError as e:
+            _log(f"动态模型拉取降级 [{label}]: 网络/HTTP异常 ({_sanitize_log_text(str(e))})", level="debug")
+        except json.JSONDecodeError as e:
+            _log(f"动态模型拉取降级 [{label}]: 响应JSON解析失败 ({_sanitize_log_text(str(e))})", level="debug")
+        except Exception as e:
+            _log(f"动态模型拉取降级 [{label}]: 未知异常 ({_sanitize_log_text(str(e))})", level="debug")
+        return [], {}
+
     try:
         client_kwargs = {"timeout": 10}
         if use_transport is not None:
             client_kwargs["transport"] = use_transport
         async with httpx.AsyncClient(**client_kwargs) as c:
-            r = await c.get(_MODELS_URL, headers=headers)
-        if r.status_code == 200:
-            try:
-                body = r.json()
-            except Exception as e:
-                _log(f"动态模型拉取降级: 响应JSON解析失败 ({_sanitize_log_text(str(e))})", level="debug")
-                return list(cached_models)
+            results = await asyncio.gather(
+                *(_fetch_source(c, label, url) for label, url in endpoints),
+                return_exceptions=True
+            )
 
-            if isinstance(body, dict) and body.get("code") == 0 and isinstance(body.get("data"), dict):
-                raw_models = body["data"].get("models")
-                if not isinstance(raw_models, list):
-                    _log(f"动态模型拉取降级: models字段缺失或非列表 (type={type(raw_models).__name__})", level="debug")
-                    return list(cached_models)
+        combined_models: list[str] = []
+        combined_windows: dict[str, int] = {}
+        seen = set()
 
-                models = []
-                windows = {}
-                for m in raw_models:
-                    if isinstance(m, dict):
-                        mid = m.get("id")
-                        if mid and mid != "hunyuan-image-v3.0":
-                            models.append(str(mid))
-                            w = m.get("maxInputTokens")
-                            if not isinstance(w, int):
-                                w = m.get("maxAllowedSize")
-                            if isinstance(w, int) and w > 0:
-                                windows[str(mid)] = w
-                if models:
-                    if windows:
-                        _MODELS_WINDOWS.update(windows)
-                    _MODELS_CACHE[cache_key] = {"models": models, "expires_at": now + 60.0}
-                    return list(models)
-                else:
-                    _log("动态模型拉取降级: 云端返回有效模型列表为空", level="debug")
-            else:
-                err_code = body.get("code") if isinstance(body, dict) else "unknown"
-                _log(f"动态模型拉取降级: 响应结构异常或业务状态码错误 (code={err_code})", level="debug")
+        for res in results:
+            if isinstance(res, tuple) and len(res) == 2:
+                m_list, w_map = res
+                for mid in m_list:
+                    if mid not in seen:
+                        seen.add(mid)
+                        combined_models.append(mid)
+                combined_windows.update(w_map)
+
+        if combined_models:
+            if combined_windows:
+                _MODELS_WINDOWS.update(combined_windows)
+            _MODELS_CACHE[cache_key] = {"models": combined_models, "expires_at": now + 60.0}
+            return list(combined_models)
         else:
-            _log(f"动态模型拉取降级: HTTP {r.status_code}", level="debug")
-    except httpx.TimeoutException as e:
-        _log(f"动态模型拉取降级: 请求超时 ({_sanitize_log_text(str(e))})", level="debug")
-    except httpx.HTTPError as e:
-        _log(f"动态模型拉取降级: 网络/HTTP异常 ({_sanitize_log_text(str(e))})", level="debug")
-    except json.JSONDecodeError as e:
-        _log(f"动态模型拉取降级: 响应JSON解析失败 ({_sanitize_log_text(str(e))})", level="debug")
+            _log("动态模型拉取降级: 双端返回有效模型列表均为空", level="debug")
     except Exception as e:
         _log(f"动态模型拉取降级: 未知异常 ({_sanitize_log_text(str(e))})", level="debug")
 

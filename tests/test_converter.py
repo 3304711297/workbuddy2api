@@ -549,3 +549,53 @@ def test_list_models_excludes_alias_ids(tmp_path, monkeypatch):
     assert "kimi-k3-1" in ids
 
 
+def test_dual_source_model_aggregation(monkeypatch):
+    """验证从 CodeBuddy (国内) 与 WorkBuddy (国际/前沿) 双源并发拉取并聚合去重。"""
+    import asyncio
+    import httpx
+
+    def handler(request: httpx.Request):
+        if request.url.host == "copilot.tencent.com" and request.url.path == "/v2/enterprises/personal/models":
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {
+                    "models": [
+                        {"id": "cb-exclusive-model", "maxInputTokens": 200000},
+                        {"id": "common-model", "maxInputTokens": 200000},
+                    ]
+                }
+            })
+        elif "codebuddy.ai" in request.url.host and request.url.path == "/v3/config":
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {
+                    "models": [
+                        {"id": "gpt-6-astra", "maxInputTokens": 1000000},
+                        {"id": "common-model", "maxInputTokens": 1000000},
+                    ]
+                }
+            })
+        return httpx.Response(404)
+
+    mock_transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(converter, "_MODELS_CACHE", {})
+    monkeypatch.setattr(converter, "_MODELS_WINDOWS", {})
+
+    class DummyCred:
+        def get_active_session(self):
+            return {"auth": {"accessToken": "test_tok"}, "account": {"uid": "test_uid"}}
+
+    monkeypatch.setitem(converter.CONFIG, "cred", DummyCred())
+    models = asyncio.run(converter._fetch_remote_models(transport=mock_transport))
+
+    assert "cb-exclusive-model" in models
+    assert "gpt-6-astra" in models
+    assert "common-model" in models
+    # 去重且保持各取所需
+    assert len([m for m in models if m == "common-model"]) == 1
+    # 窗口合并覆盖更优值
+    assert converter._MODELS_WINDOWS.get("gpt-6-astra") == 1000000
+    assert converter._MODELS_WINDOWS.get("common-model") == 1000000
+
+
+

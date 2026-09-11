@@ -40,6 +40,7 @@ CLOUD_MATRIX = {
     "hy3": (["low", "high"], "high", False),
     "hy3-x": (["low", "high"], "high", False),
     "hy4-preview": (["high"], "high", False),
+    "gpt-6-astra": (["low", "medium", "high", "xhigh", "max"], "high", True),
 }
 
 # 官方实测矩阵 BASELINE 源（客户端基线 product.json，49 模型；2026-09-11 提取）

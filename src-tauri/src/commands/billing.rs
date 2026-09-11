@@ -59,6 +59,7 @@ const EFFORT_CATALOG: &[EffortCatalog] = &[
     EffortCatalog { id: "hy3", efforts: &["low", "high"], default_effort: "high", can_disable_thinking: false },
     EffortCatalog { id: "hy3-x", efforts: &["low", "high"], default_effort: "high", can_disable_thinking: false },
     EffortCatalog { id: "hy4-preview", efforts: &["high"], default_effort: "high", can_disable_thinking: false },
+    EffortCatalog { id: "gpt-6-astra", efforts: &["low", "medium", "high", "xhigh", "max"], default_effort: "high", can_disable_thinking: true },
 ];
 
 fn lookup_effort_catalog(model_id: &str) -> Option<&'static EffortCatalog> {
@@ -162,26 +163,85 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
 
     // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
     let client = super::shared::upstream_client(30);
-    let resp = client
+
+    // 双端并发请求：CodeBuddy 国内端 + WorkBuddy 国际/前沿端
+    let cb_future = client
         .get("https://copilot.tencent.com/v2/enterprises/personal/models")
         .header("Authorization", format!("Bearer {token}"))
         .header("X-User-Id", acct_uid)
-        .header("User-Agent", "codebuddy2openai/2.0")
-        .send()
-        .await
-        .map_err(|e| format!("获取模型列表失败: {e}"))?;
+        .header("User-Agent", "WorkBuddy/2.0.0")
+        .send();
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let raw_models = body.pointer("/data/models").and_then(|v| v.as_array()).ok_or("模型数据格式异常")?;
+    let wb_future = client
+        .get("https://www.codebuddy.ai/v3/config")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-User-Id", acct_uid)
+        .header("User-Agent", "WorkBuddy/2.0.0")
+        .send();
+
+    let (res_cb, res_wb) = futures_util::join!(cb_future, wb_future);
+
+    let mut cb_models = Vec::new();
+    if let Ok(resp) = res_cb {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = body.pointer("/data/models").and_then(|v| v.as_array()) {
+                    cb_models = arr.clone();
+                }
+            }
+        }
+    }
+
+    let mut wb_models = Vec::new();
+    if let Ok(resp) = res_wb {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = body.pointer("/data/models").and_then(|v| v.as_array()) {
+                    wb_models = arr.clone();
+                }
+            }
+        }
+    }
+
+    if cb_models.is_empty() && wb_models.is_empty() {
+        return Err("双端获取模型列表均失败".to_string());
+    }
 
     let custom_settings = load_model_settings();
     let mut list = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
-    for m in raw_models {
+    let cb_id_set: std::collections::HashSet<String> = cb_models
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    let wb_id_set: std::collections::HashSet<String> = wb_models
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    // 合并列表：先遍历 cb_models，再遍历 wb_models 补充独有模型
+    let mut all_models = Vec::new();
+    for m in cb_models {
+        all_models.push(m);
+    }
+    for m in wb_models {
+        all_models.push(m);
+    }
+
+    for m in all_models {
         let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         if id.is_empty() || id == "hunyuan-image-v3.0" {
             continue;
         }
+        if seen_ids.contains(&id) {
+            continue;
+        }
+        seen_ids.insert(id.clone());
+
+        let in_cb = cb_id_set.contains(&id);
+        let in_wb = wb_id_set.contains(&id);
+
         let name = m.get("name").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
         let credits = m.get("credits").and_then(|v| v.as_str()).unwrap_or("—").to_string();
         let max_input = m.get("maxInputTokens").and_then(|v| v.as_i64())
@@ -232,10 +292,19 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             .to_string();
 
         let mut tags = Vec::new();
+        let source_tag = if in_cb && in_wb {
+            "双端"
+        } else if in_wb {
+            "WorkBuddy"
+        } else {
+            "CodeBuddy"
+        };
+        tags.push(source_tag.to_string());
+
         if let Some(tag_arr) = m.get("tags").and_then(|v| v.as_array()) {
             for t in tag_arr {
                 if let Some(ts) = t.as_str() {
-                    if !ts.starts_with("badge:") {
+                    if !ts.starts_with("badge:") && ts != source_tag {
                         tags.push(ts.to_string());
                     }
                 }
@@ -450,7 +519,7 @@ mod reasoning_matrix_tests {
     fn catalog_entries_are_present_and_shaped() {
         for id in ["deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
                    "glm-5.3", "glm-5.3-flash", "glm-5.2",
-                   "hy3", "hy3-x", "hy4-preview"] {
+                   "hy3", "hy3-x", "hy4-preview", "gpt-6-astra"] {
             let c = cat(id).unwrap_or_else(|| panic!("覆盖表缺少 {id}"));
             assert!(!c.efforts.is_empty(), "{id} 档位为空");
             assert!(c.efforts.contains(&c.default_effort),
