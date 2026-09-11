@@ -61,7 +61,7 @@ function looksLikeSdk(dir, strict) {
       pkgOk = false;
     }
     const hasOfficialDll = scanDirs.some((d) => hasIn(d, /^TuringShieldSDK\.dll$/i));
-    return (hasNative && pkgOk) || hasOfficialDll || (hasNative && has(/^package\.json$/i));
+    return (hasNative && pkgOk) || hasOfficialDll;
   } catch (_) {
     return false;
   }
@@ -132,72 +132,76 @@ function findSdkDir() {
   return null;
 }
 
-const sdkDir = findSdkDir();
-if (!sdkDir) {
-  process.stderr.write(
-    "TuringShield SDK 未找到。本脚本依赖本机已安装的 WorkBuddy 桌面端自带的 TuringShieldSDK 原生模块。\n" +
-    "已搜索以下候选目录（设置环境变量 WORKBUDDY_TURING_SDK_DIR 指向含 index.cjs / TuringShieldSDK.dll 的目录即可覆盖）：\n"
-  );
-  for (const d of collectCandidateDirs()) process.stderr.write("  - " + d + "\n");
-  process.stderr.write("\n若你已安装桌面端但目录特殊，请设置 WORKBUDDY_TURING_SDK_DIR 后重试。\n");
-  process.exit(1);
-}
-
-// 把 SDK 目录及其 build/Release 加入 DLL 搜索路径，提升 TuringShieldSDK.dll 解析成功率
-try {
-  const extra = [sdkDir, path.join(sdkDir, "build", "Release")];
-  const sep = process.platform === "win32" ? ";" : ":";
-  process.env.PATH = extra.join(sep) + sep + (process.env.PATH || "");
-} catch (_) {
-  /* 忽略：PATH 增强失败不影响主流程，仅作为辅助 */
-}
-
-let turing;
-try {
-  turing = require(sdkDir);
-} catch (e) {
-  process.stderr.write("require turing sdk failed: " + (e && e.message ? e.message : String(e)) + "\n");
-  process.stderr.write("SDK dir: " + sdkDir + "\n");
-  process.exit(1);
-}
-
-const channelId = parseInt(process.env.WORKBUDDY_TURING_CHANNEL_ID || "109144", 10);
-const productName = process.env.WORKBUDDY_TURING_PRODUCT_NAME || "WorkBuddy";
-const productVersion = process.env.WORKBUDDY_TURING_VERSION || "2.0.0";
-
-function isSupported() {
-  try {
-    return !turing.isSupported || turing.isSupported();
-  } catch (e) {
-    return false;
+if (require.main === module) {
+  const sdkDir = findSdkDir();
+  if (!sdkDir) {
+    process.stderr.write(
+      "TuringShield SDK 未找到。本脚本依赖本机已安装的 WorkBuddy 桌面端自带的 TuringShieldSDK 原生模块。\n" +
+      "已搜索以下候选目录（设置环境变量 WORKBUDDY_TURING_SDK_DIR 指向含 index.cjs / TuringShieldSDK.dll 的目录即可覆盖）：\n"
+    );
+    for (const d of collectCandidateDirs()) process.stderr.write("  - " + d + "\n");
+    process.stderr.write("\n若你已安装桌面端但目录特殊，请设置 WORKBUDDY_TURING_SDK_DIR 后重试。\n");
+    process.exit(1);
   }
-}
 
-(async () => {
-  if (!isSupported()) {
-    const loadErr = (typeof turing.getLoadError === "function") ? turing.getLoadError() : null;
-    process.stderr.write("turing sdk not supported" + (loadErr ? (": " + loadErr) : " on this platform") + "\n");
+  // 把 SDK 目录及其 build/Release 加入 DLL 搜索路径，提升 TuringShieldSDK.dll 解析成功率
+  try {
+    const extra = [sdkDir, path.join(sdkDir, "build", "Release")];
+    const sep = process.platform === "win32" ? ";" : ":";
+    process.env.PATH = extra.join(sep) + sep + (process.env.PATH || "");
+  } catch (_) {
+    /* 忽略：PATH 增强失败不影响主流程，仅作为辅助 */
+  }
+
+  let turing;
+  try {
+    turing = require(sdkDir);
+  } catch (e) {
+    process.stderr.write("require turing sdk failed: " + (e && e.message ? e.message : String(e)) + "\n");
     process.stderr.write("SDK dir: " + sdkDir + "\n");
     process.exit(1);
   }
-  try {
-    turing.configure(channelId, productName, productVersion);
-    const token = await turing.fetchDeviceToken({
-      usingCachedMessage: true,
-      includesOutdatedMessage: true,
-      includesDeviceInfo: true,
-      timeoutMs: 15000,
-    });
-    const t = (token || "").toString().trim();
-    if (!t) {
-      process.stderr.write("turing sdk returned empty token\n");
+
+  const channelId = parseInt(process.env.WORKBUDDY_TURING_CHANNEL_ID || "109144", 10);
+  const productName = process.env.WORKBUDDY_TURING_PRODUCT_NAME || "WorkBuddy";
+  const productVersion = process.env.WORKBUDDY_TURING_VERSION || "2.0.0";
+
+  function isSupported() {
+    try {
+      return !turing.isSupported || turing.isSupported();
+    } catch (e) {
+      return false;
+    }
+  }
+
+  (async () => {
+    if (!isSupported()) {
+      const loadErr = (typeof turing.getLoadError === "function") ? turing.getLoadError() : null;
+      process.stderr.write("turing sdk not supported" + (loadErr ? (": " + loadErr) : " on this platform") + "\n");
       process.stderr.write("SDK dir: " + sdkDir + "\n");
       process.exit(1);
     }
-    process.stdout.write(JSON.stringify({ token: t }));
-  } catch (e) {
-    process.stderr.write("fetch device token failed: " + (e && e.message ? e.message : String(e)) + "\n");
-    process.stderr.write("SDK dir: " + sdkDir + "\n");
-    process.exit(1);
-  }
-})();
+    try {
+      turing.configure(channelId, productName, productVersion);
+      const token = await turing.fetchDeviceToken({
+        usingCachedMessage: true,
+        includesOutdatedMessage: true,
+        includesDeviceInfo: true,
+        timeoutMs: 15000,
+      });
+      const t = (token || "").toString().trim();
+      if (!t) {
+        process.stderr.write("turing sdk returned empty token\n");
+        process.stderr.write("SDK dir: " + sdkDir + "\n");
+        process.exit(1);
+      }
+      process.stdout.write(JSON.stringify({ token: t }));
+    } catch (e) {
+      process.stderr.write("fetch device token failed: " + (e && e.message ? e.message : String(e)) + "\n");
+      process.stderr.write("SDK dir: " + sdkDir + "\n");
+      process.exit(1);
+    }
+  })();
+} else {
+  module.exports = { looksLikeSdk, collectCandidateDirs, findSdkDir };
+}
