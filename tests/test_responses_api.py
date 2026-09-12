@@ -105,6 +105,17 @@ def test_responses_stream_converter():
     assert "response.output_item.done" in all_ev
     assert "response.completed" in all_ev
 
+    # 验证官方规范字段：sequence_number 单调递增，response_id 与 item_id 存在
+    event_lines = [json.loads(line[6:]) for line in all_ev.split("\n\n") if line.startswith("data: ") and not line.endswith("[DONE]")]
+    seqs = [e["sequence_number"] for e in event_lines]
+    assert seqs == list(range(len(event_lines)))  # 从 0 开始严格单调连续自增
+
+    text_deltas = [e for e in event_lines if e.get("type") == "response.output_text.delta"]
+    assert len(text_deltas) >= 2
+    assert "response_id" in text_deltas[0]
+    assert "item_id" in text_deltas[0]
+    assert text_deltas[0]["item_id"].startswith("msg_")
+
 
 def test_chat_response_to_responses_object():
     """测试非流式 Chat 响应对象转换为 Responses 规范对象。"""
@@ -179,3 +190,39 @@ def test_e2e_responses_endpoint_nonstream(monkeypatch):
     assert data["object"] == "response"
     assert data["status"] == "completed"
     assert data["output"][0]["content"][0]["text"] == "Response hello"
+
+
+def test_responses_input_image_conversion():
+    """验证 Responses 原生 input_image（item级 与 content级）被准确转换为 Chat image_url。"""
+    req_body = {
+        "model": "glm-5v-turbo",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this image"},
+                    {"type": "input_image", "image_url": "https://example.com/cat.jpg"},
+                ],
+            },
+            {
+                "type": "input_image",
+                "image_url": {"url": "https://example.com/dog.png"},
+            }
+        ],
+    }
+    chat = responses_request_to_chat(req_body)
+    msgs = chat["messages"]
+    assert len(msgs) == 2
+
+    # 第一条：包含 text 与 image_url 部件
+    m1 = msgs[0]
+    assert m1["role"] == "user"
+    assert isinstance(m1["content"], list)
+    assert m1["content"][0] == {"type": "text", "text": "Describe this image"}
+    assert m1["content"][1] == {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}}
+
+    # 第二条：单独的 input_image 转换为包含 image_url 的 user 消息
+    m2 = msgs[1]
+    assert m2["role"] == "user"
+    assert m2["content"] == [{"type": "image_url", "image_url": {"url": "https://example.com/dog.png"}}]

@@ -344,6 +344,7 @@ def translate_anthropic_request(body: dict) -> dict:
         if th_type == "disabled":
             openai_req["reasoning_effort"] = "disable"
             openai_req["chat_template_kwargs"] = {"enable_thinking": False}
+            openai_req["thinking"] = {"type": "disabled"}
         elif th_type == "enabled":
             budget = th.get("budget_tokens")
             openai_req["chat_template_kwargs"] = {"enable_thinking": True}

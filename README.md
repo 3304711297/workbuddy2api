@@ -25,7 +25,7 @@
 ## ✨ 核心特性
 
 - 🔄 **原生三协议网关支持 (Tri-Protocol Gateway)**：
-  - **OpenAI Responses 协议 (`POST /v1/responses`)**：采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机），原生支持 **Codex CLI**（wire_api="responses"）、OpenCode 等长上下文 Agent，支持流式语义事件与非流式响应；内建 **Codex 长上下文最小语义闭包投影压缩 (`responses_projection.py`)**，自动剥离 harness 模板、收敛工具 schema 与折叠早前历史，节约 60%~85% 显存/Token 并大幅规避内容审查误拦。
+  - **OpenAI Responses 协议 (`POST /v1/responses`)**：采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机），原生支持 **Codex CLI**（wire_api="responses"）、OpenCode 等长上下文 Agent，支持流式语义事件与非流式响应；SSE 事件完整携带 `sequence_number` / `response_id` / `item_id` 规范字段；原生支持 `input_image` 多模态输入（自动内联为 data URI）。内建可选 **Codex 长上下文最小语义闭包投影压缩 (`responses_projection.py`)**，默认**关闭**（safe，保全语义），可经 `--optimize-context` / `WORKBUDDY2API_OPTIMIZE_CONTEXT=1` / 请求体 `optimize_context: true` 显式开启。
   - **Anthropic Messages 协议 (`POST /v1/messages`)**：采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机），原生直连驱动官方 **Claude Code CLI**、Cline、Roo Code 等工具，支持流式输出与函数调用（tool_use）。
   - **OpenAI 对话补全端点 (`POST /v1/chat/completions`, `GET /v1/models`)**：完整支持标准流式 SSE、原生 tools / tool_calls 函数调用，兼容各类 OpenAI SDK、IDE 插件与智能体。
   - **DeepSeek 思维链开关注入与多轮一致性回填 (`deepseek_thinking.py`)**：自动对 DeepSeek 模型注入 `thinking: {"type": "enabled"}` 与 effort 档位，并在多轮对话中自动为 assistant 历史补齐 `reasoning_content: ""`，根除上游 `11133 model_param_invalid` 参数报错与思维链静默丢失。
@@ -49,8 +49,8 @@
 - 🛡️ **安全脱敏、流量削峰与请求防护**：
   - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
   - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
-  - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`），超限报文网关层直接秒拒返回 413，防御超大 payload 拖垮本地内存与被上游拦截连坐（借鉴 `linguo2625469/workbuddy2api-panel`）；
-  - **多模态远程图片自动转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`（直接传 http 链接报错 400）。网关自动异步下载远程图片并内联嵌入，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）；
+  - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`）。中间件在 ASGI `receive` 层按块累计，**超限立即熔断**（不等 body 读完），既防大包拖垮本地内存也防被上游连坐拦截（借鉴 `linguo2625469/workbuddy2api-panel`）；
+  - **多模态远程图片自动转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`（直接传 http 链接报错 400）。网关自动异步下载远程图片并内联嵌入，彻底解除视觉模型的多模态输入限制；下载前经 SSRF 守卫（拒绝回环/私网/元数据地址、重定向逐跳复检）并施加单图 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`）（借鉴 `neipor/codebuddy-cli2api`）；
   - **官方客户端 User-Agent 仿真**：出站请求智能仿真官方客户端标识（国内版 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 触发 10085 拦截与官网使用端归因失真，亦支持 `WORKBUDDY2API_USER_AGENT` 动态配置（借鉴 `ardeyouxipianyi` 与 `turbomind66`）。
 
 ---

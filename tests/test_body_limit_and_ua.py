@@ -78,3 +78,108 @@ def test_user_agent_resolution(monkeypatch):
     # 2. 环境变量覆盖
     monkeypatch.setenv("WORKBUDDY2API_USER_AGENT", "CustomClient/1.0.0")
     assert converter._get_user_agent() == "CustomClient/1.0.0"
+
+
+# ==================== chunked 流式熔断（无 Content-Length） ====================
+
+def _run_asgi_middleware(monkeypatch, path, chunks, max_bytes, headers=None):
+    """直接驱动 ASGI 中间件，模拟无 Content-Length 的分块上传（chunked）。
+
+    返回 (是否返回 413, 实际被应用层读到的总字节数)。
+    关键断言点：超限时**不应把全部 chunks 读完**。
+    """
+    import asyncio
+
+    monkeypatch.setattr(converter, "MAX_BODY_BYTES", max_bytes)
+
+    consumed = {"bytes": 0, "calls": 0}
+    sent = {}
+
+    pending = list(chunks)
+
+    async def receive():
+        consumed["calls"] += 1
+        if pending:
+            chunk = pending.pop(0)
+            consumed["bytes"] += len(chunk)
+            return {"type": "http.request", "body": chunk, "more_body": bool(pending)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            sent["status"] = message["status"]
+        elif message["type"] == "http.response.body" and not message.get("more_body"):
+            sent["body"] = message.get("body", b"")
+
+    async def app(scope, recv, snd):
+        # 应用层读取 body（模拟 FastAPI request.body()）
+        total = 0
+        while True:
+            m = await recv()
+            total += len(m.get("body", b""))
+            if not m.get("more_body"):
+                break
+        consumed["app_bytes"] = total
+        await snd({"type": "http.response.start", "status": 200, "headers": []})
+        await snd({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    mw = converter.RequestBodyLimitMiddleware(app)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "headers": headers if headers is not None else [(b"host", b"127.0.0.1:8787")],
+    }
+    asyncio.run(mw(scope, receive, send))
+    return sent, consumed
+
+
+def test_chunked_oversized_body_aborts_early(monkeypatch):
+    """无 Content-Length 的 chunked 大包：必须在累计超限时立即熔断，不读完整个 body。"""
+    # 10 个 1KB 分块，上限 4KB → 应在第 5 块左右提前中止
+    chunks = [b"x" * 1024] * 10
+    sent, consumed = _run_asgi_middleware(
+        monkeypatch, "/v1/chat/completions", chunks, max_bytes=4096,
+    )
+    assert sent.get("status") == 413
+    # 核心断言：没有把 10KB 全部读完（提前熔断）
+    assert consumed["bytes"] < 10 * 1024, "超限后仍读完了全部 body，未提前熔断"
+    assert consumed["bytes"] <= 4096 + 1024, "熔断过晚，多余读取超过一个分块"
+    # 应用层不应被调用（不转发上游）
+    assert "app_bytes" not in consumed
+
+
+def test_chunked_oversized_anthropic_error_shape(monkeypatch):
+    """Anthropic 端点超限时返回 Anthropic 风格错误体。"""
+    import json as _json
+    chunks = [b"x" * 1024] * 10
+    sent, _ = _run_asgi_middleware(
+        monkeypatch, "/v1/messages", chunks, max_bytes=2048,
+    )
+    assert sent.get("status") == 413
+    payload = _json.loads(sent["body"].decode("utf-8"))
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "invalid_request_error"
+
+
+def test_chunked_within_limit_passes_through(monkeypatch):
+    """未超限的 chunked 请求正常透传给应用层，body 完整无损。"""
+    chunks = [b"a" * 512, b"b" * 512]
+    sent, consumed = _run_asgi_middleware(
+        monkeypatch, "/v1/chat/completions", chunks, max_bytes=4096,
+    )
+    assert sent.get("status") == 200
+    assert consumed.get("app_bytes") == 1024, "应用层读到的 body 应与上传内容等长"
+
+
+def test_content_length_quick_reject_skips_reading(monkeypatch):
+    """带超大 Content-Length 时零读取直接 413（不消耗任何 receive）。"""
+    sent, consumed = _run_asgi_middleware(
+        monkeypatch,
+        "/v1/responses",
+        [b"x" * 100],
+        max_bytes=1024,
+        headers=[(b"host", b"127.0.0.1:8787"), (b"content-length", b"99999999")],
+    )
+    assert sent.get("status") == 413
+    assert consumed["calls"] == 0, "Content-Length 快速拒绝不应触发任何 body 读取"

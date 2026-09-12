@@ -360,6 +360,12 @@ def _project_tools(tools: list[dict]) -> tuple[list[dict], dict]:
             continue
 
         projected_function: dict[str, Any] = {"name": name}
+        if "description" in function:
+            desc = function.get("description")
+            if isinstance(desc, str):
+                projected_function["description"] = _truncate_text(desc, 500)
+            elif desc is not None:
+                projected_function["description"] = str(desc)
         if "parameters" in function:
             projected_function["parameters"] = _project_schema(function.get("parameters"))
         if "strict" in function:

@@ -19,11 +19,11 @@ def inject_thinking(body: Dict[str, Any]) -> Dict[str, Any]:
     """Inject thinking config and default reasoning_effort for DeepSeek models.
 
     Rules:
-    - If model is a DeepSeek model and thinking is not explicitly configured,
-      inject thinking={"type": "enabled"}.
-    - If thinking.type is explicitly "disabled", remove reasoning_effort.
-    - If reasoning_effort is missing and thinking is enabled (or not disabled),
-      default reasoning_effort to "high" without overwriting any existing explicit effort.
+    - If model is a DeepSeek model and thinking is explicitly disabled (via thinking.type,
+      reasoning_effort="disable", or enable_thinking=False), strictly preserve disabled state
+      without overriding.
+    - If thinking is not configured, inject thinking={"type": "enabled"}.
+    - If reasoning_effort is missing and thinking is enabled, default to "high".
     """
     if not isinstance(body, dict):
         return body
@@ -33,15 +33,31 @@ def inject_thinking(body: Dict[str, Any]) -> Dict[str, Any]:
         return body
 
     thinking = body.get("thinking")
+    reasoning_effort = body.get("reasoning_effort")
+    chat_kwargs = body.get("chat_template_kwargs") or {}
+    enable_thinking = chat_kwargs.get("enable_thinking") if isinstance(chat_kwargs, dict) else None
+
+    # 判断是否显式关闭了思考模式
+    explicit_disabled = (
+        (isinstance(thinking, dict) and thinking.get("type") in ("disabled", "none", "off"))
+        or reasoning_effort in ("disable", "disabled", "none", "off")
+        or enable_thinking is False
+    )
+
+    if explicit_disabled:
+        # 保持显式关闭语义，移除 reasoning_effort，保留 thinking={"type": "disabled"}
+        body["thinking"] = {"type": "disabled"}
+        body.pop("reasoning_effort", None)
+        if isinstance(body.get("chat_template_kwargs"), dict):
+            body["chat_template_kwargs"]["enable_thinking"] = False
+        return body
+
     if thinking is None:
         thinking = {"type": "enabled"}
         body["thinking"] = thinking
 
-    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
-        body.pop("reasoning_effort", None)
-    else:
-        if not body.get("reasoning_effort"):
-            body["reasoning_effort"] = "high"
+    if not body.get("reasoning_effort"):
+        body["reasoning_effort"] = "high"
 
     return body
 

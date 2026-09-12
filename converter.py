@@ -247,6 +247,11 @@ USER_AGENT = _get_user_agent()
 MAX_BODY_MB = float(_env_compat("MAX_BODY_MB", "16"))
 MAX_BODY_BYTES = int(MAX_BODY_MB * 1024 * 1024)
 
+# 远程多模态图片下载上限（防 SSRF 与内存放大：单图默认 8MB）
+# 可通过 WORKBUDDY2API_MAX_IMAGE_MB 自定义；设为 0 表示禁用远程图片下载
+MAX_IMAGE_MB = float(_env_compat("MAX_IMAGE_MB", "8"))
+MAX_IMAGE_BYTES = int(MAX_IMAGE_MB * 1024 * 1024)
+
 
 def _app_settings_file() -> Path:
     """桌面端 settings.json 路径（与 Rust local_app_dir() 同源）。"""
@@ -1128,11 +1133,97 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
     return list((_MODELS_CACHE.get(cache_key) or {}).get("models") or [])
 
 
+# 远程图片下载：DNS 解析结果必须全部落在公网单播地址，否则拒绝（防 SSRF）
+_BLOCKED_IMAGE_HOSTS = {
+    "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
+    "metadata", "metadata.google.internal", "metadata.azure.internal",
+}
+
+
+def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """判定 IP 是否为可安全访问的公网地址（拒绝回环/私网/链路本地/保留段）。"""
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        # IPv4 共享地址段 / 云元数据 169.254.0.0/16 已被 is_link_local 覆盖
+        or (isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None
+            and not _ip_is_public(ip.ipv4_mapped))
+    )
+
+
+def _resolve_host_ips(host: str) -> list:
+    """解析主机名为 IP 列表（含 IPv4/IPv6）。解析失败返回空列表。"""
+    import socket as _socket
+    try:
+        infos = _socket.getaddrinfo(host, None)
+    except Exception:
+        return []
+    ips = []
+    for info in infos:
+        try:
+            ips.append(ipaddress.ip_address(info[4][0]))
+        except Exception:
+            continue
+    return ips
+
+
+def _url_is_safe_for_fetch(url: str) -> tuple[bool, str]:
+    """SSRF 前置校验：仅允许 http(s)、禁止内网/回环/元数据地址。
+
+    返回 (是否安全, 拒绝原因)。DNS 解析后逐个校验 IP，任一落在内网即拒绝
+    （防 DNS rebinding 式的「一公网一内网」混合解析）。
+    """
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+    except Exception as e:
+        return False, f"URL 解析失败: {e}"
+
+    if parts.scheme not in ("http", "https"):
+        return False, f"不支持的协议: {parts.scheme}"
+
+    host = (parts.hostname or "").strip().lower()
+    if not host:
+        return False, "缺少主机名"
+    if host in _BLOCKED_IMAGE_HOSTS or host.endswith(".localhost"):
+        return False, f"禁止访问本机/元数据主机: {host}"
+
+    # 纯 IP 直连：直接判定，无需 DNS
+    try:
+        ip = ipaddress.ip_address(host)
+        if not _ip_is_public(ip):
+            return False, f"禁止访问内网/保留地址: {ip}"
+        return True, ""
+    except ValueError:
+        pass
+
+    ips = _resolve_host_ips(host)
+    if not ips:
+        return False, f"域名无法解析: {host}"
+    for ip in ips:
+        if not _ip_is_public(ip):
+            return False, f"域名 {host} 解析到内网/保留地址: {ip}"
+    return True, ""
+
+
 async def _url_to_data_uri(url: str, timeout: float = 15.0) -> str:
-    """下载远程图片并转为 data:image/...;base64,... URI（借鉴 neipor/codebuddy-cli2api）。"""
+    """下载远程图片并转为 data:image/...;base64,... URI（借鉴 neipor/codebuddy-cli2api）。
+
+    安全约束（防 SSRF 与内存放大）：
+      - 仅允许 http(s)，拒绝回环/私网/链路本地/元数据地址（含 redirect 逐跳校验）；
+      - 单图默认 8MB 上限（WORKBUDDY2API_MAX_IMAGE_MB），超限即中止；
+      - 必须返回 image/* 类型，否则拒绝内联。
+    """
     if not url or url.startswith("data:"):
         return url
     if not url.startswith(("http://", "https://")):
+        return url
+    if MAX_IMAGE_BYTES <= 0:
+        _log(f"⚠️ 远程图片下载已禁用 (WORKBUDDY2API_MAX_IMAGE_MB=0)，跳过: {url[:60]}", level="warning")
         return url
 
     low = url.lower().split("?", 1)[0]
@@ -1150,14 +1241,63 @@ async def _url_to_data_uri(url: str, timeout: float = 15.0) -> str:
             break
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-            r = await c.get(url, headers={"User-Agent": USER_AGENT})
-            if r.status_code == 200:
-                ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
-                if ct.startswith("image/"):
-                    mime = ct
-                b64 = base64.b64encode(r.content).decode("ascii")
-                return f"data:{mime};base64,{b64}"
+        # 逐跳手动跟随重定向，每一跳都重做 SSRF 校验（防「公网跳内网」）
+        current = url
+        for _ in range(5):
+            ok, reason = _url_is_safe_for_fetch(current)
+            if not ok:
+                _log(f"🚫 远程图片下载被拒绝 ({reason}): {current[:80]}", level="warning")
+                return url
+
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
+                async with c.stream("GET", current, headers={"User-Agent": USER_AGENT}) as r:
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        loc = r.headers.get("location")
+                        if not loc:
+                            return url
+                        from urllib.parse import urljoin
+                        current = urljoin(current, loc)
+                        continue
+                    if r.status_code != 200:
+                        _log(f"⚠️ 远程图片下载失败 HTTP {r.status_code}: {current[:60]}", level="warning")
+                        return url
+
+                    ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if ct.startswith("image/"):
+                        mime = ct
+
+                    # 依据 Content-Length 预判（快速拒绝明显超限的资源）
+                    cl = r.headers.get("content-length")
+                    if cl:
+                        try:
+                            if int(cl) > MAX_IMAGE_BYTES:
+                                _log(
+                                    f"🚫 远程图片超过 {MAX_IMAGE_MB:g}MB 上限 "
+                                    f"(Content-Length={cl})，拒绝下载: {current[:60]}",
+                                    level="warning",
+                                )
+                                return url
+                        except ValueError:
+                            pass
+
+                    buf = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > MAX_IMAGE_BYTES:
+                            _log(
+                                f"🚫 远程图片超过 {MAX_IMAGE_MB:g}MB 上限，已中止下载: {current[:60]}",
+                                level="warning",
+                            )
+                            return url
+
+                    if not bytes(buf):
+                        return url
+                    if not ct.startswith("image/"):
+                        _log(f"⚠️ 远程资源非图片类型 ({ct or 'unknown'})，拒绝内联: {current[:60]}", level="warning")
+                        return url
+
+                    b64 = base64.b64encode(bytes(buf)).decode("ascii")
+                    return f"data:{mime};base64,{b64}"
     except Exception as e:
         _log(f"⚠️ 下载远程多模态图片失败 ({url[:60]}...): {e}", level="warning")
     return url
@@ -1191,7 +1331,7 @@ PASSTHROUGH_BODY_KEYS = {
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort",
     "verbosity", "reasoning_summary", "chat_template_kwargs",
-    "service_tier",
+    "service_tier", "thinking",
 }
 
 # ---------------------------------------------------------------------------
@@ -1216,7 +1356,10 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 # （避免工具参数 JSON 被截断/污染）。WORKBUDDY_COALESCE_REASONING=0 关闭。
                 "coalesce_reasoning": os.environ.get("WORKBUDDY_COALESCE_REASONING", "1") not in ("0", "false", "no"),
                 # 多账号故障转移重试时的防风控微抖动（Jitter 0.5~1.2s，避免同设备同 IP 毫秒级突发请求）
-                "failover_jitter": _env_compat("FAILOVER_JITTER", "1").lower() not in ("0", "false", "no")}  # cred: CredentialManager | None
+                "failover_jitter": _env_compat("FAILOVER_JITTER", "1").lower() not in ("0", "false", "no"),
+                # Codex 长上下文投影压缩：默认 safe / off (False) 保持完整语义无损；
+                # 需明确通过 --optimize-context 或 WORKBUDDY2API_OPTIMIZE_CONTEXT=1 或请求体 optimize_context: true 显式开启
+                "optimize_context": _env_compat("OPTIMIZE_CONTEXT", "0").lower() in ("1", "true", "yes")}  # cred: CredentialManager | None
 
 # 并发削峰与流量节奏平滑器
 _REQUEST_PACER = RequestPacer(
@@ -1301,45 +1444,98 @@ class LocalHostOnlyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
-    """请求体大小防护中间件（防恶意超大报文导致 OOM，借鉴 linguo2625469/workbuddy2api-panel）。
+_BODY_LIMIT_PATHS = frozenset({"/v1/chat/completions", "/v1/messages", "/v1/responses"})
 
-    针对 /v1/chat/completions 与 /v1/messages，当 Content-Length 超过 MAX_BODY_BYTES
-    时直接在网关层秒拒并返回 413，不转发上游、不触发切号、不污染账号状态。
+
+async def _send_413(send, path: str, size: int) -> None:
+    """向客户端下发标准 413 响应（OpenAI / Anthropic 两套错误体）。"""
+    message = (
+        f"request body size ({size} bytes) exceeds limit of "
+        f"{MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)"
+    )
+    if path == "/v1/messages":
+        payload = {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": message},
+        }
+    else:
+        payload = {
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": "request_body_too_large",
+            }
+        }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    await send({
+        "type": "http.response.start",
+        "status": 413,
+        "headers": [
+            (b"content-type", b"application/json; charset=utf-8"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+class RequestBodyLimitMiddleware:
+    """请求体大小防护（真正在 ASGI receive 层按块熔断，防 OOM）。
+
+    借鉴 linguo2625469/workbuddy2api-panel 的 413 语义，但**不使用**
+    BaseHTTPMiddleware + `request.body()` 的实现——那样必须等巨型 body 全部
+    读进内存后才能发现超限，防不住 chunked 编码的无 Content-Length 大包。
+
+    本实现两级守卫：
+      ① `Content-Length` 快速拒绝：零读取成本，直接 413；
+      ② 在 receive 通道上按块累计：累计字节一旦超过 MAX_BODY_BYTES 立即
+         中止读取并返回 413，不等 body 读完，杜绝内存放大。
+    超限报文不转发上游、不触发切号、不污染账号状态。
     """
 
-    async def dispatch(self, request: Request, call_next):
-        if request.method in ("POST", "PUT") and request.url.path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
-            cl_header = request.headers.get("content-length")
-            if cl_header:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("method") not in ("POST", "PUT"):
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        if path not in _BODY_LIMIT_PATHS:
+            return await self.app(scope, receive, send)
+
+        # ① Content-Length 快速拒绝
+        for key, value in (scope.get("headers") or []):
+            if key == b"content-length":
                 try:
-                    content_length = int(cl_header)
-                    if content_length > MAX_BODY_BYTES:
-                        is_anthropic = request.url.path == "/v1/messages"
-                        if is_anthropic:
-                            return JSONResponse(
-                                status_code=413,
-                                content={
-                                    "type": "error",
-                                    "error": {
-                                        "type": "invalid_request_error",
-                                        "message": f"request body size ({content_length} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
-                                    },
-                                },
-                            )
-                        return JSONResponse(
-                            status_code=413,
-                            content={
-                                "error": {
-                                    "message": f"request body size ({content_length} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
-                                    "type": "invalid_request_error",
-                                    "code": "request_body_too_large",
-                                }
-                            },
-                        )
+                    declared = int(value)
                 except ValueError:
-                    pass
-        return await call_next(request)
+                    break
+                if declared > MAX_BODY_BYTES:
+                    return await _send_413(send, path, declared)
+                break
+
+        # ② 按块累计，超限立即熔断（不等 request.body() 读完）
+        buffered = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
+            buffered.extend(message.get("body", b""))
+            if len(buffered) > MAX_BODY_BYTES:
+                return await _send_413(send, path, len(buffered))
+            more_body = bool(message.get("more_body", False))
+
+        # ③ 回放已校验的 body 给下游应用，之后透传原始 receive（保留断开检测）
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": bytes(buffered), "more_body": False}
+            return await receive()
+
+        return await self.app(scope, replay_receive, send)
 
 
 app.add_middleware(LocalHostOnlyMiddleware)
@@ -2679,8 +2875,11 @@ async def openai_responses(
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"invalid responses request: {e}", "type": "invalid_request_error"}})
 
-    # Codex CLI 长上下文最小语义闭包投影压缩（借鉴 ShouZhuo0413/codebuddy2api）
-    if CONFIG.get("optimize_context", True) and project_responses_chat_body:
+    # Codex CLI 长上下文最小语义闭包投影压缩（默认 safe/off 保持语义完整；支持 header/body/config 显式开启）
+    header_opt = request.headers.get("x-optimize-context", "").lower() in ("1", "true", "yes")
+    body_opt = raw_body.get("optimize_context")
+    should_optimize = body_opt if isinstance(body_opt, bool) else (header_opt or CONFIG.get("optimize_context", False))
+    if should_optimize and project_responses_chat_body:
         chat_payload, proj_stats = project_responses_chat_body(chat_payload)
         if proj_stats.get("aggressive"):
             _log(f"✂️ [Codex投影压缩] 原消息 {proj_stats.get('original_messages')}条({proj_stats.get('original_message_chars')}字) → 投影后 {proj_stats.get('projected_messages')}条({proj_stats.get('projected_message_chars')}字), 剥离模板 {proj_stats.get('dropped_harness_messages')}条")
@@ -3873,6 +4072,10 @@ def main():
     ap.add_argument("--model-list-mode", choices=["all", "available"], default=None,
                     help="/v1/models 清单模式：all (全量 + availability 标记) / available (剔除不可用模型)。"
                          "默认热读 settings.json 的 model_list_mode，此处仅作启动兜底。")
+    ap.add_argument("--optimize-context", dest="optimize_context", action="store_true", default=None,
+                    help="启用 Codex CLI 长上下文最小语义闭包投影压缩（按需剥离模板与折叠早前历史）。默认关闭以保障完整语义。")
+    ap.add_argument("--no-optimize-context", dest="optimize_context", action="store_false",
+                    help="禁用长上下文投影压缩，保持完整语义。")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     args = ap.parse_args()
 
@@ -3908,6 +4111,8 @@ def main():
         CONFIG["rotate_count"] = max(1, args.rotate_count)
     if args.model_list_mode:
         CONFIG["model_list_mode"] = args.model_list_mode.lower()
+    if args.optimize_context is not None:
+        CONFIG["optimize_context"] = args.optimize_context
     CONFIG["log_path"] = args.log if args.log else _env_compat("LOG", "") or None
     CONFIG["log_level"] = args.log_level
     CONFIG["log_payloads"] = args.log_payloads or _env_compat("LOG_PAYLOADS", "").lower() in ("1", "true", "yes")

@@ -110,6 +110,14 @@ def _convert_input_items(items: list) -> list[dict]:
             messages.append({"role": mapped_role, "content": content})
             continue
 
+        # 1.1 独立 input_image 输入项（OpenAI Responses 规范）
+        if item_type == "input_image":
+            _flush_assistant()
+            iu = item.get("image_url")
+            url = iu if isinstance(iu, str) else (iu.get("url") if isinstance(iu, dict) else item.get("url", ""))
+            messages.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]})
+            continue
+
         # 2. 助手消息
         if item_type in (None, "message") and role == "assistant":
             _flush_assistant()
@@ -152,10 +160,17 @@ def _convert_input_items(items: list) -> list[dict]:
     return messages
 
 
-def _extract_content(content: Any) -> str:
+def _extract_content(content: Any) -> str | list[dict]:
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
+    if not isinstance(content, list):
+        return str(content or "")
+
+    has_image = any(
+        isinstance(p, dict) and p.get("type") in ("input_image", "image_url")
+        for p in content
+    )
+    if not has_image:
         parts = []
         for p in content:
             if isinstance(p, dict):
@@ -164,7 +179,25 @@ def _extract_content(content: Any) -> str:
             elif isinstance(p, str):
                 parts.append(p)
         return "".join(parts)
-    return str(content or "")
+
+    # 包含多模态图片的复合列表，转换为 OpenAI Chat 格式
+    result: list[dict] = []
+    for p in content:
+        if isinstance(p, str):
+            result.append({"type": "text", "text": p})
+        elif isinstance(p, dict):
+            ptype = p.get("type")
+            if ptype in ("input_text", "text", "output_text"):
+                result.append({"type": "text", "text": p.get("text", "")})
+            elif ptype in ("input_image", "image_url"):
+                iu = p.get("image_url")
+                if isinstance(iu, str):
+                    result.append({"type": "image_url", "image_url": {"url": iu}})
+                elif isinstance(iu, dict):
+                    result.append({"type": "image_url", "image_url": iu})
+                elif "url" in p:
+                    result.append({"type": "image_url", "image_url": {"url": p["url"]}})
+    return result
 
 
 def _convert_tools_for_chat(tools: list) -> list:
@@ -195,6 +228,7 @@ class ResponsesStreamConverter:
         self.msg_id = _rand_id("msg_")
         self.model = model
         self.created_at = int(time.time())
+        self.sequence_number = 0
 
         self._emitted_created = False
         self._emitted_msg_item = False
@@ -228,6 +262,7 @@ class ResponsesStreamConverter:
             if content:
                 if not self._emitted_msg_item:
                     events.append(self._fmt("response.output_item.added", {
+                        "response_id": self.resp_id,
                         "output_index": 0,
                         "item": self._build_msg_item("in_progress", empty=True),
                     }))
@@ -235,6 +270,8 @@ class ResponsesStreamConverter:
 
                 if not self._emitted_content_part:
                     events.append(self._fmt("response.content_part.added", {
+                        "response_id": self.resp_id,
+                        "item_id": self.msg_id,
                         "output_index": 0,
                         "content_index": 0,
                         "part": {"type": "output_text", "text": "", "annotations": []},
@@ -243,6 +280,8 @@ class ResponsesStreamConverter:
 
                 self._content += content
                 events.append(self._fmt("response.output_text.delta", {
+                    "response_id": self.resp_id,
+                    "item_id": self.msg_id,
                     "output_index": 0,
                     "content_index": 0,
                     "delta": content,
@@ -271,6 +310,7 @@ class ResponsesStreamConverter:
 
                 if not slot["emitted"]:
                     events.append(self._fmt("response.output_item.added", {
+                        "response_id": self.resp_id,
                         "output_index": slot["output_idx"],
                         "item": self._build_fc_item(slot, "in_progress"),
                     }))
@@ -279,6 +319,9 @@ class ResponsesStreamConverter:
                 if fn.get("arguments"):
                     slot["args"] += fn["arguments"]
                     events.append(self._fmt("response.function_call_arguments.delta", {
+                        "response_id": self.resp_id,
+                        "item_id": slot["fc_id"],
+                        "call_id": slot["id"],
                         "output_index": slot["output_idx"],
                         "delta": fn["arguments"],
                     }))
@@ -291,11 +334,15 @@ class ResponsesStreamConverter:
 
         if self._emitted_content_part:
             events.append(self._fmt("response.output_text.done", {
+                "response_id": self.resp_id,
+                "item_id": self.msg_id,
                 "output_index": 0,
                 "content_index": 0,
                 "text": self._content,
             }))
             events.append(self._fmt("response.content_part.done", {
+                "response_id": self.resp_id,
+                "item_id": self.msg_id,
                 "output_index": 0,
                 "content_index": 0,
                 "part": {"type": "output_text", "text": self._content, "annotations": []},
@@ -303,6 +350,7 @@ class ResponsesStreamConverter:
 
         if self._emitted_msg_item:
             events.append(self._fmt("response.output_item.done", {
+                "response_id": self.resp_id,
                 "output_index": 0,
                 "item": self._build_msg_item("completed"),
             }))
@@ -312,10 +360,14 @@ class ResponsesStreamConverter:
             if tc.get("emitted"):
                 oi = tc["output_idx"]
                 events.append(self._fmt("response.function_call_arguments.done", {
+                    "response_id": self.resp_id,
+                    "item_id": tc["fc_id"],
+                    "call_id": tc["id"],
                     "output_index": oi,
                     "arguments": tc["args"],
                 }))
                 events.append(self._fmt("response.output_item.done", {
+                    "response_id": self.resp_id,
                     "output_index": oi,
                     "item": self._build_fc_item(tc, "completed"),
                 }))
@@ -326,7 +378,8 @@ class ResponsesStreamConverter:
         return "".join(events)
 
     def _fmt(self, event_type: str, data: dict) -> str:
-        payload = {"type": event_type, **data}
+        payload = {"type": event_type, "sequence_number": self.sequence_number, **data}
+        self.sequence_number += 1
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def _build_msg_item(self, status: str = "in_progress", empty: bool = False) -> dict:

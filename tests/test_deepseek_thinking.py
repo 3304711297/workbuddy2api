@@ -96,6 +96,17 @@ class TestInjectThinking:
         assert res["thinking"] == {"type": "disabled"}
         assert "reasoning_effort" not in res
 
+    def test_deepseek_reasoning_effort_disable_maps_to_thinking_disabled(self):
+        """当客户端（如 Claude Code / Hermes）传入 reasoning_effort=disable 时，映射为 thinking.disabled。"""
+        body = {
+            "model": "deepseek-v4.1-flash",
+            "reasoning_effort": "disable",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        res = inject_thinking(body)
+        assert res["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in res
+
     def test_deepseek_explicitly_enabled_supplies_missing_effort(self):
         body = {
             "model": "deepseek-v4.1-flash",

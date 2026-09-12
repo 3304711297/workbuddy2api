@@ -138,9 +138,16 @@ workbuddy2api.exe (GUI)
 - **后台主动令牌续期 (`token_refresher.py`)**：
   由 FastAPI `lifespan` 生命周期管控，后台每 300s 巡检活跃账号凭据，剩余有效时间小于 1800s（30 分钟）时主动触发异步续期并防重入，避免用户请求遭遇被动刷新时延。
 - **413 请求体大小保护与官方 User-Agent 仿真（2026-09 横向对比采纳）**：
-  - **413 防护**：`MAX_BODY_MB`（环境变量 `WORKBUDDY2API_MAX_BODY_MB`，默认 16MB）。在 `RequestBodyLimitMiddleware`（按 `Content-Length` 秒拒）与路由入口（防 chunked 穿透）双层拦截，超限返回标准 413，不打上游、不触发切号、不罚账号。
+  - **413 防护**：`MAX_BODY_MB`（环境变量 `WORKBUDDY2API_MAX_BODY_MB`，默认 16MB）。中间件为**纯 ASGI receive 层按块熔断**（`RequestBodyLimitMiddleware`，非 BaseHTTPMiddleware）：① `Content-Length` 快速拒绝（零读取）；② 分块累计一旦超限立即中止读取并返回 413，**不放任 chunked 大包读完进内存**。超限不转发上游、不触发切号、不罚账号。
   - **出站 User-Agent**：出站请求（计费、对话、模型）统一调用 `_get_user_agent(domain)` 仿真官方客户端（国服 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 导致的 10085 违规拦截，并使官网使用端归因正常。亦支持 `WORKBUDDY2API_USER_AGENT`（兼容旧名 `CODEBUDDY2OPENAI_USER_AGENT`）自定义。
-  - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。
+  - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。**安全边界（P0，改动此逻辑必读）**：下载前经 `_url_is_safe_for_fetch` 做 SSRF 校验——仅允许 http(s)，拒绝回环/私网/链路本地/云元数据地址（127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、::1、fe80::/10、0.0.0.0 等），域名解析后逐个 IP 校验；**重定向逐跳重新校验**（防「公网跳内网」）；单图默认 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`，设 0 则完全禁用远程下载），按 `Content-Length` 预判 + 流式累计双保险；响应必须为 `image/*`，否则拒绝内联。
+
+  **Responses / Anthropic 协议层硬约束（2026-09-12 修复，改动相关代码前必读）**：
+
+  - **Responses 投影（`responses_projection.py`）默认关闭**：`optimize_context` 默认 `False`（safe/off），投影是**有损**的（system 截断 1200 / user 3200 / assistant 1800 / tool output 1600 / tool args 900 / 历史折叠）。需显式开启：`--optimize-context`、`WORKBUDDY2API_OPTIMIZE_CONTEXT=1`、或请求体 `optimize_context: true`、或请求头 `X-Optimize-Context: 1`。**function tool `description` 必须保留**（含 schema 内 `description`），它是模型判断「何时/如何调用」的语义信息，删除会导致工具调用能力退化。
+  - **Responses `input_image` 必须走通**：`responses_compat._extract_content` 需把 `input_image`（item 级与 content 级，`image_url` 为字符串或对象两种形态）转成 Chat `image_url` 部件，再交给 `_inline_remote_images` 内联。丢图会导致视觉模型静默收不到图。
+  - **Responses SSE 必须带规范字段**：`sequence_number`（从 0 严格单调递增，由 `_fmt` 统一注入）、`response_id`、`item_id`。仅事件名正确 ≠ wire protocol 兼容，Codex CLI 等严格客户端依赖这些字段。
+  - **`thinking` 必须在 `PASSTHROUGH_BODY_KEYS` 中**：否则客户端显式 `thinking:{"type":"disabled"}` 会在透传时被丢弃，`inject_thinking` 看不到关闭意图而反向注入 `enabled`，与 `reasoning_effort=disable` / `enable_thinking=false` 形成参数打架。`inject_thinking` 现对三种关闭信号（`thinking.type=disabled`、`reasoning_effort=disable`、`chat_template_kwargs.enable_thinking=False`）统一识别并保持关闭语义（移除 `reasoning_effort`、保留 `thinking.type=disabled`）。
 
   **风控拦截机制（2026-09-10 实测，判断要不要扩脱敏范围时看这里）**：
 

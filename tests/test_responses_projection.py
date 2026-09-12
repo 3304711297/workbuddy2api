@@ -73,12 +73,11 @@ def test_conservative_mode_normal_chat():
     assert msgs[1]["content"] == "Hello! Write a poem about rust."
     assert msgs[3]["content"] == "Make it shorter."
 
-    # 验证 tool schema description 依然被收敛
+    # 验证 tool description 保留以保障模型调用语义
     assert len(projected["tools"]) == 1
     fn = projected["tools"][0]["function"]
     assert fn["name"] == "calculator"
-    assert "description" not in fn
-    assert "description" not in fn["parameters"]["properties"]["expr"]
+    assert fn.get("description") == "A simple calculator for math operations."
 
 
 def test_aggressive_mode_triggered_by_agentic_tools():
@@ -357,7 +356,7 @@ def test_schema_projection_removes_unnecessary_keys():
             "type": "function",
             "function": {
                 "name": "custom_tool",
-                "description": "Should be removed",
+                "description": "Should be preserved for function calling semantics",
                 "parameters": {
                     "type": "object",
                     "title": "CustomToolParams",
@@ -388,7 +387,7 @@ def test_schema_projection_removes_unnecessary_keys():
     projected, stats = project_responses_chat_body(body)
 
     fn = projected["tools"][0]["function"]
-    assert "description" not in fn
+    assert fn.get("description") == "Should be preserved for function calling semantics"
     params = fn["parameters"]
     assert "title" not in params
     assert "description" not in params
