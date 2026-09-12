@@ -242,6 +242,19 @@ workbuddy2api.exe (GUI)
   内核 argparse 的 `--api-key` 默认值本就取自 `_env_compat("KEY", "")`，内核零改动。
   契约锁定：`tests/test_secret_injection.test.js`（会剥离注释后断言代码里
   不得再出现 `"--api-key"` 传参）。
+  **密钥优先级（2026-09-12 二次评审，实测三档，改动必读）**：
+  `GUI 显式配置 > 继承环境变量 > 无鉴权`。
+  ① GUI 设了密钥 → 走 `cmd.env` 注入，**总是胜出**，父进程即使也有
+  `WORKBUDDY2API_KEY` 也不会反向覆盖（argparse 的 default 仅在 CLI 未显式给值时
+  生效；实测同环境对拍：GUI 值请求 200、环境变量值请求 401）。
+  ② GUI 留空 → **Rust 不清除父进程环境变量**，若父进程（如用户 shell、包装脚本）
+  已设 `WORKBUDDY2API_KEY`（或旧名 `CODEBUDDY2OPENAI_KEY`），子进程会继承它并
+  **启用鉴权**。这是有意的「环境变量 = 独立高级配置」语义，**不是**本次改动引入
+  （`_env_compat("KEY")` 自 `db88e36` 改名兼容层起即存在），但属用户可见副作用：
+  「GUI 里没填密钥却要求鉴权」时应先检查父进程环境变量。
+  ③ 两者皆无 → 不鉴权（回环默认）。
+  刻意**不**做「GUI 空密钥时清除环境变量」：那会破坏上述高级配置用法，且
+  ① 已保证无覆盖风险。契约锁定：`tests/test_secret_precedence.test.js`。
 - **结构化日志透传（AppConfig.log_level / log_payloads）**：
   不传 `--log` 时内核 `_log()` 因 `log_path` 为空**直接丢弃**全部结构化行（请求摘要/耗时/错误详情），日志页只能看到 uvicorn 原始 stdout——所以 `proxy_start` 必须显式传 `--log` 指向 `converter.log`。
   `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
