@@ -345,3 +345,128 @@ async def test_failover_jitter_behavior(monkeypatch):
     await converter._failover_jitter("test-rid")
     assert len(slept_durations) == 1
     assert 0.5 <= slept_durations[0] <= 1.2
+
+
+def test_e2e_stream_unauthorized_gpt_model_fallback_observability(fake_multi_accounts, monkeypatch, tmp_path):
+    """🟡 P2 回归测试：
+    验证 OpenAI 流式请求发生 11102 降级时，流中首包前下发标准 SSE 注释行通知客户端，且 usage.jsonl 完整记录。
+    """
+    cred = CredentialManager()
+    monkeypatch.setitem(converter.CONFIG, "cred", cred)
+    usage_file = tmp_path / "usage_stream.jsonl"
+    monkeypatch.setitem(converter.CONFIG, "usage_log", str(usage_file))
+    call_models = []
+
+    def mock_handler(request: httpx.Request):
+        req_body = json.loads(request.content.decode("utf-8"))
+        req_model = req_body.get("model")
+        call_models.append(req_model)
+        if req_model == "gpt-5.6-luna":
+            return httpx.Response(
+                400,
+                json={"code": 11102, "msg": "model [gpt-5.6-luna] is only available for authorized users"}
+            )
+        elif req_model == "fast-model":
+            sse_content = (
+                'data: {"id":"stream-fb-1","model":"fast-model","choices":[{"index":0,"delta":{"role":"assistant","content":"流式降级回答"}}]}\n\n'
+                'data: {"id":"stream-fb-1","model":"fast-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n'
+                'data: [DONE]\n\n'
+            ).encode("utf-8")
+            return httpx.Response(200, content=sse_content, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(404)
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    orig_async_client = httpx.AsyncClient
+
+    def mock_async_client(**kw):
+        kw["transport"] = mock_transport
+        return orig_async_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_async_client)
+
+    client = TestClient(converter.app, headers={"Host": "127.0.0.1:8787"})
+    payload = {
+        "model": "gpt-5.6-luna",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    res = client.post("/v1/chat/completions", json=payload)
+    assert res.status_code == 200
+    text = res.text
+    # 验证客户端在流式流首行明确观测到结构化降级注释行
+    assert ": fallback: requested_model=gpt-5.6-luna actual_model=fast-model reason=11102 unauthorized" in text
+    assert "流式降级回答" in text
+    assert call_models == ["gpt-5.6-luna", "fast-model"]
+
+    # 验证 usage.jsonl
+    assert usage_file.exists()
+    lines = usage_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) >= 1
+    rec = json.loads(lines[-1])
+    assert rec["model"] == "fast-model"
+    assert rec["requested_model"] == "gpt-5.6-luna"
+    assert rec["actual_model"] == "fast-model"
+    assert rec["fallback_reason"] == "11102 unauthorized"
+
+
+def test_e2e_anthropic_stream_unauthorized_gpt_model_fallback_observability(fake_multi_accounts, monkeypatch, tmp_path):
+    """🟡 P2 回归测试：
+    针对 Anthropic /v1/messages 流式请求发生 11102 降级时，流中透传降级注释行，且后续事件正常下发。
+    """
+    cred = CredentialManager()
+    monkeypatch.setitem(converter.CONFIG, "cred", cred)
+    usage_file = tmp_path / "usage_anthropic_stream.jsonl"
+    monkeypatch.setitem(converter.CONFIG, "usage_log", str(usage_file))
+    call_models = []
+
+    def mock_handler(request: httpx.Request):
+        req_body = json.loads(request.content.decode("utf-8"))
+        req_model = req_body.get("model")
+        call_models.append(req_model)
+        if req_model == "gpt-5.6-luna":
+            return httpx.Response(
+                400,
+                json={"code": 11102, "msg": "model [gpt-5.6-luna] is only available for authorized users"}
+            )
+        elif req_model == "fast-model":
+            sse_content = (
+                'data: {"id":"ant-fb-1","model":"fast-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Anthropic流式降级成功"}}]}\n\n'
+                'data: {"id":"ant-fb-1","model":"fast-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6}}\n\n'
+                'data: [DONE]\n\n'
+            ).encode("utf-8")
+            return httpx.Response(200, content=sse_content, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(404)
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    orig_async_client = httpx.AsyncClient
+
+    def mock_async_client(**kw):
+        kw["transport"] = mock_transport
+        return orig_async_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_async_client)
+
+    client = TestClient(converter.app, headers={"Host": "127.0.0.1:8787"})
+    payload = {
+        "model": "gpt-5.6-luna",
+        "stream": True,
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    res = client.post("/v1/messages", json=payload)
+    assert res.status_code == 200
+    text = res.text
+    assert ": fallback: requested_model=gpt-5.6-luna actual_model=fast-model reason=11102 unauthorized" in text
+    assert "Anthropic流式降级成功" in text
+    assert call_models == ["gpt-5.6-luna", "fast-model"]
+
+    # 验证 usage.jsonl
+    assert usage_file.exists()
+    lines = usage_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) >= 1
+    rec = json.loads(lines[-1])
+    assert rec["model"] == "fast-model"
+    assert rec["requested_model"] == "gpt-5.6-luna"
+    assert rec["actual_model"] == "fast-model"
+    assert rec["fallback_reason"] == "11102 unauthorized"
+

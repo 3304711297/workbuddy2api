@@ -2054,11 +2054,18 @@ async def anthropic_messages(
                     for line in lines:
                         ln = line.strip()
                         if ln:
+                            if ln.startswith(":"):
+                                yield (ln + "\n\n").encode("utf-8")
+                                continue
                             for ev in translator.feed_line(ln):
                                 yield ev.encode("utf-8")
                 if buf.strip():
-                    for ev in translator.feed_line(buf.strip()):
-                        yield ev.encode("utf-8")
+                    tail_ln = buf.strip()
+                    if tail_ln.startswith(":"):
+                        yield (tail_ln + "\n\n").encode("utf-8")
+                    else:
+                        for ev in translator.feed_line(tail_ln):
+                            yield ev.encode("utf-8")
                 for ev in translator.finalize():
                     yield ev.encode("utf-8")
             finally:
@@ -2483,7 +2490,10 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
         yield _err_event(b'{"error":{"message":"tool_calls aggregate failed","type":"upstream_error"}}', 502)
         return
 
-    # 伪流式输出
+    # 伪流式输出：若发生过降级，首包前下发标准 SSE 注释行通知客户端
+    if fallback_tried:
+        req_m = requested_model or model_name
+        yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
     async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms,
                                               retry_count=retry_count, retry_reason=retry_reason,
                                               actual_model=actual_model, fallback_reason=fallback_reason,
@@ -2911,6 +2921,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
     max_attempts = retry_budget + 1
     fallback_tried = False
+    fallback_notified = False
     actual_model = body.get("model", model_name)
     fallback_reason = None
     curr_uid = uid
@@ -2946,6 +2957,10 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                       fallback_reason=fallback_reason)
                         yield _err_event(err, r.status_code)
                         return
+                    if fallback_tried and not fallback_notified:
+                        fallback_notified = True
+                        req_m = requested_model or model_name
+                        yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
                     async for chunk in r.aiter_bytes():
                         if chunk:
                             raw_parts.append(chunk)
