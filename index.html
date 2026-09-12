@@ -285,6 +285,7 @@
                 <p class="card-desc">当配置多个账号时，可自动按策略进行故障避让或负载均衡调度</p>
               </div>
               <span id="rotation-status-badge" class="badge badge-info">单账号模式</span>
+              <span id="rotation-active-uid" class="badge badge-info mono" style="display: none; font-size: 10px;"></span>
             </div>
             <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 12px;">
               <div style="display: flex; align-items: center; gap: 8px;">
@@ -666,6 +667,14 @@ print(response.choices[0].message.content)</code></pre>
               <p class="muted">本地请求统计（自本版本起记录），TPS 仅统计成功且含首字时延的样本</p>
             </div>
             <div class="actions" style="display: flex; gap: 8px; align-items: center;">
+              <select id="select-usage-range" class="input mono" style="font-size: 12px; padding: 4px 8px;" title="按时间范围查看用量（图表与统计同步裁剪）">
+                <option value="4h">近 4 小时</option>
+                <option value="24h" selected>近 24 小时</option>
+                <option value="today">今日</option>
+                <option value="7d">近 7 天</option>
+                <option value="30d">近 30 天</option>
+                <option value="all">全部</option>
+              </select>
               <span id="usage-refresh-time" class="muted mono" style="font-size: 12px;">—</span>
               <button id="btn-refresh-usage" class="btn btn-secondary btn-sm">刷新</button>
             </div>
@@ -673,7 +682,7 @@ print(response.choices[0].message.content)</code></pre>
 
           <div class="usage-cards">
             <div class="card usage-stat-card">
-              <span class="metric-label">今日请求</span>
+              <span class="metric-label"><span id="usage-today-label">今日</span>请求</span>
               <span id="usage-today-requests" class="metric-value mono">—</span>
               <span id="usage-today-sub" class="muted usage-sub">成功 — · 失败 —</span>
             </div>

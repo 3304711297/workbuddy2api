@@ -37,8 +37,12 @@ function renderRateLimitCard(rl, activeModel) {
       : expired
         ? `<strong style="color:var(--warning, #f59e0b);">已恢复</strong> <small class="muted mono">(冷却已于 ${esc(e.resetLocal || '')} 结束)</small>`
         : `<strong style="color:var(--success);">正常</strong>`;
+    // 上次触发时间：后端 lastSeenLocal 已给字段，此前未消费——补上让历史轨迹可见
+    const lastSeen = e.lastSeenLocal
+      ? `<small class="muted mono" title="该模型最近一次触发限流的时间">上次 ${esc(e.lastSeenLocal)}</small>`
+      : '';
     const badge = model === activeModel ? '<span class="badge badge-info" style="font-size:10px;margin-left:6px;">当前会话</span>' : '';
-    return `<div class="pkg-item" title="${esc(e.message || '腾讯上游 code 6004 频率限制')}">${dot}<span class="mono">${esc(model)}</span>${badge}<span>${status}</span></div>`;
+    return `<div class="pkg-item" title="${esc(e.message || '腾讯上游 code 6004 频率限制')}">${dot}<span class="mono">${esc(model)}</span>${badge}<span>${status}${lastSeen ? ' · ' + lastSeen : ''}</span></div>`;
   }).join('');
 
   const ru = rl.rollingUsage || {};
@@ -134,7 +138,7 @@ export async function loadAccountsData() {
     renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData, rateLimitData);
     renderAccountsGrid(acctList, rateLimitData);
     renderProtocolBadge(rateLimitData);
-    await syncRotationPolicyCard(acctList.length);
+    await syncRotationPolicyCard(acctList.length, rateLimitData);
   } catch (e) {
     container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${esc(e.message || e)}</div>`;
   }
@@ -164,7 +168,7 @@ function renderProtocolBadge(rateLimit) {
 // 读取后端持久化的轮换配置并同步到策略卡（仅用于初始化/保存后回读）
 // ⚠️ 此函数会把磁盘值**强制回写**到下拉框，因此绝不能在 change 事件里调用——
 // 否则用户刚选中的值会在读盘后被立刻改回旧值（表现为「闪一下就跳回原样」）。
-async function syncRotationPolicyCard(accountCount) {
+async function syncRotationPolicyCard(accountCount, rateLimit = null) {
   const select = document.getElementById('select-rotate-mode');
   const countInput = document.getElementById('input-rotate-count');
   if (!select) return;
@@ -183,16 +187,17 @@ async function syncRotationPolicyCard(accountCount) {
     console.warn('读取轮换配置失败:', e);
   }
 
-  renderRotationPolicyUI(accountCount);
+  renderRotationPolicyUI(accountCount, rateLimit);
 }
 
 // 纯 UI 渲染：依据**当前控件值**刷新徽章与提示文案，不接触磁盘、不改动控件值。
 // change 事件、切换账号后刷新都必须走这里。
-function renderRotationPolicyUI(accountCount) {
+function renderRotationPolicyUI(accountCount, rateLimit = null) {
   const badge = document.getElementById('rotation-status-badge');
   const select = document.getElementById('select-rotate-mode');
   const wrapCount = document.getElementById('wrap-rotate-count');
   const hint = document.getElementById('rotation-policy-hint');
+  const activeUid = rateLimit?.rotation?.active_uid; // 内核运行态真源（非磁盘配置）
   if (!select) return;
 
   const isMulti = accountCount >= 2;
@@ -227,6 +232,25 @@ function renderRotationPolicyUI(accountCount) {
           ? '已开启限流避让：当前账号遇到 429/6004 冷却时，内核自动切换至下一个就绪账号并重试，无需手动干预。'
           : '已开启负载均衡：每 N 次请求在就绪账号间轮流调度，分摊单账号频控压力；遭遇限流同样自动故障转移。';
   }
+
+  // 活跃账号可观测：内核自曝 rotation.active_uid（多账号场景下确认当前实际在用哪个号）
+  renderActiveUid(activeUid);
+}
+
+// 渲染当前活跃账号 UID（消费 /api/rate_limit 的 rotation.active_uid）
+var _lastActiveUid = null;
+function renderActiveUid(uid) {
+  const el = document.getElementById('rotation-active-uid');
+  if (!el) return;
+  if (uid && uid !== _lastActiveUid) _lastActiveUid = uid;
+  const show = _lastActiveUid;
+  if (!show) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'inline-flex';
+  el.textContent = `当前活跃: ${String(show).slice(0, 8)}…`;
+  el.title = `内核正在使用的凭据 UID：${show}`;
 }
 
 // 保存轮换策略：走 save_app_settings
@@ -401,8 +425,10 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
       const data = await invokeTauri('proxy_checkin_claim', { port: state.port });
       if (data.ok) {
         showToast(`✅ 签到成功：+${data.credit ?? 0} 积分${data.streak_days ? `（连续 ${data.streak_days} 天）` : ''}`, 'success');
+        markCheckinDone(btn);
       } else if (data.status === 'already_claimed') {
         showToast('今日已签到，明天再来', 'info');
+        markCheckinDone(btn);
       } else if (data.status === 'event_ended') {
         showToast('签到活动已结束', 'warning');
       } else if (data.status === 'not_eligible') {
@@ -414,9 +440,42 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
       showToast(`签到请求失败: ${err.message || err}`, 'error');
     } finally {
       btn.disabled = false;
-      btn.textContent = '🎁 每日签到';
+      if (btn.dataset.checkedIn !== '1') btn.textContent = '🎁 每日签到';
     }
   });
+
+  // 进入页面即查询签到状态：避免用户「点了才知道今天已签」的无效操作。
+  // 内核 /api/checkin/status 返回 {ok, data:{today_checked_in, active, end_time}}。
+  syncCheckinStatus(container);
+}
+
+// 将按钮置为「已签到」完成态（禁用点击，语义明确）
+function markCheckinDone(btn) {
+  if (!btn) return;
+  btn.dataset.checkedIn = '1';
+  btn.textContent = '✅ 今日已签到';
+  btn.disabled = true;
+  btn.title = '今日已领取，明日可再次签到';
+}
+
+// 查询签到状态并同步按钮（静默失败：服务未启动时不打扰用户）
+async function syncCheckinStatus(container) {
+  const btn = container.querySelector('#btn-daily-checkin');
+  if (!btn) return;
+  try {
+    const data = await invokeTauri('proxy_checkin_status', { port: state.port });
+    const info = data?.ok ? (data.data || {}) : null;
+    if (!info) return;
+    if (info.today_checked_in) {
+      markCheckinDone(btn);
+    }
+    // 活动已结束：明确告知，避免用户反复尝试
+    if (info.active === false) {
+      btn.textContent = '🎁 签到活动已结束';
+      btn.disabled = true;
+      btn.title = info.end_time ? `活动结束于 ${info.end_time}` : '签到活动已结束';
+    }
+  } catch { /* 反代未启动或旧版内核无该端点：保持默认可点击态 */ }
 }
 
 // 账号卡片渲染：携带轮换调度状态（活跃 / 就绪 / 冷却中）

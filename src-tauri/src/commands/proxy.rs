@@ -384,6 +384,19 @@ pub async fn proxy_checkin_claim(port: u16) -> Result<serde_json::Value, String>
     resp.json().await.map_err(|e| e.to_string())
 }
 
+/// 每日签到状态查询：转发 GET /api/checkin/status 到本地反代内核（绕开 CSP connect-src 限制）。
+/// 内核返回 {ok, data:{today_checked_in, active, end_time, ...}}；失败时 ok=false + error。
+#[tauri::command]
+pub async fn proxy_checkin_status(port: u16) -> Result<serde_json::Value, String> {
+    let url = format!("http://127.0.0.1:{port}/api/checkin/status");
+    let resp = super::shared::local_client(20)
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn proxy_test_chat(
     port: u16,
