@@ -69,6 +69,7 @@ export function initSettings() {
   const chkAutoStart = document.getElementById('chk-auto-start');
   const btnOpenLiveConsole = document.getElementById('btn-open-live-console');
   const radioCloseActions = document.querySelectorAll('input[name="close-action"]');
+  const selectModelListMode = document.getElementById('select-model-list-mode');
 
   // 用户是否已手动改动（防止异步加载的持久化配置覆盖用户正在编辑的值）
   let portTouched = false;
@@ -103,6 +104,7 @@ export function initSettings() {
   // rotate_mode / rotate_count 由「账号与资产」页的调度策略卡负责写入，这里只做透传保留。
   let rotateModeCache = 'off';
   let rotateCountCache = 1;
+  let modelListModeCache = 'all';
   const buildSettingsPayload = () => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
@@ -112,7 +114,8 @@ export function initSettings() {
       port: state.port,
       desensitize: state.desensitize,
       rotate_mode: rotateModeCache,
-      rotate_count: rotateCountCache
+      rotate_count: rotateCountCache,
+      model_list_mode: modelListModeCache
     };
   };
 
@@ -124,6 +127,7 @@ export function initSettings() {
         if (latest) {
           if (latest.rotate_mode) rotateModeCache = latest.rotate_mode;
           if (latest.rotate_count) rotateCountCache = latest.rotate_count;
+          if (latest.model_list_mode) modelListModeCache = latest.model_list_mode;
         }
       } catch { /* 读取失败则沿用上次已知值 */ }
       await invokeTauri('save_app_settings', { settings: buildSettingsPayload() });
@@ -186,6 +190,15 @@ export function initSettings() {
     }
   });
 
+  // 模型清单模式：热读生效（内核每请求读 settings.json），保存后无需重启
+  selectModelListMode?.addEventListener('change', async (e) => {
+    const v = e.target.value === 'available' ? 'available' : 'all';
+    modelListModeCache = v;
+    if (await persistSettings()) {
+      showToast(v === 'available' ? '已切换为仅展示可用模型（Hermes 等客户端刷新模型列表后生效）' : '已切换为全量展示（含需授权模型标记）', 'success');
+    }
+  });
+
   // 读取后端配置（放最后：先绑定监听，异步返回后不覆盖用户已手动改动的值）
   (async () => {
     try {
@@ -214,6 +227,11 @@ export function initSettings() {
         }
         if (chkAutoStart) {
           chkAutoStart.checked = Boolean(cfg.auto_start_proxy);
+        }
+        // 模型清单模式回读：normalize 非法值
+        if (selectModelListMode) {
+          selectModelListMode.value = cfg.model_list_mode === 'available' ? 'available' : 'all';
+          modelListModeCache = selectModelListMode.value;
         }
         // 自动拉起：应用启动时按持久化设置执行一次（托盘隐藏重开不触发——前端只加载一次；
         // proxy_start 本身幂等，与首次 checkHealth 的竞态由 800ms 延迟 + state.running 守卫兜底）

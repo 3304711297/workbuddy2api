@@ -42,9 +42,12 @@ function getMultiplierNum(m) {
 function applyAndRender() {
   let list = [...rawModelsList];
 
-  // 1. 标签筛选
+  // 1. 标签筛选（「需授权」虚拟标签 = availability === 'unavailable'）
   if (selectedTagFilter !== 'ALL') {
-    list = list.filter(m => (m.tags || []).includes(selectedTagFilter));
+    list = list.filter(m => {
+      if (selectedTagFilter === '需授权') return m.availability === 'unavailable';
+      return (m.tags || []).includes(selectedTagFilter);
+    });
   }
 
   // 2. 排序（按首字母 / 按倍率）
@@ -104,6 +107,9 @@ function updateTagFilterDropdown() {
   if (!dropdown) return;
 
   const tagCounts = {};
+  // 「需授权」虚拟标签：统计不可用模型数，参与筛选
+  const unauthCount = rawModelsList.filter(m => m.availability === 'unavailable').length;
+  if (unauthCount > 0) tagCounts['需授权'] = unauthCount;
   for (const m of rawModelsList) {
     for (const t of m.tags || []) {
       if (t) tagCounts[t] = (tagCounts[t] || 0) + 1;
@@ -111,9 +117,9 @@ function updateTagFilterDropdown() {
   }
 
   const sortedTags = Object.keys(tagCounts).sort((a, b) => {
-    const order = { '双端': 1, 'WorkBuddy': 2, 'CodeBuddy': 3 };
-    const oa = order[a] || 99;
-    const ob = order[b] || 99;
+    const order = { '需授权': 0, '双端': 1, 'WorkBuddy': 2, 'CodeBuddy': 3 };
+    const oa = order[a] ?? 99;
+    const ob = order[b] ?? 99;
     if (oa !== ob) return oa - ob;
     return a.localeCompare(b);
   });
@@ -237,10 +243,15 @@ function renderModelsTable(list) {
       </button>
     `;
 
-    // 标签：支持点击快速按标签筛选
-    const tagsHtml = (m.tags || []).map(t =>
-      `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`
-    ).join('');
+    // 标签：支持点击快速按标签筛选；不可用模型附「需授权」徽章
+    const tagsHtml = [
+      ...(m.availability === 'unavailable'
+        ? ['<span class="badge badge-warn clickable-tag" data-filter-tag="需授权" title="点击筛选全部需授权模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">🔒 需授权套餐</span>']
+        : []),
+      ...(m.tags || []).map(t =>
+        `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`
+      ),
+    ].join('');
 
     return `
       <tr>

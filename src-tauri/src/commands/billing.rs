@@ -28,6 +28,13 @@ pub struct ModelMetaItem {
     pub custom_reasoning_effort: Option<String>,
     // 档位矩阵来源：upstream=上游下发 / catalog=内置覆盖表兜底
     pub efforts_source: String,
+    // 可用性：available | unavailable（运行时学习 + GPT_FALLBACK_MAP 预标记）
+    #[serde(default = "default_availability")]
+    pub availability: String,
+}
+
+fn default_availability() -> String {
+    "available".to_string()
 }
 
 /// 已知模型的完整思考档位矩阵（兜底覆盖表）。
@@ -149,6 +156,67 @@ pub fn save_model_settings(settings: &HashMap<String, serde_json::Value>) -> Res
 }
 
 // ---------------------------------------------------------------------------
+// 模型可用性：预标记（GPT_FALLBACK_MAP 键 = 需海外套餐）+ 运行时学习证据
+// ---------------------------------------------------------------------------
+
+/// GPT_FALLBACK_MAP 键（与 converter.py 同步维护）：需海外套餐授权的 GPT 模型。
+const GPT_PREMARKED: &[&str] = &[
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+];
+
+fn availability_db_path() -> PathBuf {
+    local_app_dir().join("model_availability.json")
+}
+
+/// 有效不可用集合 = GPT_FALLBACK_MAP 预标记 + 活跃账号的运行时证据
+/// （runtime-200 覆盖预标记；runtime-11102 追加）。
+fn load_unavailable_models(active_uid: &str) -> std::collections::HashSet<String> {
+    let mut unavailable: std::collections::HashSet<String> = GPT_PREMARKED
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let p = availability_db_path();
+    if !p.exists() {
+        return unavailable;
+    }
+    let raw = match std::fs::read_to_string(&p) {
+        Ok(r) => r,
+        Err(_) => return unavailable,
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return unavailable;
+    };
+    let Some(entry) = root
+        .pointer("/accounts")
+        .and_then(|v| v.as_object())
+        .and_then(|m| m.get(active_uid))
+        .and_then(|v| v.as_object())
+    else {
+        return unavailable;
+    };
+    for (model, rec) in entry {
+        if let Some(src) = rec.get("source").and_then(|v| v.as_str()) {
+            match src {
+                "runtime-11102" => {
+                    unavailable.insert(model.clone());
+                }
+                "runtime-200" => {
+                    unavailable.remove(model);
+                }
+                _ => {}
+            }
+        }
+    }
+    unavailable
+}
+
+// ---------------------------------------------------------------------------
 // 模型全量获取与配置
 // ---------------------------------------------------------------------------
 
@@ -208,6 +276,8 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
     }
 
     let custom_settings = load_model_settings();
+    // 可用性：活跃账号运行时证据 + GPT_FALLBACK_MAP 预标记
+    let unavailable = load_unavailable_models(&st.active_uid);
     let mut list = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
@@ -320,7 +390,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
         }
 
         list.push(ModelMetaItem {
-            id,
+            id: id.clone(),
             name,
             credits,
             max_input_tokens: max_input,
@@ -334,6 +404,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             custom_context_window: custom_ctx,
             custom_reasoning_effort: custom_effort,
             efforts_source,
+            availability: if unavailable.contains(&id) { "unavailable".to_string() } else { "available".to_string() },
         });
     }
 

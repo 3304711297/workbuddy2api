@@ -47,6 +47,9 @@ pub struct AppConfig {
     /// 轮询请求阈值（默认 1）
     #[serde(default = "default_rotate_count")]
     pub rotate_count: u32,
+    /// /v1/models 清单模式：all（全量带可用性标记）| available（剔除不可用）；默认 all 兼容旧版
+    #[serde(default = "default_model_list_mode")]
+    pub model_list_mode: String,
 }
 
 fn default_proxy_port() -> u16 {
@@ -65,6 +68,10 @@ fn default_rotate_count() -> u32 {
     1
 }
 
+fn default_model_list_mode() -> String {
+    "all".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -75,6 +82,7 @@ impl Default for AppConfig {
             desensitize: default_desensitize(),
             rotate_mode: default_rotate_mode(),
             rotate_count: default_rotate_count(),
+            model_list_mode: default_model_list_mode(),
         }
     }
 }

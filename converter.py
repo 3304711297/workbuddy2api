@@ -687,6 +687,133 @@ def _load_model_settings() -> dict:
             pass
     return {}
 
+
+# ---------------------------------------------------------------------------
+# 模型可用性感知（运行时学习 + 预标记 + 清单模式）
+# ---------------------------------------------------------------------------
+
+_availability_cache: dict = {}
+_availability_sig: tuple[float, int] = (0.0, 0)
+_AVAILABILITY_LOCK = threading.Lock()
+
+
+def _availability_file() -> str:
+    """model_availability.json 路径（%LOCALAPPDATA%/workbuddy2api/，与 accounts.json 同目录）。"""
+    base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+    return str(Path(base) / "workbuddy2api" / "model_availability.json")
+
+
+def _load_availability(force: bool = False) -> dict:
+    """按 mtime+size 签名缓存读 model_availability.json，损坏/缺失降级为空映射。"""
+    global _availability_sig, _availability_cache
+    p = Path(_availability_file())
+    try:
+        st = p.stat()
+    except OSError:
+        _availability_sig = (0.0, 0)
+        _availability_cache = {}
+        return {}
+    sig = (st.st_mtime, st.st_size)
+    if not force and sig == _availability_sig:
+        return _availability_cache
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        _availability_cache = data if isinstance(data, dict) else {}
+    except Exception as e:
+        _log(f"读取 model_availability.json 失败，按空映射处理：{e}", level="debug")
+        _availability_cache = {}
+    _availability_sig = sig
+    return _availability_cache
+
+
+def _save_availability(data: dict) -> None:
+    """原子写回 model_availability.json（先写临时文件再替换）。"""
+    p = Path(_availability_file())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(p))
+    global _availability_sig
+    _availability_sig = (p.stat().st_mtime, p.stat().st_size)
+
+
+def _update_availability_entry(model: str, source: str, uid: str | None = None) -> None:
+    """写入一条可用性证据（per-uid，源 runtime-200 / runtime-11102），幂等更新 lastSeenMs。"""
+    global _availability_cache
+    uid = str(uid or "").strip() or "default"
+    now_ms = int(time.time() * 1000)
+    with _AVAILABILITY_LOCK:
+        data = json.loads(json.dumps(_load_availability(force=True)))
+        accounts = data.get("accounts")
+        if not isinstance(accounts, dict):
+            accounts = {}
+            data["accounts"] = accounts
+        entry = accounts.get(uid)
+        if not isinstance(entry, dict):
+            entry = {}
+            accounts[uid] = entry
+        prev = entry.get(model)
+        entry[model] = {
+            "source": source,
+            "firstSeenMs": prev["firstSeenMs"] if isinstance(prev, dict) and prev.get("firstSeenMs") else now_ms,
+            "lastSeenMs": now_ms,
+        }
+        _availability_cache = data
+        _save_availability(data)
+
+
+def _mark_model_unavailable(model: str, uid: str | None = None) -> None:
+    """运行时学习：上游 11102 未授权 → 记该模型（该账号）不可用。"""
+    _update_availability_entry(model, "runtime-11102", uid=uid)
+
+
+def _mark_model_available(model: str, uid: str | None = None) -> None:
+    """运行时学习：成功调用 → 覆盖不可用记录（账号升级套餐后模型回归可用）。"""
+    _update_availability_entry(model, "runtime-200", uid=uid)
+
+
+def _premarked_unavailable() -> set[str]:
+    """预标记：GPT_FALLBACK_MAP 的键即「需海外套餐授权」模型（静态兜底，不踩雷先标记）。"""
+    return set(GPT_FALLBACK_MAP.keys())
+
+
+def _effective_unavailable(uid: str | None = None) -> set[str]:
+    """有效不可用集合 = 预标记兜底 + per-uid 运行时证据（runtime-200 可覆盖预标记）。"""
+    uid = str(uid or "").strip() or "default"
+    data = _load_availability()
+    accounts = data.get("accounts")
+    entry = accounts.get(uid) if isinstance(accounts, dict) else None
+    if not isinstance(entry, dict):
+        return _premarked_unavailable()
+    unavailable = set(_premarked_unavailable())
+    for model, rec in entry.items():
+        if not isinstance(rec, dict):
+            continue
+        src = rec.get("source")
+        if src == "runtime-11102":
+            unavailable.add(model)
+        elif src == "runtime-200":
+            unavailable.discard(model)
+    return unavailable
+
+
+def _normalize_list_mode(value) -> str:
+    """清单模式归一：非法/缺失 → 'all'（全量标记，向后兼容旧设置）。"""
+    return str(value or "").strip().lower() if str(value or "").strip().lower() in ("all", "available") else "all"
+
+
+def _active_uid() -> str:
+    """当前活跃账号 uid（accounts.json 的 active_uid），读取失败返回空串。"""
+    acc_path = _accounts_file()
+    if not acc_path.is_file():
+        return ""
+    try:
+        cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+        return str(cfg.get("active_uid") or "").strip()
+    except Exception:
+        return ""
+
+
 MODEL_MAP = {
     "hy4": "hy4-preview",
     "hy4-preview": "hy4-preview",
@@ -1731,9 +1858,18 @@ async def list_models(authorization: Optional[str] = Header(default=None),
     # 剔除别名行：MODEL_MAP 中映射到其他正式名的键（如 hy3 -> hy3-x）只作请求侧
     # 兼容存在，列表只上报正式名，避免同一模型出现多行。
     all_models = [m for m in all_models if MODEL_MAP.get(m, m) == m]
+    # 可用性感知：默认 all（全量 + availability 标记）；available 模式剔除不可用模型。
+    # 优先级：settings.json（热读）> 启动 CLI 兜底参数。
+    list_mode = _normalize_list_mode(
+        (load_app_settings() or {}).get("model_list_mode") or CONFIG.get("model_list_mode")
+    )
+    unavailable = _effective_unavailable(_active_uid())
     data = []
     for m in all_models:
-        item = {"id": m, "object": "model", "created": 1700000000, "owned_by": "codebuddy"}
+        if list_mode == "available" and m in unavailable:
+            continue
+        item = {"id": m, "object": "model", "created": 1700000000, "owned_by": "codebuddy",
+                "availability": "unavailable" if m in unavailable else "available"}
         ctx = _reported_context_length(m, settings, _MODELS_WINDOWS)
         if ctx is not None:
             item["context_length"] = ctx
@@ -1887,6 +2023,7 @@ async def chat_completions(request: Request,
                                 fb = GPT_FALLBACK_MAP[body["model"]]
                                 fallback_reason = "11102 unauthorized"
                                 actual_model = fb
+                                _mark_model_unavailable(body["model"], uid=uid)  # 运行时学习
                                 _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
@@ -1927,6 +2064,8 @@ async def chat_completions(request: Request,
     if collected is None:
         raise HTTPException(status_code=502, detail={"error": {"message": "failed to collect upstream response", "type": "upstream_error"}})
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
+    if fallback_reason is None:
+        _mark_model_available(model_name, uid=uid)  # 运行时学习：该账号成功调用过
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
@@ -2102,6 +2241,7 @@ async def anthropic_messages(
                                 fb = GPT_FALLBACK_MAP[body["model"]]
                                 fallback_reason = "11102 unauthorized"
                                 actual_model = fb
+                                _mark_model_unavailable(body["model"], uid=uid)  # 运行时学习
                                 _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
@@ -2142,6 +2282,8 @@ async def anthropic_messages(
             raise
 
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
+    if fallback_reason is None:
+        _mark_model_available(model_name, uid=uid)  # 运行时学习：该账号成功调用过
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
@@ -2435,6 +2577,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             fb = GPT_FALLBACK_MAP[body["model"]]
                             fallback_reason = "11102 unauthorized"
                             actual_model = fb
+                            _mark_model_unavailable(body["model"], uid=curr_uid)  # 运行时学习
                             req_m = requested_model or model_name
                             _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
@@ -2494,6 +2637,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     if fallback_tried:
         req_m = requested_model or model_name
         yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
+    elif curr_uid:
+        _mark_model_available(model_name, uid=curr_uid)  # 运行时学习：该账号成功调用过
     async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms,
                                               retry_count=retry_count, retry_reason=retry_reason,
                                               actual_model=actual_model, fallback_reason=fallback_reason,
@@ -2942,6 +3087,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                             fb = GPT_FALLBACK_MAP[body["model"]]
                             fallback_reason = "11102 unauthorized"
                             actual_model = fb
+                            _mark_model_unavailable(body["model"], uid=curr_uid)  # 运行时学习
                             req_m = requested_model or model_name
                             _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
@@ -2985,6 +3131,11 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             return
 
     # 流结束：输出完成日志
+    if fallback_tried:
+        req_m = requested_model or model_name
+        _mark_model_unavailable(req_m, uid=curr_uid)  # 运行时学习：即使流式也记不可用
+    elif err_msg is None and curr_uid:
+        _mark_model_available(model_name, uid=curr_uid)  # 运行时学习：该账号成功调用过
     elapsed = time.time() - t0 if t0 else 0
     tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
     req_m = requested_model or model_name
@@ -3205,6 +3356,9 @@ def main():
                     help="多账号凭证调度模式：off (关闭轮换，固定当前活跃账号) / failover (限流自动避让下一个健康账号) / roundrobin (按请求数轮询分摊)。默认 off。")
     ap.add_argument("--rotate-count", type=int, default=None,
                     help="在 roundrobin 模式下，每 N 次请求轮换一次账号。默认 1。")
+    ap.add_argument("--model-list-mode", choices=["all", "available"], default=None,
+                    help="/v1/models 清单模式：all (全量 + availability 标记) / available (剔除不可用模型)。"
+                         "默认热读 settings.json 的 model_list_mode，此处仅作启动兜底。")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     args = ap.parse_args()
 
@@ -3238,6 +3392,8 @@ def main():
         CONFIG["rotate_mode"] = args.rotate_mode.lower()
     if args.rotate_count is not None:
         CONFIG["rotate_count"] = max(1, args.rotate_count)
+    if args.model_list_mode:
+        CONFIG["model_list_mode"] = args.model_list_mode.lower()
     CONFIG["log_path"] = args.log if args.log else _env_compat("LOG", "") or None
     CONFIG["log_level"] = args.log_level
     CONFIG["log_payloads"] = args.log_payloads or _env_compat("LOG_PAYLOADS", "").lower() in ("1", "true", "yes")

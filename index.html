@@ -543,6 +543,17 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="divider"></div>
 
+            <div class="form-group">
+              <label class="field-label">模型清单模式（/v1/models）</label>
+              <select id="select-model-list-mode" class="input" style="max-width: 320px;">
+                <option value="all">全部展示（需授权模型带 🔒 标记）</option>
+                <option value="available">仅展示可用模型（剔除需授权项）</option>
+              </select>
+              <p class="muted field-hint">内核热读生效，无需重启服务；Hermes 等客户端刷新模型列表后即可看到变化。不可用模型由运行时学习（上游 11102）与预标记共同判定。</p>
+            </div>
+
+            <div class="divider"></div>
+
             <!-- 控制台黑框窗口与调试 -->
             <div class="form-group">
               <label class="switch-label">
