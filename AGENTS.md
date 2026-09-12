@@ -108,13 +108,23 @@ workbuddy2api.exe (GUI)
 - **模型可用性感知（`model_availability.json` 三真源，改一处漏两处会静默不一致）**：
   「需授权」预标记有**三个同步维护的真源**：① `converter.py` 的 `GPT_FALLBACK_MAP`
   键（运行时降级判定 + 预标记）、② `billing.rs` 的 `GPT_PREMARKED`（控制台模型表）、
-  ③ `tests/test_model_availability.py` 的 `test_premarked_covers_all_gpt_fallback_keys`
-  （跨真源一致性断言，漏同步会红）。新增/删除需授权模型时三处一起改。
+  ③ `scripts/check_premarked_sync.py` 跨源对拍校验器（CI 独立步骤 +
+  `test_premarked_covers_all_gpt_fallback_keys` 薄壳断言，两侧键集漂移或定义锚点
+  丢失都会红）。⚠️ ③ 必须保持**独立提取两侧源码**——曾经写成断言
+  `GPT_FALLBACK_MAP` 键 ⊆ `_premarked_unavailable()`，而后者就是
+  `set(GPT_FALLBACK_MAP.keys())`，自己对自己断言恒真，Rust 侧漂移永远不会红。
+  新增/删除需授权模型时三处一起改。
   运行时学习证据（`runtime-11102` / `runtime-200`）写在
   `%LOCALAPPDATA%/workbuddy2api/model_availability.json`（per-uid 结构
   `accounts.<uid>.<model>`），由 converter 在 11102 降级点与成功完成点写入；
   Rust 控制台与 `/v1/models` 只读不写。`model_list_mode`（all/available）热读
   settings.json，CLI `--model-list-mode` 仅启动兜底。
+- **SSE 注释行是有意为之（规范做法，别「修」掉）**：converter 在聚合等待期每 5s
+  下发 `: ping`、降级发生时首包前下发 `: fallback: ...`，anthropic_stream 同样
+  透传注释行。这是 SSE 规范允许的注释帧（客户端应忽略），用于防中间代理 60s
+  静默超时 + 向客户端暴露降级可观测性。极少数非标准解析器可能把它当数据处理，
+  已裁定保留（2026-09-12）：遇到「流里多出冒号开头行」的报告先核对客户端解析器
+  是否符合 SSE 规范，不要反向去掉注释行。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
 - **并发削峰平滑器 (`request_pacer.py`)**：
