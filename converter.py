@@ -1508,6 +1508,39 @@ def _is_unauthorized_model_error(status_code: int, err_text: str) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# 降级事件观测（内存环形记录，随内核重启清零；/api/rate_limit 暴露给消费端）
+# ---------------------------------------------------------------------------
+
+_FALLBACK_EVENTS: dict[str, dict] = {}  # requested_model -> {actual, reason, count, firstMs, lastMs}
+_FALLBACK_CAP = 16
+_FALLBACK_LOCK = threading.Lock()
+
+
+def _record_fallback_event(requested: str, actual: str, reason: str) -> None:
+    """记录一次静默降级（requested→actual），同模型聚合计数，换目标时重置。"""
+    if not requested or not actual or requested == actual:
+        return
+    now_ms = int(time.time() * 1000)
+    with _FALLBACK_LOCK:
+        prev = _FALLBACK_EVENTS.get(requested)
+        if prev and prev.get("actual") == actual:
+            prev["count"] = prev.get("count", 0) + 1
+            prev["lastMs"] = now_ms
+        else:
+            if len(_FALLBACK_EVENTS) >= _FALLBACK_CAP and prev is None:
+                # 淘汰最旧一条，防止清单无限增长
+                oldest = min(_FALLBACK_EVENTS, key=lambda k: _FALLBACK_EVENTS[k].get("lastMs", 0))
+                _FALLBACK_EVENTS.pop(oldest, None)
+            _FALLBACK_EVENTS[requested] = {
+                "actual": actual,
+                "reason": reason or "unknown",
+                "count": 1,
+                "firstMs": now_ms,
+                "lastMs": now_ms,
+            }
+
+
 def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status_code: int | None = None) -> None:
     """从上游错误体里识别 6004/429 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
     m = _RATE_LIMIT_RE.search(err_text or "")
@@ -1844,6 +1877,17 @@ async def api_rate_limit():
         "nickname": nickname,
         "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
         "rotation": rotation_info,
+        # 降级感知：最近发生的静默降级（requested → actual），供插件/控制台展示
+        # 「你以为在用的模型 ≠ 实际模型」。内存记录，随内核重启清零。
+        "fallbacks": {
+            req: {
+                "actual": ev["actual"],
+                "reason": ev["reason"],
+                "count": ev["count"],
+                "lastLocal": time.strftime("%m-%d %H:%M:%S", time.localtime(ev["lastMs"] / 1000)),
+            }
+            for req, ev in list(_FALLBACK_EVENTS.items())
+        },
     }
 
 
@@ -2024,6 +2068,7 @@ async def chat_completions(request: Request,
                                 fallback_reason = "11102 unauthorized"
                                 actual_model = fb
                                 _mark_model_unavailable(body["model"], uid=uid)  # 运行时学习
+                                _record_fallback_event(model_name, actual_model, fallback_reason)  # 降级感知
                                 _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
@@ -2242,6 +2287,7 @@ async def anthropic_messages(
                                 fallback_reason = "11102 unauthorized"
                                 actual_model = fb
                                 _mark_model_unavailable(body["model"], uid=uid)  # 运行时学习
+                                _record_fallback_event(model_name, actual_model, fallback_reason)  # 降级感知
                                 _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
@@ -2578,6 +2624,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             fallback_reason = "11102 unauthorized"
                             actual_model = fb
                             _mark_model_unavailable(body["model"], uid=curr_uid)  # 运行时学习
+                            _record_fallback_event(requested_model or model_name, actual_model, fallback_reason)  # 降级感知
                             req_m = requested_model or model_name
                             _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
@@ -3088,6 +3135,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                             fallback_reason = "11102 unauthorized"
                             actual_model = fb
                             _mark_model_unavailable(body["model"], uid=curr_uid)  # 运行时学习
+                            _record_fallback_event(requested_model or model_name, actual_model, fallback_reason)  # 降级感知
                             req_m = requested_model or model_name
                             _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
