@@ -2034,10 +2034,22 @@ async def api_rate_limit():
 
     rotator = _get_rotator()
     all_accs = rotator.get_all_accounts()
+    soonest_exp = 0
+    soonest_day = ""
+    now_sec = int(time.time())
+    for u, _ in all_accs:
+        exp = rotator.get_account_expire_at(u)
+        if exp > now_sec:
+            if soonest_exp == 0 or exp < soonest_exp:
+                soonest_exp = exp
+    if soonest_exp > 0:
+        soonest_day = time.strftime("%Y-%m-%d", time.localtime(soonest_exp))
+
     rotation_info = {
         "mode": rotator.mode,
         "rotate_count": rotator.rotate_count,
         "accounts_count": len(all_accs),
+        "soonest_expire_day": soonest_day or None,
         "active_uid": getattr(CONFIG.get("cred"), "get_active_uid", lambda: "")() if CONFIG.get("cred") else "",
         # 配置来源标注：hot = 已从 settings.json 热读到（改完即生效）；default = 回退到启动参数
         "config_source": "hot" if load_app_settings().get("rotate_mode") else "default",
@@ -2070,6 +2082,11 @@ async def api_rate_limit():
         "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
         "rotation": rotation_info,
         "fallbacks": fallback_snapshot,
+        "server": {
+            "maxBodyMb": MAX_BODY_MB,
+            "userAgent": USER_AGENT,
+            "protocols": ["chat", "messages", "responses"],
+        },
     }
 
 
