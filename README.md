@@ -49,6 +49,7 @@
   - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
   - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
   - **413 请求体超限安全防护**：对 `/v1/chat/completions` 与 `/v1/messages` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`），超限报文网关层直接秒拒返回 413，防御超大 payload 拖垮本地内存与被上游拦截连坐（借鉴 `linguo2625469/workbuddy2api-panel`）；
+  - **多模态远程图片自动转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`（直接传 http 链接报错 400）。网关自动异步下载远程图片并内联嵌入，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）；
   - **官方客户端 User-Agent 仿真**：出站请求智能仿真官方客户端标识（国内版 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 触发 10085 拦截与官网使用端归因失真，亦支持 `WORKBUDDY2API_USER_AGENT` 动态配置（借鉴 `ardeyouxipianyi` 与 `turbomind66`）。
 
 ---

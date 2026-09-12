@@ -63,6 +63,7 @@
 | `ardeyouxipianyi/workbuddy2api-intl` & `turbomind66/workbuddy2api-python` | MIT | 官方客户端 User-Agent 仿真与可配置环境变量 | `converter.py`：出站 UA 从硬编码升级为仿真官方客户端规范（`CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），并支持 `WORKBUDDY2API_USER_AGENT` 动态覆盖，规避上游非标 UA 导致的 10085 拦截与归因异常 |
 | `momo0410/workbuddy-switch-gateway` | MIT | 按积分到期日分层选号调度算法（先烧快过期额度） | `converter.py`：`AccountRotator` 引入 `get_candidate_uids_tiered` 与多格式到期日解析，按日粒度优先将即将过期的账号排在最前，避免额度失效浪费 |
 | `ShouZhuo0413/codebuddy2api` & `hawklithm/workbuddy2api` | MIT | OpenAI Responses 协议（`POST /v1/responses`）双向适配层与流式事件状态机 | `responses_compat.py`：实现 Responses 请求/工具/多轮消息与 Chat 互转，及 `ResponsesStreamConverter` 流式语义事件流，原生直连驱动 Codex CLI |
+| `neipor/codebuddy-cli2api` | MIT | 远程多模态图片自动转 Data-URI 机制 | `converter.py`：实现 `_url_to_data_uri` 与 `_inline_remote_images`，自动异步下载 http(s) 远程图片并内联为 base64 data URI，解除腾讯后端仅接受 data URI 的 400 约束 |
 
 ---
 

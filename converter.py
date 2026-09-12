@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import datetime
 import ipaddress
 import json
@@ -1127,6 +1128,62 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
     return list((_MODELS_CACHE.get(cache_key) or {}).get("models") or [])
 
 
+async def _url_to_data_uri(url: str, timeout: float = 15.0) -> str:
+    """下载远程图片并转为 data:image/...;base64,... URI（借鉴 neipor/codebuddy-cli2api）。"""
+    if not url or url.startswith("data:"):
+        return url
+    if not url.startswith(("http://", "https://")):
+        return url
+
+    low = url.lower().split("?", 1)[0]
+    mime = "image/png"
+    for ext, m in (
+        (".png", "image/png"),
+        (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"),
+        (".webp", "image/webp"),
+        (".gif", "image/gif"),
+        (".bmp", "image/bmp"),
+    ):
+        if low.endswith(ext):
+            mime = m
+            break
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+            r = await c.get(url, headers={"User-Agent": USER_AGENT})
+            if r.status_code == 200:
+                ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                if ct.startswith("image/"):
+                    mime = ct
+                b64 = base64.b64encode(r.content).decode("ascii")
+                return f"data:{mime};base64,{b64}"
+    except Exception as e:
+        _log(f"⚠️ 下载远程多模态图片失败 ({url[:60]}...): {e}", level="warning")
+    return url
+
+
+async def _inline_remote_images(messages: list) -> list:
+    """遍历 messages 中的多模态部件，将远程 http(s) 图片自动下载转为 data-URI 规避上游 400。"""
+    if not isinstance(messages, list):
+        return messages
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    iu = part.get("image_url")
+                    if isinstance(iu, dict) and isinstance(iu.get("url"), str):
+                        u = iu["url"]
+                        if u.startswith(("http://", "https://")):
+                            iu["url"] = await _url_to_data_uri(u)
+                    elif isinstance(iu, str) and iu.startswith(("http://", "https://")):
+                        part["image_url"] = {"url": await _url_to_data_uri(iu)}
+    return messages
+
+
 # 后端请求体里出现过的额外字段（透传时若客户端给了就保留）
 PASSTHROUGH_BODY_KEYS = {
     "model", "messages", "tools", "tool_choice", "temperature",
@@ -2152,6 +2209,8 @@ async def chat_completions(request: Request,
     client_wants_stream = bool(payload.get("stream"))
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
     body.setdefault("model", "auto")
+    if "messages" in body:
+        body["messages"] = await _inline_remote_images(body["messages"])
     # 后端只支持流式：始终以 stream=True 调后端，非流式由转换器聚合
     body["stream"] = True
     if "stream_options" not in body:
@@ -2402,6 +2461,8 @@ async def anthropic_messages(
 
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
     body.setdefault("model", "auto")
+    if "messages" in body:
+        body["messages"] = await _inline_remote_images(body["messages"])
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
@@ -2627,6 +2688,8 @@ async def openai_responses(
     client_wants_stream = bool(raw_body.get("stream", True))
     body = {k: chat_payload[k] for k in PASSTHROUGH_BODY_KEYS if k in chat_payload}
     body.setdefault("model", "auto")
+    if "messages" in body:
+        body["messages"] = await _inline_remote_images(body["messages"])
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
