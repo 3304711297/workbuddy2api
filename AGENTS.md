@@ -105,6 +105,16 @@ workbuddy2api.exe (GUI)
      没机会点）。已拆分为纯渲染的 `renderRotationPolicyUI()`（change 专用）与
      读盘的 `syncRotationPolicyCard()`（仅初始化/保存后回读用）。
      **改动交互控件时，先确认回调是纯渲染还是带副作用。**
+- **模型可用性感知（`model_availability.json` 三真源，改一处漏两处会静默不一致）**：
+  「需授权」预标记有**三个同步维护的真源**：① `converter.py` 的 `GPT_FALLBACK_MAP`
+  键（运行时降级判定 + 预标记）、② `billing.rs` 的 `GPT_PREMARKED`（控制台模型表）、
+  ③ `tests/test_model_availability.py` 的 `test_premarked_covers_all_gpt_fallback_keys`
+  （跨真源一致性断言，漏同步会红）。新增/删除需授权模型时三处一起改。
+  运行时学习证据（`runtime-11102` / `runtime-200`）写在
+  `%LOCALAPPDATA%/workbuddy2api/model_availability.json`（per-uid 结构
+  `accounts.<uid>.<model>`），由 converter 在 11102 降级点与成功完成点写入；
+  Rust 控制台与 `/v1/models` 只读不写。`model_list_mode`（all/available）热读
+  settings.json，CLI `--model-list-mode` 仅启动兜底。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
 - **并发削峰平滑器 (`request_pacer.py`)**：
