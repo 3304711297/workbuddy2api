@@ -108,6 +108,7 @@ export function initSettings() {
   let apiKeyCache = '';
   let logLevelCache = 'info';
   let logPayloadsCache = false;
+  let listenHostCache = '127.0.0.1';
   const buildSettingsPayload = () => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
@@ -122,7 +123,8 @@ export function initSettings() {
       // 客户端鉴权密钥：留空即不鉴权；每次保存都带上，避免被整对象覆盖写盘抹除
       api_key: apiKeyCache,
       log_level: logLevelCache,
-      log_payloads: logPayloadsCache
+      log_payloads: logPayloadsCache,
+      listen_host: listenHostCache
     };
   };
 
@@ -137,6 +139,7 @@ export function initSettings() {
           if (latest.model_list_mode) modelListModeCache = latest.model_list_mode;
           if (latest.log_level) logLevelCache = latest.log_level;
           if (typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
+          if (latest.listen_host) listenHostCache = latest.listen_host;
           // 密钥以输入框当前值为准（用户可能刚改完就点保存），仅在未输入时回退磁盘值
           const apiKeyEl = document.getElementById('input-api-key');
           if (apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
@@ -295,6 +298,46 @@ export function initSettings() {
     }
   });
 
+  // —— 局域网访问（对标 EasyCLIProxyAPI 的 get_lan_ipv4） ——
+  const chkLanAccess = document.getElementById('chk-lan-access');
+  const lanAddressRow = document.getElementById('lan-address');
+  const lanAddressValue = document.getElementById('lan-address-value');
+
+  // 展示/隐藏局域网地址行，并填入探测到的 IPv4
+  const syncLanAddressRow = async (enabled) => {
+    if (!lanAddressRow) return;
+    lanAddressRow.style.display = enabled ? '' : 'none';
+    if (!enabled || !lanAddressValue) return;
+    try {
+      const ip = await invokeTauri('lan_ipv4');
+      lanAddressValue.textContent = ip ? `http://${ip}:${state.port}/v1` : '未能探测到局域网地址（请检查网络连接）';
+    } catch (e) {
+      lanAddressValue.textContent = '探测失败';
+    }
+  };
+
+  chkLanAccess?.addEventListener('change', async (e) => {
+    const wantEnable = !!e.target.checked;
+    if (wantEnable && !apiKeyCache.trim()) {
+      // 无密钥则内核会拒绝启动——提前拦截并引导，而不是让用户看到「内核启动后立刻退出」
+      e.target.checked = false;
+      listenHostCache = '127.0.0.1';
+      showToast('请先在上方「客户端鉴权密钥」处生成并保存密钥，再开启局域网访问（无密钥暴露风险过高）', 'error');
+      await syncLanAddressRow(false);
+      return;
+    }
+    listenHostCache = wantEnable ? '0.0.0.0' : '127.0.0.1';
+    await syncLanAddressRow(wantEnable);
+    if (await persistSettings()) {
+      showToast(
+        wantEnable
+          ? `已允许局域网访问${state.running ? '，重启内核后生效' : ''}：请确保密钥已同步到各客户端`
+          : '已恢复仅本机访问（127.0.0.1）',
+        wantEnable ? 'info' : 'success'
+      );
+    }
+  });
+
   // 读取后端配置（放最后：先绑定监听，异步返回后不覆盖用户已手动改动的值）
   (async () => {
     try {
@@ -344,6 +387,11 @@ export function initSettings() {
           logPayloadsCache = !!cfg.log_payloads;
           chkLogPayloads.checked = logPayloadsCache;
         }
+        // 监听地址回读：仅 0.0.0.0 视为开启局域网，其余归一回环
+        const lanEnabled = cfg.listen_host === '0.0.0.0';
+        listenHostCache = lanEnabled ? '0.0.0.0' : '127.0.0.1';
+        if (chkLanAccess) chkLanAccess.checked = lanEnabled;
+        syncLanAddressRow(lanEnabled);
         // 自动拉起：应用启动时按持久化设置执行一次（托盘隐藏重开不触发——前端只加载一次；
         // proxy_start 本身幂等，与首次 checkHealth 的竞态由 800ms 延迟 + state.running 守卫兜底）
         if (cfg.auto_start_proxy && window.__TAURI__) {

@@ -669,6 +669,27 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="divider"></div>
 
+            <!-- 局域网访问（对标 EasyCLIProxyAPI 的 get_lan_ipv4 / 网络设置） -->
+            <div class="form-group" id="lan-access-field">
+              <label class="switch-label">
+                <input id="chk-lan-access" type="checkbox" />
+                <span class="switch-slider"></span>
+                <span class="switch-text">允许局域网内其它设备访问（--host 0.0.0.0）</span>
+              </label>
+              <p class="muted field-hint" style="margin-top: 6px;">
+                ⚠️ <b>安全风险</b>：开启后同一网络（Wi-Fi / 办公室局域网）内的任何设备都能连接本服务，
+                并使用你的账号额度。因此<b>必须同时配置上方的客户端鉴权密钥</b>，否则内核会拒绝启动。
+                仅建议在受信任的私有网络短时开启。
+              </p>
+              <p class="muted field-hint" id="lan-address" style="display: none;">
+                局域网地址：<code class="mono" id="lan-address-value">—</code>（其它设备用此地址连接，
+                密钥已开启时须同时填写上方的密钥）
+              </p>
+              <p class="muted field-hint"><b>修改后需重启内核生效</b>。</p>
+            </div>
+
+            <div class="divider"></div>
+
             <!-- 高级运行时开关（不在 AppConfig 中，需环境变量 + 重启内核） -->
             <div class="form-group" id="runtime-advanced-hint">
               <label class="field-label">高级运行时开关（环境变量配置）</label>

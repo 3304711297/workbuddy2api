@@ -60,6 +60,15 @@ pub struct AppConfig {
     /// 是否落盘完整 Prompt / 响应正文（危险：仅在 trace 级生效，默认关闭）
     #[serde(default)]
     pub log_payloads: bool,
+    /// 反代监听地址：默认 127.0.0.1（仅本机）；设为 0.0.0.0 可让局域网内其它设备访问
+    /// （高危：内核要求必须同时配置 api_key，否则拒绝启动）
+    #[serde(default = "default_listen_host")]
+    pub listen_host: String,
+}
+
+fn default_listen_host() -> String {
+    // 安全默认：仅回环监听，绝不默认暴露到网络
+    "127.0.0.1".to_string()
 }
 
 fn default_log_level() -> String {
@@ -100,6 +109,7 @@ impl Default for AppConfig {
             api_key: String::new(), // 默认不鉴权（回环监听场景）
             log_level: default_log_level(),
             log_payloads: false, // 默认不落盘 Prompt 正文（隐私敏感）
+            listen_host: default_listen_host(),
         }
     }
 }
@@ -534,6 +544,7 @@ pub fn run_app() {
             // 用量统计聚合与版本更新检查（前端 invoke）
             commands::usage_summary,
             commands::usage_events,
+            commands::lan_ipv4,
             commands::check_app_update
         ])
         .run(tauri::generate_context!())

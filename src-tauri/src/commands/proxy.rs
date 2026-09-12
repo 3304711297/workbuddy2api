@@ -108,6 +108,22 @@ pub fn proxy_start(
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.arg(script).arg("--port").arg(port.to_string());
+    // 监听地址：默认回环。非回环（如 0.0.0.0）时内核要求必须带 api_key，
+    // 否则 exit 1 拒绝启动——此处提前守卫并给出可操作的错误信息，
+    // 避免用户只看到「内核启动后立刻退出」而无从判断原因。
+    let listen_host = {
+        let h = cfg.listen_host.trim();
+        if h.is_empty() { "127.0.0.1".to_string() } else { h.to_string() }
+    };
+    let is_loopback = listen_host == "127.0.0.1" || listen_host == "localhost" || listen_host == "::1";
+    // api_key 先算出来，供监听地址守卫与后续参数追加共用
+    let api_key = cfg.api_key.trim().to_string();
+    if !is_loopback && api_key.is_empty() {
+        return Err("非回环监听（如 0.0.0.0）必须先在设置页配置客户端鉴权密钥，\
+                    否则服务将无鉴权暴露给网络。内核也会拒绝启动。"
+            .to_string());
+    }
+    cmd.arg("--host").arg(&listen_host);
     if desensitize {
         cmd.arg("--desensitize");
     }
@@ -120,11 +136,9 @@ pub fn proxy_start(
     // 模型清单模式：内核每次 /v1/models 请求热读 settings.json，这里透传仅作启动兜底
     let list_mode = if cfg.model_list_mode.is_empty() { "all".to_string() } else { cfg.model_list_mode.clone() };
     cmd.arg("--model-list-mode").arg(&list_mode);
-    // 客户端鉴权：仅在密钥非空时追加——传空串会让内核开启校验却没有有效密钥可校验，
-    // 导致所有客户端请求被 401 拒绝（回环监听下内核默认不校验，故空值应完全不下发）
-    let api_key = cfg.api_key.trim();
+    // 客户端鉴权：密钥非空时追加（空值不下发，见上方守卫）
     if !api_key.is_empty() {
-        cmd.arg("--api-key").arg(api_key);
+        cmd.arg("--api-key").arg(&api_key);
     }
     // 用量统计：每次聊天请求完成后由 converter 向该文件追加一行 JSONL，供 usage_summary 聚合
     let usage_dir = local_app_dir().join("usage");
@@ -290,6 +304,24 @@ pub fn open_logs_dir() -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("打开日志目录失败: {e}"))?;
     Ok(())
+}
+
+/// 局域网 IPv4 探测（对标 EasyCLIProxyAPI 的 get_lan_ipv4）：
+/// 通过向公网地址发一个「不会真正发包」的 UDP connect 让内核选出默认出口网卡，
+/// 从而拿到本机在局域网中的地址，用于向用户展示可连接的地址（如 http://192.168.x.x:8787）。
+/// connect 不产生流量，也不依赖外网可达性——只为让路由表选择出口接口。
+/// 失败时返回 None（前端优雅降级，不显示地址行）。
+#[tauri::command]
+pub fn lan_ipv4() -> Option<String> {
+    let sock = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    // 8.8.8.8:80 仅作路由查询用（UDP connect 不握手、不发包）
+    if sock.connect("8.8.8.8:80").is_err() {
+        return None;
+    }
+    sock.local_addr().ok().map(|a| a.ip().to_string())
 }
 
 /// 按 PID 精确杀死进程树（Windows 下使用 taskkill /F /T /PID，连同子孙进程彻底拔起）。
