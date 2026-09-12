@@ -50,7 +50,11 @@ test('settings.js 的 buildSettingsPayload 必须带全 AppConfig 全部字段�
 test('persistSettings 写盘前先读磁盘真源（防止陈旧缓存反向覆盖）', () => {
   const start = SETTINGS_JS.indexOf('const persistSettings = async () =>');
   assert.ok(start > -1, '未找到 persistSettings');
-  const block = SETTINGS_JS.slice(start, start + 900);
+  // 按函数体边界切片（而非固定字符窗口）：函数体增长时固定窗口会把写入调用挤出，
+  // 造成「契约成立却测试失败」的假警报。
+  const end = SETTINGS_JS.indexOf('};', start);
+  assert.ok(end > start, '未找到 persistSettings 函数体结束位置');
+  const block = SETTINGS_JS.slice(start, end + 2);
   assert.ok(
     block.includes("invokeTauri('get_app_settings')"),
     'persistSettings 必须先调用 get_app_settings 读取磁盘真源再合并写回'

@@ -54,6 +54,16 @@ pub struct AppConfig {
     /// serde default 保证旧 settings.json 缺字段时反序列化兼容（空串 = 不鉴权，回环默认）
     #[serde(default)]
     pub api_key: String,
+    /// 内核结构化日志级别：info（默认，仅请求摘要与耗时）| debug（含错误详情）| trace（完整请求体，自动脱敏）
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    /// 是否落盘完整 Prompt / 响应正文（危险：仅在 trace 级生效，默认关闭）
+    #[serde(default)]
+    pub log_payloads: bool,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 fn default_proxy_port() -> u16 {
@@ -88,6 +98,8 @@ impl Default for AppConfig {
             rotate_count: default_rotate_count(),
             model_list_mode: default_model_list_mode(),
             api_key: String::new(), // 默认不鉴权（回环监听场景）
+            log_level: default_log_level(),
+            log_payloads: false, // 默认不落盘 Prompt 正文（隐私敏感）
         }
     }
 }

@@ -643,6 +643,32 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="divider"></div>
 
+            <!-- 结构化日志级别（对标 EasyCLIProxyAPI 的日志管理） -->
+            <div class="form-group" id="log-level-field">
+              <label class="field-label">内核结构化日志级别</label>
+              <select id="select-log-level" class="input" style="max-width: 420px;">
+                <option value="info">info —— 仅记录请求摘要与耗时（默认，不含正文）</option>
+                <option value="debug">debug —— 附加错误响应详情</option>
+                <option value="trace">trace —— 完整请求体与响应流（自动脱敏 Token/Key）</option>
+              </select>
+              <p class="muted field-hint" style="margin-top: 6px;">
+                日志写入 <code class="mono">%LOCALAPPDATA%\workbuddy2api\converter.log</code>，
+                可在「实时日志」页查看。<b>修改后需重启内核生效</b>。
+              </p>
+              <label class="switch-label" style="margin-top: 8px;">
+                <input id="chk-log-payloads" type="checkbox" />
+                <span class="switch-slider"></span>
+                <span class="switch-text">落盘完整 Prompt / 响应正文（--log-payloads）</span>
+              </label>
+              <p class="muted field-hint">
+                ⚠️ <b>隐私风险</b>：开启后完整的提示词（Prompt）与模型响应正文会以<b>明文</b>写入日志文件，
+                仅建议在排查疑难问题且日志不外传时短时开启。该开关仅在日志级别为
+                <code class="mono">trace</code> 时实际生效（双闸门），排查完请及时关闭。
+              </p>
+            </div>
+
+            <div class="divider"></div>
+
             <!-- 高级运行时开关（不在 AppConfig 中，需环境变量 + 重启内核） -->
             <div class="form-group" id="runtime-advanced-hint">
               <label class="field-label">高级运行时开关（环境变量配置）</label>

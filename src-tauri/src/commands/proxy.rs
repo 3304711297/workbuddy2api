@@ -131,6 +131,22 @@ pub fn proxy_start(
     let _ = std::fs::create_dir_all(&usage_dir);
     cmd.arg("--usage-log").arg(usage_dir.join("usage.jsonl"));
 
+    // 结构化日志：内核 _log() 在 log_path 为空时直接丢弃——不传 --log 则丢失
+    // 请求摘要/耗时/错误详情等结构化行（日志页只能看到 uvicorn 原始 stdout）。
+    // 级别由设置控制（info/debug/trace）；payload 开关需显式开启（会落盘完整正文）。
+    let log_file = local_app_dir().join("converter.log");
+    cmd.arg("--log").arg(&log_file);
+    let log_level = match cfg.log_level.trim() {
+        "debug" => "debug",
+        "trace" => "trace",
+        _ => "info",
+    };
+    cmd.arg("--log-level").arg(log_level);
+    if cfg.log_payloads {
+        // 双闸门：内核仍要求 trace 级才实际落盘正文，此处仅表达用户意图
+        cmd.arg("--log-payloads");
+    }
+
     // Windows 平台静默模式设置：如果不开启 debug console，则彻底隐藏黑框
     let show_console = if let Some(cfg_state) = app.try_state::<crate::AppConfigState>() {
         cfg_state.0.lock().map(|c| c.show_debug_console).unwrap_or(false)
@@ -196,33 +212,70 @@ fn rotate_proxy_log_if_oversized() {
     }
 }
 
+/// 读取文件尾部并裁剪到 max_bytes（从字符边界起切，防多字节字符 panic）。
+/// 文件不存在/读取失败返回 None。
+fn read_file_tail_clipped(p: &std::path::Path, max_bytes: usize) -> Option<String> {
+    if !p.exists() {
+        return None;
+    }
+    let bytes = std::fs::read(p).ok()?;
+    let raw = String::from_utf8_lossy(&bytes).to_string();
+    if raw.len() <= max_bytes {
+        return Some(raw);
+    }
+    // 日志含中文/emoji 时，字节偏移可能落在多字节字符中间，
+    // 直接切片会 panic "byte index is not a char boundary"，需向后对齐。
+    let mut start = raw.len() - max_bytes;
+    while start < raw.len() && !raw.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(raw[start..].to_string())
+}
+
+/// 结构化日志文件路径（内核 --log 指向此文件，含请求摘要/耗时/级别过滤后的行）
+fn structured_log_path() -> PathBuf {
+    local_app_dir().join("converter.log")
+}
+
 #[tauri::command]
 pub fn proxy_get_logs() -> Result<String, String> {
-    let p = log_file_path();
-    if p.exists() {
-        let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
-        let raw = String::from_utf8_lossy(&bytes);
-        // 如果日志太大，仅截取最后 80KB 保持平滑
-        if raw.len() > 80_000 {
-            // 日志含中文/emoji 时，字节偏移可能落在多字节字符中间，
-            // 直接切片会 panic "byte index is not a char boundary"。
-            // 这里把 start 向后调整到最近的字符边界。
-            let mut start = raw.len() - 80_000;
-            while start < raw.len() && !raw.is_char_boundary(start) {
-                start += 1;
+    // 两级日志合并展示：
+    // 1) 结构化日志（converter.log）——内核 _log() 输出，受 --log-level 控制，
+    //    含请求摘要/耗时/错误详情，是调整级别后用户最需要看到的内容；
+    // 2) 原始 stdout（proxy_stdout.log）——uvicorn 启动信息与未被结构化捕获的输出。
+    // 各自配额（48KB / 32KB）防止其中一方把另一方挤出预算。
+    const STRUCTURED_QUOTA: usize = 48_000;
+    const STDOUT_QUOTA: usize = 32_000;
+    let structured = read_file_tail_clipped(&structured_log_path(), STRUCTURED_QUOTA);
+    let stdout = read_file_tail_clipped(&log_file_path(), STDOUT_QUOTA);
+
+    match (structured, stdout) {
+        (Some(s), Some(o)) => {
+            if s.trim().is_empty() && o.trim().is_empty() {
+                return Ok("暂无日志输出，请启动反代服务".into());
             }
-            return Ok(raw[start..].to_string());
+            Ok(format!(
+                "===== 结构化日志（--log-level 控制） =====\n{s}\n===== 进程 stdout =====\n{o}"
+            ))
         }
-        return Ok(raw.to_string());
+        (Some(s), None) => Ok(s),
+        (None, Some(o)) => {
+            if o.trim().is_empty() {
+                return Ok("暂无日志输出，请启动反代服务".into());
+            }
+            Ok(o)
+        }
+        (None, None) => Ok("暂无日志输出，请启动反代服务".into()),
     }
-    Ok("暂无日志输出，请启动反代服务".into())
 }
 
 #[tauri::command]
 pub fn proxy_clear_logs() -> Result<String, String> {
-    let p = log_file_path();
-    if p.exists() {
-        std::fs::write(&p, "").map_err(|e| e.to_string())?;
+    // 两个日志文件都要清：只清 stdout 会让用户以为清空失败（旧结构化日志仍在展示）
+    for p in [log_file_path(), structured_log_path()] {
+        if p.exists() {
+            std::fs::write(&p, "").map_err(|e| e.to_string())?;
+        }
     }
     Ok("日志已清空".into())
 }

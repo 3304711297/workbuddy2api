@@ -227,6 +227,11 @@ workbuddy2api.exe (GUI)
   密钥生成必须用 CSPRNG（`crypto.getRandomValues`），禁止 `Math.random()`（可预测，等于没鉴权）。
   前端两处 `save_app_settings` 写入点都是**整对象覆盖写盘**：`settings.js` 的 `buildSettingsPayload` 必须显式带上 `api_key`，否则会被 serde default 抹成空串（`accounts.js` 用展开式浅合并，天然安全）。
   该字段不受热读机制覆盖——密钥在启动时以 CLI 参数注入，改后必须重启内核。
+- **结构化日志透传（AppConfig.log_level / log_payloads）**：
+  不传 `--log` 时内核 `_log()` 因 `log_path` 为空**直接丢弃**全部结构化行（请求摘要/耗时/错误详情），日志页只能看到 uvicorn 原始 stdout——所以 `proxy_start` 必须显式传 `--log` 指向 `converter.log`。
+  `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
+  `--log-payloads` 会把完整 Prompt/响应正文以**明文**落盘：默认关闭、UI 必须警示，且内核侧有「payload 开关 + trace 级」双闸门（`_log_payload`），前端不要试图绕过。
+  日志文件写入前需保证目录存在；新增 `--log-level` 取值仅 info/debug/trace，非法值归一到 info。
 - **凭证轮换（P1，**已交付** 2026-09-11，见上方「多账号调度」条目）**：
   多账号就位后按既定要点实施完毕（`AccountRotator` + GUI 策略卡）。
   token 续期由 `converter.py` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /

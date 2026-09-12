@@ -106,6 +106,8 @@ export function initSettings() {
   let rotateCountCache = 1;
   let modelListModeCache = 'all';
   let apiKeyCache = '';
+  let logLevelCache = 'info';
+  let logPayloadsCache = false;
   const buildSettingsPayload = () => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
@@ -118,7 +120,9 @@ export function initSettings() {
       rotate_count: rotateCountCache,
       model_list_mode: modelListModeCache,
       // 客户端鉴权密钥：留空即不鉴权；每次保存都带上，避免被整对象覆盖写盘抹除
-      api_key: apiKeyCache
+      api_key: apiKeyCache,
+      log_level: logLevelCache,
+      log_payloads: logPayloadsCache
     };
   };
 
@@ -131,6 +135,8 @@ export function initSettings() {
           if (latest.rotate_mode) rotateModeCache = latest.rotate_mode;
           if (latest.rotate_count) rotateCountCache = latest.rotate_count;
           if (latest.model_list_mode) modelListModeCache = latest.model_list_mode;
+          if (latest.log_level) logLevelCache = latest.log_level;
+          if (typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
           // 密钥以输入框当前值为准（用户可能刚改完就点保存），仅在未输入时回退磁盘值
           const apiKeyEl = document.getElementById('input-api-key');
           if (apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
@@ -262,6 +268,33 @@ export function initSettings() {
     }
   });
 
+  // —— 结构化日志级别（对标 EasyCLIProxyAPI 日志管理） ——
+  const selectLogLevel = document.getElementById('select-log-level');
+  const chkLogPayloads = document.getElementById('chk-log-payloads');
+
+  selectLogLevel?.addEventListener('change', async (e) => {
+    const v = ['info', 'debug', 'trace'].includes(e.target.value) ? e.target.value : 'info';
+    logLevelCache = v;
+    if (await persistSettings()) {
+      showToast(`日志级别已设为 ${v}${state.running ? '，重启内核后生效' : ''}`, 'success');
+    }
+  });
+
+  chkLogPayloads?.addEventListener('change', async (e) => {
+    logPayloadsCache = !!e.target.checked;
+    if (await persistSettings()) {
+      if (logPayloadsCache) {
+        // 明确警示：正文将以明文落盘
+        showToast(
+          `已开启正文落盘${state.running ? '（重启内核后生效）' : ''}：Prompt 与响应将以明文写入日志，排查完请及时关闭`,
+          'info'
+        );
+      } else {
+        showToast('已关闭正文落盘', 'success');
+      }
+    }
+  });
+
   // 读取后端配置（放最后：先绑定监听，异步返回后不覆盖用户已手动改动的值）
   (async () => {
     try {
@@ -300,6 +333,16 @@ export function initSettings() {
         if (inputApiKey) {
           apiKeyCache = typeof cfg.api_key === 'string' ? cfg.api_key : '';
           inputApiKey.value = apiKeyCache;
+        }
+        // 日志级别 / 正文落盘回读：非法值归一到默认
+        if (selectLogLevel) {
+          const lv = ['info', 'debug', 'trace'].includes(cfg.log_level) ? cfg.log_level : 'info';
+          selectLogLevel.value = lv;
+          logLevelCache = lv;
+        }
+        if (chkLogPayloads) {
+          logPayloadsCache = !!cfg.log_payloads;
+          chkLogPayloads.checked = logPayloadsCache;
         }
         // 自动拉起：应用启动时按持久化设置执行一次（托盘隐藏重开不触发——前端只加载一次；
         // proxy_start 本身幂等，与首次 checkHealth 的竞态由 800ms 延迟 + state.running 守卫兜底）

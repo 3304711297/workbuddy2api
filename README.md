@@ -54,6 +54,7 @@
 - ⚡ **动态模型矩阵**：模型清单**自动获取 WorkBuddy 支持的全量模型**（含计费倍率、上下文窗口与思考强度配置），随上游动态更新，无需随版本维护静态列表；OpenAI 与 Anthropic 协议均可透明传入相同模型标识；在「模型与接口」页面查看与定制。
 - 🛡️ **安全脱敏、流量削峰与请求防护**：
   - **客户端鉴权密钥（可选）**：设置页可一键生成 / 复制 / 清空 32 位十六进制随机密钥（CSPRNG 生成），内核以 `--api-key` 生效，之后所有客户端须携带 `Authorization: Bearer <密钥>` 或 `x-api-key: <密钥>`，否则返回 `401 invalid api key`；密钥仅在启动时注入（改后需重启内核）。未来若改为监听非回环地址（`0.0.0.0`）向局域网暴露，则**必须**设置密钥（内核在无密钥时会强制要求 `--unsafe-expose` 显式确认）（对标 `router-for-me/EasyCLIProxyAPI` 的 API 访问管理）；
+  - **结构化日志与级别管理**：设置页可切换内核日志级别 `info`（默认，仅请求摘要与耗时）/ `debug`（附加错误响应详情）/ `trace`（完整请求体与响应流，自动脱敏 Token/Key），日志写入 `converter.log` 并在「实时日志」页与进程 stdout 合并展示（分区标注）；可选开启 `--log-payloads` 落盘完整 Prompt / 响应正文（**明文**，需 trace 级双闸门生效，默认关闭且 UI 明确警示隐私风险）（对标 `router-for-me/EasyCLIProxyAPI` 的日志管理）；
   - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
   - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
   - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`）。中间件在 ASGI `receive` 层按块累计，**超限立即熔断**（不等 body 读完），既防大包拖垮本地内存也防被上游连坐拦截（借鉴 `linguo2625469/workbuddy2api-panel`）；
