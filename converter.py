@@ -941,7 +941,7 @@ PASSTHROUGH_BODY_KEYS = {
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort",
     "verbosity", "reasoning_summary", "chat_template_kwargs",
-    "service_tier", "speed", "fast_mode",
+    "service_tier",
 }
 
 # ---------------------------------------------------------------------------
@@ -1130,12 +1130,15 @@ def _usage_int(v) -> int | None:
 def _record_usage(model: str, ok: bool, t0: float, *,
                   input_tokens=None, output_tokens=None,
                   ttft_ms=None, error=None,
-                  retry_count: int = 0, retry_reason: str | None = None):
+                  retry_count: int = 0, retry_reason: str | None = None,
+                  requested_model: str | None = None,
+                  fallback_reason: str | None = None):
     """向 CONFIG['usage_log'] 追加一行用量统计（JSONL，append 模式，每行写完即落盘）。
 
     行格式：{"ts": <epoch毫秒>, "model": str, "ok": bool, "input_tokens": int|null,
              "output_tokens": int|null, "latency_ms": int, "ttft_ms": int|null,
              "error": str|null, "retry_count": int, "retry_reason": str|null}
+    若发生降级（requested_model != model），附带 requested_model / actual_model / fallback_reason。
     未启用 --usage-log 时直接丢弃；写入任何异常一律静默吞掉，绝不影响请求响应。
     """
     path = CONFIG.get("usage_log")
@@ -1154,6 +1157,11 @@ def _record_usage(model: str, ok: bool, t0: float, *,
             "retry_count": int(retry_count or 0),
             "retry_reason": (_truncate(str(retry_reason), 100) if retry_reason else None),
         }
+        if requested_model and requested_model != model:
+            rec["requested_model"] = requested_model
+            rec["actual_model"] = model
+            if fallback_reason:
+                rec["fallback_reason"] = fallback_reason
         with _USAGE_LOCK:  # 并发请求下保证逐行完整追加
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -1769,11 +1777,11 @@ async def chat_completions(request: Request,
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
 
-    # 快速模式（Fast Mode / service_tier 支持）
+    # 快速模式（Fast Mode / service_tier 支持）：仅 priority 与 fast 触发；auto 保持系统自动选择语义
     is_fast_mode = (
-        (body.get("service_tier") in ("priority", "fast", "auto"))
-        or (body.get("speed") == "fast")
-        or (body.get("fast_mode") is True)
+        (payload.get("service_tier") in ("priority", "fast"))
+        or (payload.get("speed") == "fast")
+        or (payload.get("fast_mode") is True)
     )
     if is_fast_mode and mapped_model in ("auto", "default", "default-model"):
         mapped_model = "fast-model"
@@ -1825,7 +1833,7 @@ async def chat_completions(request: Request,
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
-                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid):
+                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
                     yield chunk
             finally:
                 if pacer_ctx:
@@ -1842,7 +1850,7 @@ async def chat_completions(request: Request,
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
-                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid):
+                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
                     yield chunk
             finally:
                 if pacer_ctx:
@@ -1858,6 +1866,8 @@ async def chat_completions(request: Request,
     retry_budget = rotator.get_retry_budget(model_name)
     max_attempts = retry_budget + 1
     fallback_tried = False
+    actual_model = body["model"]
+    fallback_reason = None
     collected = None
     ttft_ms = None
 
@@ -1875,7 +1885,9 @@ async def chat_completions(request: Request,
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
                                 fb = GPT_FALLBACK_MAP[body["model"]]
-                                _log(f"[{rid}] ⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                                fallback_reason = "11102 unauthorized"
+                                actual_model = fb
+                                _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
                             if attempt < max_attempts - 1:
@@ -1889,7 +1901,8 @@ async def chat_completions(request: Request,
                         break
         except HTTPException as e:
             if attempt >= max_attempts - 1:
-                _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
+                _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}",
+                              requested_model=model_name, fallback_reason=fallback_reason)
                 try:
                     _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
                     _record_rate_limit(model_name, _dl, uid=uid)
@@ -1904,21 +1917,30 @@ async def chat_completions(request: Request,
                     await _failover_jitter(rid)
                     continue
             _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
-            _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+            _record_usage(actual_model, False, t0, error=f"upstream error: {e}",
+                          requested_model=model_name, fallback_reason=fallback_reason)
             raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
         except Exception as e:
-            _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
+            _record_usage(actual_model, False, t0, error=f"{type(e).__name__}: {e}",
+                          requested_model=model_name, fallback_reason=fallback_reason)
             raise
     if collected is None:
         raise HTTPException(status_code=502, detail={"error": {"message": "failed to collect upstream response", "type": "upstream_error"}})
-    _log_finish(model_name, t0, collected, rid)
+    _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
-    _record_usage(model_name, True, t0,
+    _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
-                  ttft_ms=ttft_ms)
-    return JSONResponse(content=collected)
+                  ttft_ms=ttft_ms,
+                  requested_model=model_name,
+                  fallback_reason=fallback_reason)
+    resp_headers = {}
+    if actual_model != model_name:
+        resp_headers["X-Actual-Model"] = actual_model
+        resp_headers["X-Requested-Model"] = model_name
+        resp_headers["X-Fallback-Reason"] = fallback_reason or "11102 unauthorized"
+    return JSONResponse(content=collected, headers=resp_headers or None)
 
 
 @app.post("/v1/messages")
@@ -1976,11 +1998,12 @@ async def anthropic_messages(
 
     body["model"] = mapped_model
 
-    # 快速模式（Fast Mode / service_tier 支持）
+    # 快速模式（Fast Mode / service_tier 支持）：仅 priority 与 fast 触发；auto 保持系统自动选择语义
     is_fast_mode = (
-        (body.get("service_tier") in ("priority", "fast", "auto"))
-        or (body.get("speed") == "fast")
-        or (body.get("fast_mode") is True)
+        (payload.get("service_tier") in ("priority", "fast"))
+        or (payload.get("speed") == "fast")
+        or (payload.get("fast_mode") is True)
+        or (raw_body.get("speed") == "fast")
     )
     if is_fast_mode and mapped_model in ("auto", "default", "default-model"):
         mapped_model = "fast-model"
@@ -2018,7 +2041,7 @@ async def anthropic_messages(
     if client_wants_stream:
         async def _anthropic_stream_gen():
             translator = AnthropicStreamTranslator(model=raw_body.get("model", model_name))
-            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid)
+            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name)
             buf = ""
             try:
                 if pacer_ctx:
@@ -2052,6 +2075,8 @@ async def anthropic_messages(
     retry_budget = rotator.get_retry_budget(model_name)
     max_attempts = retry_budget + 1
     fallback_tried = False
+    actual_model = body["model"]
+    fallback_reason = None
     collected = None
     ttft_ms = None
 
@@ -2068,7 +2093,9 @@ async def anthropic_messages(
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
                                 fb = GPT_FALLBACK_MAP[body["model"]]
-                                _log(f"[{rid}] ⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                                fallback_reason = "11102 unauthorized"
+                                actual_model = fb
+                                _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
                             if attempt < max_attempts - 1:
@@ -2077,7 +2104,8 @@ async def anthropic_messages(
                                     uid, headers = failover
                                     await _failover_jitter(rid)
                                     continue
-                            _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                            _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
+                                          requested_model=model_name, fallback_reason=fallback_reason)
                             raise HTTPException(
                                 status_code=r.status_code,
                                 detail={"type": "error", "error": {"type": "api_error", "message": raw.decode("utf-8", "replace")[:500]}},
@@ -2095,26 +2123,35 @@ async def anthropic_messages(
                     await _failover_jitter(rid)
                     continue
             _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
-            _record_usage(model_name, False, t0, error=f"upstream error: {e}")
+            _record_usage(actual_model, False, t0, error=f"upstream error: {e}",
+                          requested_model=model_name, fallback_reason=fallback_reason)
             raise HTTPException(
                 status_code=502,
                 detail={"type": "error", "error": {"type": "api_error", "message": f"upstream error: {e}"}},
             )
         except Exception as e:
-            _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
+            _record_usage(actual_model, False, t0, error=f"{type(e).__name__}: {e}",
+                          requested_model=model_name, fallback_reason=fallback_reason)
             raise
 
-    _log_finish(model_name, t0, collected, rid)
+    _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     _u = collected.get("usage") or {}
-    _record_usage(model_name, True, t0,
+    _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
-                  ttft_ms=ttft_ms)
+                  ttft_ms=ttft_ms,
+                  requested_model=model_name,
+                  fallback_reason=fallback_reason)
 
     anthropic_resp = translate_openai_response_to_anthropic(collected)
     if "model" in raw_body:
         anthropic_resp["model"] = raw_body["model"]
-    return JSONResponse(content=anthropic_resp)
+    resp_headers = {}
+    if actual_model != model_name:
+        resp_headers["X-Actual-Model"] = actual_model
+        resp_headers["X-Requested-Model"] = model_name
+        resp_headers["X-Fallback-Reason"] = fallback_reason or "11102 unauthorized"
+    return JSONResponse(content=anthropic_resp, headers=resp_headers or None)
 
 
 def _last_user_text(messages: list) -> str:
@@ -2132,7 +2169,8 @@ def _last_user_text(messages: list) -> str:
     return ""
 
 
-def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
+def _log_finish(model_name: str, t0: float, result: dict, rid: str = "", *,
+                actual_model: str | None = None, fallback_reason: str | None = None):
     """记录一次完成的请求：耗时 / finish_reason / usage / 工具调用 / 审核拦截 + 完整响应。"""
     elapsed = time.time() - t0
     prefix = f"[{rid}] " if rid else ""
@@ -2145,7 +2183,10 @@ def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
     if finish == "content-filter":
         tag = " ⚠️内容审核拦截"
     tc_names = [t.get("function", {}).get("name") for t in tcs]
-    _log(f"{prefix}◀ RESPONSE {model_name} | {elapsed:.1f}s | finish={finish}{tag}"
+    model_disp = model_name
+    if actual_model and actual_model != model_name:
+        model_disp = f"{model_name} (actual: {actual_model}, fallback: {fallback_reason or '11102 unauthorized'})"
+    _log(f"{prefix}◀ RESPONSE {model_disp} | {elapsed:.1f}s | finish={finish}{tag}"
          + (f" | tool_calls={tc_names}" if tc_names else "")
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整响应体
@@ -2254,7 +2295,9 @@ def _validate_tool_calls(tool_calls: list[dict] | None) -> tuple[bool, str]:
 
 async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: float = 0.0,
                                   rid: str = "", ttft_ms: int | None = None,
-                                  retry_count: int = 0, retry_reason: str | None = None):
+                                  retry_count: int = 0, retry_reason: str | None = None,
+                                  actual_model: str | None = None, fallback_reason: str | None = None,
+                                  requested_model: str | None = None):
     """将聚合校验后的完整响应转换为标准 OpenAI SSE 流，供客户端消费。"""
     cid = collected.get("id") or ("chatcmpl-" + os.urandom(12).hex())
     created = collected.get("created") or int(time.time())
@@ -2337,19 +2380,23 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
     yield b"data: [DONE]\n\n"
 
     # 日志与用量统计
-    _log_finish(model_name, t0, collected, rid)
+    req_m = requested_model or model_name
+    _log_finish(req_m, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     _u = usage or {}
-    _record_usage(model_name, True, t0,
+    _record_usage(actual_model or model_name, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   retry_count=retry_count,
-                  retry_reason=retry_reason)
+                  retry_reason=retry_reason,
+                  requested_model=req_m,
+                  fallback_reason=fallback_reason)
 
 
 async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                                 model_name: str = "?", t0: float = 0.0, rid: str = "",
-                                rotator: Optional[Any] = None, uid: str = ""):
+                                rotator: Optional[Any] = None, uid: str = "",
+                                requested_model: str | None = None):
     """针对带 tools 的流式请求，进行聚合校验与防损坏重试，再伪流式下发。
 
     解决上游 Issue #3：腾讯后端（copilot.tencent.com）在流式返回 tool_calls 时偶发
@@ -2358,6 +2405,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     prefix = f"[{rid}] " if rid else ""
     max_attempts = (rotator.get_retry_budget(model_name) if rotator else 2) + 1
     fallback_tried = False
+    actual_model = body.get("model", model_name)
+    fallback_reason = None
     collected = None
     ttft_ms = None
     retry_count = 0
@@ -2377,7 +2426,10 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                             fallback_tried = True
                             fb = GPT_FALLBACK_MAP[body["model"]]
-                            _log(f"{prefix}⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                            fallback_reason = "11102 unauthorized"
+                            actual_model = fb
+                            req_m = requested_model or model_name
+                            _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
                             continue
                         if rotator and attempt < max_attempts:
@@ -2386,8 +2438,10 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                                 curr_uid, curr_headers = failover
                                 await _failover_jitter(rid)
                                 continue
-                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}",
-                                      retry_count=retry_count, retry_reason=retry_reason)
+                        _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
+                                      retry_count=retry_count, retry_reason=retry_reason,
+                                      requested_model=requested_model or model_name,
+                                      fallback_reason=fallback_reason)
                         yield _err_event(raw, r.status_code)
                         return
                     # 聚合等待期间定期下发 SSE 注释保活心跳，防止中间代理或客户端 60s 静默超时
@@ -2399,8 +2453,10 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                     collected, ttft_ms = await collect_task
         except httpx.HTTPError as e:
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-            _record_usage(model_name, False, t0, error=f"upstream error: {e}",
-                          retry_count=retry_count, retry_reason=retry_reason)
+            _record_usage(actual_model, False, t0, error=f"upstream error: {e}",
+                          retry_count=retry_count, retry_reason=retry_reason,
+                          requested_model=requested_model or model_name,
+                          fallback_reason=fallback_reason)
             yield _err_event(str(e).encode(), 502)
             return
 
@@ -2429,7 +2485,9 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
 
     # 伪流式输出
     async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms,
-                                              retry_count=retry_count, retry_reason=retry_reason):
+                                              retry_count=retry_count, retry_reason=retry_reason,
+                                              actual_model=actual_model, fallback_reason=fallback_reason,
+                                              requested_model=requested_model or model_name):
         yield chunk
 
 
@@ -2778,7 +2836,8 @@ class _SseLineBuffer:
 
 async def _stream_upstream(url: str, headers: dict, body: dict,
                            model_name: str = "?", t0: float = 0.0, rid: str = "",
-                           rotator: Optional[Any] = None, uid: str = ""):
+                           rotator: Optional[Any] = None, uid: str = "",
+                           requested_model: str | None = None):
     """把后端 SSE 原样转发给客户端（后端已是标准 OpenAI SSE，含 tool_calls）。
 
     同时轻量解析流，统计 finish_reason / tool_calls / usage 用于日志，不阻塞转发。
@@ -2852,6 +2911,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
     max_attempts = retry_budget + 1
     fallback_tried = False
+    actual_model = body.get("model", model_name)
+    fallback_reason = None
     curr_uid = uid
     curr_headers = dict(headers)
 
@@ -2868,7 +2929,10 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                         if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                             fallback_tried = True
                             fb = GPT_FALLBACK_MAP[body["model"]]
-                            _log(f"{prefix}⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                            fallback_reason = "11102 unauthorized"
+                            actual_model = fb
+                            req_m = requested_model or model_name
+                            _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
                             continue
                         if rotator and attempt < max_attempts - 1:
@@ -2877,7 +2941,9 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 curr_uid, curr_headers = failover
                                 await _failover_jitter(rid)
                                 continue
-                        _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
+                        _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
+                                      requested_model=requested_model or model_name,
+                                      fallback_reason=fallback_reason)
                         yield _err_event(err, r.status_code)
                         return
                     async for chunk in r.aiter_bytes():
@@ -2897,23 +2963,32 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                     continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             err_msg = f"upstream error: {e}"
+            _record_usage(actual_model, False, t0, error=err_msg,
+                          requested_model=requested_model or model_name,
+                          fallback_reason=fallback_reason)
             yield _err_event(str(e).encode(), 502)
             return
 
     # 流结束：输出完成日志
     elapsed = time.time() - t0 if t0 else 0
     tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
-    _log(f"{prefix}◀ RESPONSE {model_name} | {elapsed:.1f}s | stream finish={finish_reason}{tag}"
+    req_m = requested_model or model_name
+    model_disp = req_m
+    if actual_model != req_m:
+        model_disp = f"{req_m} (actual: {actual_model}, fallback: {fallback_reason or '11102 unauthorized'})"
+    _log(f"{prefix}◀ RESPONSE {model_disp} | {elapsed:.1f}s | stream finish={finish_reason}{tag}"
          + (f" | tool_calls={tool_names}" if tool_names else "")
          + f" | tokens={usage.get('total_tokens', '?')}")
     # 完整原始 SSE（后端返回的全部内容）
     _log_payload(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
     # 用量统计：正常结束 ok=true；上游错误 ok=false（失败也记一行）。
     # _record_usage 内部整体 try/except 静默失败，绝不影响已返回的流式响应。
-    _record_usage(model_name, ok=(err_msg is None), t0=t0,
+    _record_usage(actual_model, ok=(err_msg is None), t0=t0,
                   input_tokens=usage.get("prompt_tokens"),
                   output_tokens=usage.get("completion_tokens"),
-                  ttft_ms=ttft_ms, error=err_msg)
+                  ttft_ms=ttft_ms, error=err_msg,
+                  requested_model=req_m,
+                  fallback_reason=fallback_reason)
 
 
 def _safe_err(r: httpx.Response) -> dict:
