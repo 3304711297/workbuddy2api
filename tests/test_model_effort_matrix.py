@@ -189,9 +189,11 @@ def test_frontend_default_option_means_follow_client():
 
 
 def test_frontend_does_not_hardcode_default_effort_as_label():
-    """默认项不得再渲染成「默认 (high)」这种把上游默认值当成本地档位的写法。"""
+    """默认项不得再渲染成「默认 (high)」这种把上游默认值当成本地档位的写法（无论是初次渲染还是 updateModelCells）。"""
     js = _read(MODELS_JS)
     assert ">默认 (${esc(m.default_effort)})<" not in js
+    assert "默认 (${m.default_effort})" not in js
+    assert "默认 (${" not in js
 
 
 def test_frontend_shows_matrix_source_hint():

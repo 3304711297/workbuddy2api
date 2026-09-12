@@ -310,7 +310,7 @@ function updateModelCells(modelId) {
   if (eCell && effortSelect && m) {
     const v = effortSelect.value;
     eCell.textContent = v === 'disable' ? '已关闭思考'
-      : v === 'default' ? `默认 (${m.default_effort})`
+      : v === 'default' ? '默认 (跟随客户端)'
       : `强度: ${v}`;
     m.custom_reasoning_effort = v === 'default' ? null : v;
   }
