@@ -12,6 +12,7 @@ tests/test_credential_rotation.py - 多账号凭据轮换与故障自动转移�
 import asyncio
 import json
 import time
+import datetime
 from pathlib import Path
 import httpx
 import pytest
@@ -26,6 +27,14 @@ from converter import (
     _read_all_accounts,
     _set_active_account,
 )
+
+_TZ8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _make_future_reset_text(hours: int = 2) -> str:
+    future_time = (datetime.datetime.now(_TZ8) + datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    return f'{{"code":6004,"msg":"您的使用量已超出频率限制，将在 {future_time} UTC+8 重置"}}'
+
 
 
 @pytest.fixture
@@ -83,7 +92,7 @@ def test_failover_switches_account_on_rate_limit(fake_multi_accounts, monkeypatc
     assert uid == "uid-alpha"
 
     # 模拟 uid-alpha 遭遇 6004 冷却
-    raw_6004 = '{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-12 10:00:00 UTC+8 重置"}'
+    raw_6004 = _make_future_reset_text(2)
     failover = rotator.record_failure_and_failover("uid-alpha", "deepseek-v4.1-flash", 200, raw_6004)
     assert failover is not None
     new_uid, new_headers = failover
@@ -123,7 +132,7 @@ def test_all_accounts_cooling_down_returns_none(fake_multi_accounts, monkeypatch
     monkeypatch.setitem(converter.CONFIG, "rotate_mode", "failover")
 
     rotator = AccountRotator(cred_mgr=cred, mode="failover")
-    raw_6004 = '{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-12 12:00:00 UTC+8 重置"}'
+    raw_6004 = _make_future_reset_text(2)
 
     # 先让 alpha 冷却
     res1 = rotator.record_failure_and_failover("uid-alpha", "glm-5.3", 429, raw_6004)
@@ -150,7 +159,7 @@ def test_e2e_chat_completions_failover_transparent_retry(fake_multi_accounts, mo
             # 首发账号报 6004 频率限制
             return httpx.Response(
                 429,
-                json={"code": 6004, "msg": "您的使用量已超出频率限制，将在 2026-09-12 15:00:00 UTC+8 重置"}
+                json=json.loads(_make_future_reset_text(2))
             )
         elif user_id == "uid-beta":
             # 备用账号返回正常 SSE 流
@@ -192,7 +201,7 @@ def test_e2e_stream_chat_completions_failover_retry(fake_multi_accounts, monkeyp
         if user_id == "uid-alpha":
             return httpx.Response(
                 429,
-                json={"code": 6004, "msg": "您的使用量已超出频率限制，将在 2026-09-12 16:00:00 UTC+8 重置"}
+                json=json.loads(_make_future_reset_text(2))
             )
         elif user_id == "uid-beta":
             sse_content = (

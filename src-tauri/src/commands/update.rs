@@ -35,16 +35,13 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 const RELEASE_API: &str = "https://api.github.com/repos/3304711297/workbuddy2api/releases/latest";
 
-/// 拉取最新 release 元数据；proxy 传 Some 时走显式代理
-async fn fetch_latest_release(proxy: Option<&str>) -> Result<serde_json::Value, String> {
+/// 拉取最新 release 元数据；use_env_proxy 为 true 时尊重标准环境变量代理（HTTP_PROXY/HTTPS_PROXY），false 时强制纯直连
+async fn fetch_latest_release(use_env_proxy: bool) -> Result<serde_json::Value, String> {
     let mut builder = reqwest::Client::builder()
         .user_agent("workbuddy2api-gui")
         .timeout(Duration::from_secs(10));
-    match proxy {
-        // 显式指定代理（回退路径）：正常吃该代理
-        Some(p) => builder = builder.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?),
-        // 直连尝试：绕过环境代理，避免本机/内网可达时仍被送去 3067 徒增一跳
-        None => builder = builder.no_proxy(),
+    if !use_env_proxy {
+        builder = builder.no_proxy();
     }
     let resp = builder
         .build()
@@ -63,10 +60,10 @@ async fn fetch_latest_release(proxy: Option<&str>) -> Result<serde_json::Value, 
 #[tauri::command]
 pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    // 先直连（reqwest 默认吃环境变量代理），失败再走本机回退代理 127.0.0.1:3067（用户环境惯例）
-    let payload = match fetch_latest_release(None).await {
+    // 优先使用标准系统/环境代理（HTTP_PROXY/HTTPS_PROXY），失败时回退为强制直连（no_proxy）
+    let payload = match fetch_latest_release(true).await {
         Ok(v) => Ok(v),
-        Err(_) => fetch_latest_release(Some("http://127.0.0.1:3067")).await,
+        Err(_) => fetch_latest_release(false).await,
     };
     Ok(match payload {
         Ok(v) => {

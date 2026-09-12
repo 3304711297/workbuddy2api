@@ -27,6 +27,7 @@ import datetime
 import ipaddress
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -696,6 +697,25 @@ MODEL_MAP = {
     "hy3-preview-agent": "hy3-x",
     "kimi-k3": "kimi-k3-1",
     "minimax-m3": "minimax-m3",
+    # 常用 OpenAI / Codex 别名映射
+    "gpt-4o": "gpt-5.6-luna",
+    "gpt-4o-mini": "fast-model",
+    "gpt-4": "deepseek-v4-pro",
+    "gpt-4-turbo": "deepseek-v4-pro",
+    "chatgpt-4o-latest": "gpt-5.6-sol",
+    "o1": "deepseek-v4-pro",
+    "o3-mini": "deepseek-v4-pro",
+}
+
+# 未授权海外 GPT 模型（11102）平滑降级映射
+GPT_FALLBACK_MAP = {
+    "gpt-6-astra": "deepseek-v4-pro",
+    "gpt-5.6-sol": "deepseek-v4-pro",
+    "gpt-5.6-terra": "glm-5.3",
+    "gpt-5.6-luna": "fast-model",
+    "gpt-5.5": "deepseek-v4-pro",
+    "gpt-5.4": "deepseek-v4-pro",
+    "gpt-5.3-codex": "deepseek-v4-pro",
 }
 
 DEFAULT_MODELS = [
@@ -735,6 +755,7 @@ DEFAULT_MODELS = [
     "deepseek-v3-2-volc",
     "hunyuan-2.0-thinking",
     "hunyuan-chat",
+    "fast-model",
     "default",
 ]
 
@@ -920,6 +941,7 @@ PASSTHROUGH_BODY_KEYS = {
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort",
     "verbosity", "reasoning_summary", "chat_template_kwargs",
+    "service_tier", "speed", "fast_mode",
 }
 
 # ---------------------------------------------------------------------------
@@ -942,7 +964,9 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "strip_empty_delta": os.environ.get("WORKBUDDY_STRIP_EMPTY_DELTA", "1") not in ("0", "false", "no"),
                 # 流式推理净化与穿插解耦：实时流式下发 reasoning，并在 tool_calls 参数流中剥离混入的 reasoning
                 # （避免工具参数 JSON 被截断/污染）。WORKBUDDY_COALESCE_REASONING=0 关闭。
-                "coalesce_reasoning": os.environ.get("WORKBUDDY_COALESCE_REASONING", "1") not in ("0", "false", "no")}  # cred: CredentialManager | None
+                "coalesce_reasoning": os.environ.get("WORKBUDDY_COALESCE_REASONING", "1") not in ("0", "false", "no"),
+                # 多账号故障转移重试时的防风控微抖动（Jitter 0.5~1.2s，避免同设备同 IP 毫秒级突发请求）
+                "failover_jitter": _env_compat("FAILOVER_JITTER", "1").lower() not in ("0", "false", "no")}  # cred: CredentialManager | None
 
 # 并发削峰与流量节奏平滑器
 _REQUEST_PACER = RequestPacer(
@@ -1339,12 +1363,30 @@ def _is_account_cooldown(uid: str, model: str) -> bool:
         return True
 
 
-def _record_rate_limit(model: str, err_text: str, uid: str | None = None) -> None:
-    """从上游错误体里识别 6004 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
+def _is_unauthorized_model_error(status_code: int, err_text: str) -> bool:
+    if status_code != 400:
+        return False
+    t = err_text or ""
+    return ("11102" in t) and (
+        ("only available for authorized users" in t)
+        or ("service info not found" in t)
+    )
+
+
+def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status_code: int | None = None) -> None:
+    """从上游错误体里识别 6004/429 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
     m = _RATE_LIMIT_RE.search(err_text or "")
     if not m:
-        if "429" in (err_text or "") or "Too Many Requests" in (err_text or ""):
-            reset_ms = int((time.time() + 60) * 1000)
+        is_limit = (
+            (status_code == 429)
+            or ("429" in (err_text or ""))
+            or ("Too Many Requests" in (err_text or ""))
+            or ("6004" in (err_text or ""))
+            or ("频率限制" in (err_text or ""))
+            or ("使用量超出" in (err_text or ""))
+        )
+        if is_limit:
+            reset_ms = int((time.time() + 300) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
         else:
             return
@@ -1358,7 +1400,8 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None) -> Non
             )
             reset_local = m.group(1)[11:]
         except Exception:
-            return
+            reset_ms = int((time.time() + 300) * 1000)
+            reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
     now_ms = int(time.time() * 1000)
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)
@@ -1459,12 +1502,15 @@ class AccountRotator:
                 return active_uid, headers
 
             elif self.mode == "failover":
-                if _is_account_cooldown(active_uid, model) and candidates:
-                    target_uid = candidates[0]
-                    if target_uid != active_uid and hasattr(self.cred_mgr, "switch_active_account"):
-                        self.cred_mgr.switch_active_account(target_uid)
-                        active_uid = target_uid
-                        _log(f"🔄 [限流避让] 当前账号冷却中，自动切换至就绪账号 UID: {active_uid[:8]}...")
+                if _is_account_cooldown(active_uid, model):
+                    if candidates:
+                        target_uid = candidates[0]
+                        if target_uid != active_uid and hasattr(self.cred_mgr, "switch_active_account"):
+                            self.cred_mgr.switch_active_account(target_uid)
+                            active_uid = target_uid
+                            _log(f"🔄 [限流避让] 当前账号冷却中，自动切换至就绪账号 UID: {active_uid[:8]}...")
+                    else:
+                        _log(f"⚠️ [限流避让] 模型 {model} 当前所有账号均在冷却中（全池冷却）")
                 headers = self.cred_mgr.get_headers_for_uid(active_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
                 return active_uid, headers
 
@@ -1472,14 +1518,19 @@ class AccountRotator:
 
     def record_failure_and_failover(self, current_uid: str, model: str, status_code: int, err_text: str) -> tuple[str, dict] | None:
         """处理 429/6004；若开启 failover/roundrobin 且有备用账号，自动切号并返回 (new_uid, new_headers)。"""
-        is_rate_limited = (status_code == 429) or ("6004" in (err_text or ""))
+        is_rate_limited = (
+            (status_code == 429)
+            or ("6004" in (err_text or ""))
+            or ("频率限制" in (err_text or ""))
+            or ("使用量超出" in (err_text or ""))
+        )
         if not is_rate_limited:
             return None
         if self.mode not in ("failover", "roundrobin"):
             return None
 
         with self._lock:
-            _record_rate_limit(model, err_text, uid=current_uid)
+            _record_rate_limit(model, err_text, uid=current_uid, status_code=status_code)
             if not self.cred_mgr:
                 return None
             all_accs = self.get_all_accounts()
@@ -1488,7 +1539,7 @@ class AccountRotator:
 
             candidates = [u for u in self.get_candidate_uids(model) if u != current_uid]
             if not candidates:
-                _log(f"⚠️ [多账号调度] 账号 {current_uid[:8] if current_uid else '当前'}... 触发限流，但无其他可用就绪账号（全池冷却）")
+                _log(f"⚠️ [多账号调度] 账号 {current_uid[:8] if current_uid else '当前'}... 触发限流，但无其他可用就绪账号（模型 {model} 全池冷却）")
                 return None
 
             next_uid = candidates[0]
@@ -1497,6 +1548,16 @@ class AccountRotator:
             new_headers = self.cred_mgr.get_headers_for_uid(next_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
             _log(f"🔄 [故障自动切换] 账号 {current_uid[:8] if current_uid else ''}... 触发 6004/429 限流，切换至备用账号 {next_uid[:8]}... 并重试")
             return next_uid, new_headers
+
+
+async def _failover_jitter(rid: str = "") -> None:
+    """多账号故障转移时的防风控微抖动（随机休眠 0.5~1.2s），降低同设备同 IP 毫秒级突发请求的风控关联度。"""
+    if not CONFIG.get("failover_jitter", True):
+        return
+    jitter = random.uniform(0.5, 1.2)
+    prefix = f"[{rid}] " if rid else ""
+    _log(f"{prefix}⏳ 多账号避让防风控抖动：等待 {jitter:.2f}s 后以新账号发起重试...")
+    await asyncio.sleep(jitter)
 
 
 _ACCOUNT_ROTATOR: Optional[AccountRotator] = None
@@ -1708,6 +1769,16 @@ async def chat_completions(request: Request,
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
 
+    # 快速模式（Fast Mode / service_tier 支持）
+    is_fast_mode = (
+        (body.get("service_tier") in ("priority", "fast", "auto"))
+        or (body.get("speed") == "fast")
+        or (body.get("fast_mode") is True)
+    )
+    if is_fast_mode and mapped_model in ("auto", "default", "default-model"):
+        mapped_model = "fast-model"
+        body["model"] = mapped_model
+
     # 应用用户在控制台配置的自定义参数（上下文限制/思考强度等）
     user_settings = _load_model_settings()
     custom_cfg = user_settings.get(model_name) or user_settings.get(mapped_model) or {}
@@ -1733,7 +1804,8 @@ async def chat_completions(request: Request,
                   if isinstance(t, dict)]
     last_user = _last_user_text(messages)
     rid = os.urandom(4).hex()
-    _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}" + (f" | tools={tool_names}" if tool_names else ""))
+    fast_tag = " | ⚡fast_mode" if is_fast_mode else ""
+    _log(f"[{rid}] ▶ REQUEST {model_name}{fast_tag} | stream={client_wants_stream} | msgs={len(messages)}" + (f" | tools={tool_names}" if tool_names else ""))
     if last_user:
         _log(f"[{rid}] last_user={_truncate(last_user, 60)!r}", level="debug")
     # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）
@@ -1784,10 +1856,12 @@ async def chat_completions(request: Request,
 
     # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
     retry_budget = rotator.get_retry_budget(model_name)
+    max_attempts = retry_budget + 1
+    fallback_tried = False
     collected = None
     ttft_ms = None
 
-    for attempt in range(retry_budget):
+    for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
                 async with httpx.AsyncClient(timeout=300) as c:
@@ -1797,17 +1871,24 @@ async def chat_completions(request: Request,
                             err_str = raw.decode('utf-8', 'replace')
                             _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
                             _log(f"[{rid}] ── ERROR BODY ──\n{err_str}", level="debug")
-                            _record_rate_limit(model_name, err_str, uid=uid)
-                            if attempt < retry_budget - 1:
+                            _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
+                            if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
+                                fallback_tried = True
+                                fb = GPT_FALLBACK_MAP[body["model"]]
+                                _log(f"[{rid}] ⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                                body["model"] = fb
+                                continue
+                            if attempt < max_attempts - 1:
                                 failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
                                 if failover:
                                     uid, headers = failover
+                                    await _failover_jitter(rid)
                                     continue
                             raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
                         break
         except HTTPException as e:
-            if attempt >= retry_budget - 1:
+            if attempt >= max_attempts - 1:
                 _record_usage(model_name, False, t0, error=f"HTTP {e.status_code}")
                 try:
                     _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
@@ -1816,10 +1897,11 @@ async def chat_completions(request: Request,
                     pass
                 raise
         except httpx.HTTPError as e:
-            if attempt < retry_budget - 1:
+            if attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
                 if failover:
                     uid, headers = failover
+                    await _failover_jitter(rid)
                     continue
             _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
             _record_usage(model_name, False, t0, error=f"upstream error: {e}")
@@ -1827,6 +1909,8 @@ async def chat_completions(request: Request,
         except Exception as e:
             _record_usage(model_name, False, t0, error=f"{type(e).__name__}: {e}")
             raise
+    if collected is None:
+        raise HTTPException(status_code=502, detail={"error": {"message": "failed to collect upstream response", "type": "upstream_error"}})
     _log_finish(model_name, t0, collected, rid)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
@@ -1892,6 +1976,16 @@ async def anthropic_messages(
 
     body["model"] = mapped_model
 
+    # 快速模式（Fast Mode / service_tier 支持）
+    is_fast_mode = (
+        (body.get("service_tier") in ("priority", "fast", "auto"))
+        or (body.get("speed") == "fast")
+        or (body.get("fast_mode") is True)
+    )
+    if is_fast_mode and mapped_model in ("auto", "default", "default-model"):
+        mapped_model = "fast-model"
+        body["model"] = mapped_model
+
     user_settings = _load_model_settings()
     custom_cfg = user_settings.get(model_name) or user_settings.get(mapped_model) or {}
 
@@ -1911,7 +2005,8 @@ async def anthropic_messages(
             body["max_tokens"] = min(custom_ctx, 64000)
 
     rid = os.urandom(4).hex()
-    _log(f"[{rid}] ▶ ANTHROPIC /v1/messages {model_name} | stream={client_wants_stream}")
+    fast_tag = " | ⚡fast_mode" if is_fast_mode else ""
+    _log(f"[{rid}] ▶ ANTHROPIC /v1/messages {model_name}{fast_tag} | stream={client_wants_stream}")
 
     rotator = _get_rotator()
     uid, headers = rotator.select_account(model_name)
@@ -1955,10 +2050,12 @@ async def anthropic_messages(
 
     # 非流式
     retry_budget = rotator.get_retry_budget(model_name)
+    max_attempts = retry_budget + 1
+    fallback_tried = False
     collected = None
     ttft_ms = None
 
-    for attempt in range(retry_budget):
+    for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
                 async with httpx.AsyncClient(timeout=300) as c:
@@ -1967,11 +2064,18 @@ async def anthropic_messages(
                             raw = await r.aread()
                             err_str = raw.decode('utf-8', 'replace')
                             _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
-                            _record_rate_limit(model_name, err_str, uid=uid)
-                            if attempt < retry_budget - 1:
+                            _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
+                            if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
+                                fallback_tried = True
+                                fb = GPT_FALLBACK_MAP[body["model"]]
+                                _log(f"[{rid}] ⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                                body["model"] = fb
+                                continue
+                            if attempt < max_attempts - 1:
                                 failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
                                 if failover:
                                     uid, headers = failover
+                                    await _failover_jitter(rid)
                                     continue
                             _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
                             raise HTTPException(
@@ -1981,13 +2085,14 @@ async def anthropic_messages(
                         collected, ttft_ms = await _collect_stream(r, t0)
                         break
         except HTTPException:
-            if attempt >= retry_budget - 1:
+            if attempt >= max_attempts - 1:
                 raise
         except httpx.HTTPError as e:
-            if attempt < retry_budget - 1:
+            if attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
                 if failover:
                     uid, headers = failover
+                    await _failover_jitter(rid)
                     continue
             _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
             _record_usage(model_name, False, t0, error=f"upstream error: {e}")
@@ -2251,7 +2356,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     function.name 为空或 arguments 乱码分片，导致 Claude Code / Codex 等 Agent 陷入死循环。
     """
     prefix = f"[{rid}] " if rid else ""
-    max_attempts = 2
+    max_attempts = (rotator.get_retry_budget(model_name) if rotator else 2) + 1
+    fallback_tried = False
     collected = None
     ttft_ms = None
     retry_count = 0
@@ -2267,11 +2373,18 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         raw = await r.aread()
                         err_str = raw.decode("utf-8", "replace")
                         _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
-                        _record_rate_limit(model_name, err_str, uid=curr_uid)
-                        if rotator:
+                        _record_rate_limit(model_name, err_str, uid=curr_uid, status_code=r.status_code)
+                        if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
+                            fallback_tried = True
+                            fb = GPT_FALLBACK_MAP[body["model"]]
+                            _log(f"{prefix}⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                            body["model"] = fb
+                            continue
+                        if rotator and attempt < max_attempts:
                             failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                             if failover:
                                 curr_uid, curr_headers = failover
+                                await _failover_jitter(rid)
                                 continue
                         _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}",
                                       retry_count=retry_count, retry_reason=retry_reason)
@@ -2737,10 +2850,12 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         return out
 
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
+    max_attempts = retry_budget + 1
+    fallback_tried = False
     curr_uid = uid
     curr_headers = dict(headers)
 
-    for attempt in range(retry_budget):
+    for attempt in range(max_attempts):
         try:
             async with httpx.AsyncClient(timeout=None) as c:
                 async with c.stream("POST", url, headers=curr_headers, json=body) as r:
@@ -2749,11 +2864,18 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                         err_str = err.decode("utf-8", "replace")
                         _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
                         _log(f"{prefix}── ERROR BODY ──\n{err_str}", level="debug")
-                        _record_rate_limit(model_name, err_str, uid=curr_uid)
-                        if rotator and attempt < retry_budget - 1:
+                        _record_rate_limit(model_name, err_str, uid=curr_uid, status_code=r.status_code)
+                        if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
+                            fallback_tried = True
+                            fb = GPT_FALLBACK_MAP[body["model"]]
+                            _log(f"{prefix}⚠️ 模型 {body['model']} 上游未授权 (11102)，平滑降级至 {fb} 重试")
+                            body["model"] = fb
+                            continue
+                        if rotator and attempt < max_attempts - 1:
                             failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                             if failover:
                                 curr_uid, curr_headers = failover
+                                await _failover_jitter(rid)
                                 continue
                         _record_usage(model_name, False, t0, error=f"HTTP {r.status_code}")
                         yield _err_event(err, r.status_code)
@@ -2767,10 +2889,11 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                         yield evt
                     break
         except httpx.HTTPError as e:
-            if rotator and attempt < retry_budget - 1:
+            if rotator and attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
                 if failover:
                     curr_uid, curr_headers = failover
+                    await _failover_jitter(rid)
                     continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             err_msg = f"upstream error: {e}"
