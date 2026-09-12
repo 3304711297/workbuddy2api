@@ -56,17 +56,53 @@ function renderRateLimitCard(rl, activeModel) {
     ? '<span class="badge badge-success" style="font-size:10px;margin-left:6px;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">🌙 夜间限免中 (23:00–08:00)</span>'
     : '<span class="muted mono" style="font-size:10px;">夜间 23:00–08:00 免积分</span>';
 
+  // 临期优先：内核按积分到期日分层调度（先烧快过期额度），到期日应对用户可见
+  const soonest = rl.rotation?.soonest_expire_day;
+  const expiryTag = soonest
+    ? `<span class="badge" style="font-size:10px;margin-left:6px;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.3);" title="按积分到期日分层优先调度，避免临期额度作废">📅 临期优先: ${esc(soonest)}</span>`
+    : '';
+
+  // 静默降级感知：requested → actual，纠正「你以为在用的模型 ≠ 实际模型」
+  const fallbacks = rl.fallbacks && typeof rl.fallbacks === 'object' ? Object.entries(rl.fallbacks) : [];
+  const fallbackRows = fallbacks.map(([requested, ev]) => {
+    const isCurrent = requested === activeModel;
+    const detail = `${esc(ev.actual || '—')} · 原因 ${esc(ev.reason || 'unknown')} · ${ev.count || 0} 次 · ${esc(ev.lastLocal || '—')}`;
+    return `<div class="pkg-item" title="请求 ${esc(requested)} 被上游拒绝后静默降级为 ${esc(ev.actual || '—')}">
+      <span style="color:var(--danger);">⚠️ 降级${isCurrent ? '（当前会话）' : ''}</span>
+      <span><span class="mono">${esc(requested)}</span> → <span class="mono">${esc(ev.actual || '—')}</span></span>
+      <small class="muted mono">${detail}</small>
+    </div>`;
+  }).join('');
+
+  // 网关能力元数据：内核自曝的协议数 / 413 上限 / 出站 UA
+  const srv = rl.server || {};
+  const protoCount = Array.isArray(srv.protocols) ? srv.protocols.length : 0;
+  const protoLabel = protoCount === 3
+    ? 'Chat / Messages / Responses 三协议'
+    : protoCount > 0
+      ? srv.protocols.map(p => esc(String(p))).join(' / ')
+      : '—';
+  const serverMeta = (protoCount > 0 || srv.maxBodyMb)
+    ? `<div class="pkg-item" title="内核自曝的网关能力元数据">
+        <span class="muted mono">网关能力</span>
+        <span><strong>${protoLabel}</strong>${srv.maxBodyMb ? ` · 报文上限 ${esc(String(srv.maxBodyMb))}MB` : ''}${srv.userAgent ? ` · <small class="muted mono">${esc(srv.userAgent)}</small>` : ''}</span>
+      </div>`
+    : '';
+
   return `
     <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <div style="display:flex;align-items:center;">
           <span style="font-size:12px;color:var(--text-secondary);">上游频率限制（腾讯 code 6004）</span>
+          ${expiryTag}
           ${rl.nightFree ? nightBadge : ''}
         </div>
         <span class="muted" style="font-size:10px;">${!rl.nightFree ? nightBadge + ' · ' : ''}无固定公开阈值 · 仅报实测值</span>
       </div>
       ${rows}
+      ${fallbackRows ? `<div style="margin-top:6px;">${fallbackRows}</div>` : ''}
       ${usageRows ? `<div style="margin-top:6px;">${usageRows}</div>` : ''}
+      ${serverMeta ? `<div style="margin-top:6px;">${serverMeta}</div>` : ''}
     </div>
   `;
 }
@@ -97,9 +133,31 @@ export async function loadAccountsData() {
 
     renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData, rateLimitData);
     renderAccountsGrid(acctList, rateLimitData);
+    renderProtocolBadge(rateLimitData);
     await syncRotationPolicyCard(acctList.length);
   } catch (e) {
     container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${esc(e.message || e)}</div>`;
+  }
+}
+
+// 看板端点卡协议徽章：依据内核自曝的 server.protocols 动态渲染。
+// 内核为三协议网关（chat / messages / responses）时明确标注，旧内核缺元数据时保守显示。
+function renderProtocolBadge(rateLimit) {
+  const badge = document.getElementById('dash-protocol-badge');
+  if (!badge) return;
+  const protocols = rateLimit?.server?.protocols;
+  if (Array.isArray(protocols) && protocols.length >= 3) {
+    badge.textContent = '三协议网关';
+    badge.className = 'badge badge-valid';
+    badge.title = `内核支持：${protocols.join(' / ')}`;
+  } else if (Array.isArray(protocols) && protocols.length > 0) {
+    badge.textContent = `${protocols.length} 协议`;
+    badge.className = 'badge badge-info';
+    badge.title = `内核支持：${protocols.join(' / ')}`;
+  } else {
+    badge.textContent = 'OpenAI 兼容';
+    badge.className = 'badge badge-info';
+    badge.title = '内核未上报协议元数据（旧版本或服务未启动）';
   }
 }
 

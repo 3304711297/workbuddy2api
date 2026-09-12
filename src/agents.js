@@ -135,6 +135,58 @@ function renderClaudeGuide(port) {
   wrap.hidden = false;
 }
 
+// Codex CLI 接入引导：Responses 协议 + config.toml 配置
+function renderCodexGuide(port) {
+  const wrap = document.getElementById('codex-guide');
+  if (!wrap) return;
+  const baseUrl = `http://127.0.0.1:${port || 8787}/v1`;
+  const tomlSnippet = [
+    '# ~/.codex/config.toml',
+    'model = "deepseek-v4.1-flash"',
+    'model_provider = "workbuddy"',
+    '',
+    '[model_providers.workbuddy]',
+    `base_url = "${baseUrl}"`,
+    'env_key = "WORKBUDDY_API_KEY"',
+    'wire_api = "responses"',
+  ].join('\n');
+  const bashCmd = `export WORKBUDDY_API_KEY="local"\ncodex`;
+  const psCmd = `$env:WORKBUDDY_API_KEY="local"; codex`;
+
+  const field = (label, value) => `
+    <div class="zguide-field">
+      <span class="zguide-label">${esc(label)}</span>
+      <span class="zguide-value" data-copy="${esc(value)}" title="点击复制">${esc(value)}</span>
+    </div>`;
+
+  wrap.innerHTML = `
+    <div class="zcode-guide-panel" style="margin-top: 10px;">
+      ${field('Responses 端点路径', `${baseUrl}/responses`)}
+      ${field('API Key 环境变量名', 'WORKBUDDY_API_KEY')}
+      ${field('API Key 值（本地固定）', 'local')}
+      ${field('推荐模型', 'deepseek-v4.1-flash')}
+      <div class="zguide-field">
+        <span class="zguide-label">config.toml 配置片段（点击复制）</span>
+        <pre class="zguide-value" data-copy="${esc(tomlSnippet)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(tomlSnippet)}</pre>
+      </div>
+      <div class="zguide-field">
+        <span class="zguide-label">Bash 终端直连命令（点击复制）</span>
+        <pre class="zguide-value" data-copy="${esc(bashCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(bashCmd)}</pre>
+      </div>
+      <div class="zguide-field">
+        <span class="zguide-label">PowerShell 直连命令（点击复制）</span>
+        <pre class="zguide-value" data-copy="${esc(psCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(psCmd)}</pre>
+      </div>
+      <ol class="zguide-steps">
+        <li>内核已内置 OpenAI Responses API（<code>POST /v1/responses</code>），兼容 Codex CLI 等 Responses 协议客户端</li>
+        <li>关键项是 <code>wire_api = "responses"</code>：Codex CLI 默认走 Responses 协议而非 chat/completions</li>
+        <li>SSE 事件完整携带 <code>sequence_number</code> / <code>response_id</code> / <code>item_id</code> 规范字段</li>
+        <li>若需压缩超长上下文（有损），可设置 <code>WORKBUDDY2API_OPTIMIZE_CONTEXT=1</code> 并重启内核</li>
+      </ol>
+    </div>`;
+  wrap.hidden = false;
+}
+
 export function initAgentActions() {
   document.getElementById('btn-guide-hermes')?.addEventListener('click', async () => {
     try {
@@ -188,6 +240,20 @@ export function initAgentActions() {
   });
 
   document.getElementById('claude-guide')?.addEventListener('click', async (ev) => {
+    const el = ev.target.closest('[data-copy]');
+    if (!el) return;
+    const ok = await copyToClipboard(el.dataset.copy);
+    el.classList.add('copied');
+    showToast(ok ? '已复制' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
+    setTimeout(() => el.classList.remove('copied'), 1500);
+  });
+
+  // Codex CLI 引导
+  document.getElementById('btn-guide-codex')?.addEventListener('click', () => {
+    renderCodexGuide(state.port);
+  });
+
+  document.getElementById('codex-guide')?.addEventListener('click', async (ev) => {
     const el = ev.target.closest('[data-copy]');
     if (!el) return;
     const ok = await copyToClipboard(el.dataset.copy);

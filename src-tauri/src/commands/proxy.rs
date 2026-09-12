@@ -18,6 +18,9 @@ pub struct TestChatResult {
     /// 首字时延（毫秒）：请求发出到第一个非空 delta.content 的耗时；None 序列化为 null 表示未测得
     pub ttft_ms: Option<u64>,
     pub error: Option<String>,
+    /// 本次测试实际使用的协议：chat | messages | responses
+    #[serde(default)]
+    pub protocol: String,
 }
 
 /// Python 解释器定位：`WORKBUDDY2API_PYTHON`（兼容旧名 `C2O_PYTHON`）环境变量优先 → 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留现机行为）→ PATH 中的 python
@@ -382,9 +385,19 @@ pub async fn proxy_checkin_claim(port: u16) -> Result<serde_json::Value, String>
 }
 
 #[tauri::command]
-pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestChatResult, String> {
+pub async fn proxy_test_chat(
+    port: u16,
+    model: Option<String>,
+    protocol: Option<String>,
+) -> Result<TestChatResult, String> {
     let target_model = model.unwrap_or_else(|| "glm-5.3-flash".into());
-    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    // 协议归一：chat（默认）| messages（Anthropic）| responses（Codex）
+    let proto = match protocol.as_deref() {
+        Some("messages") => "messages",
+        Some("responses") => "responses",
+        _ => "chat",
+    };
+    let url = format!("http://127.0.0.1:{port}/v1/{proto}");
     let start = std::time::Instant::now();
 
     // 30s 总超时：reqwest 客户端级 timeout 覆盖「发起连接 → 响应体读取完毕」全过程，
@@ -392,17 +405,35 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
     // 同时绕过环境代理，避免本机请求被送去 3067 而受 Karing 节点状态牵连
     let client = super::shared::local_client(30);
 
-    // 对标上游 provider_health.rs 的流式判首包思路：发 stream:true 请求逐块解析 SSE，
-    // 第一个非空 delta.content 到达的时刻即为 TTFT（首字时延）
-    let payload = serde_json::json!({
-        "model": target_model,
-        "messages": [
-            {"role": "user", "content": "Ping: 请仅回答 PONG"}
-        ],
-        "max_tokens": 100,
-        "stream": true,
-        "chat_template_kwargs": {"enable_thinking": false}
-    });
+    // 各协议的请求体形态不同，但都在服务端被转换为同一 Chat 语义后再回译为对应协议：
+    //   chat      -> OpenAI chat/completions
+    //   messages  -> Anthropic Messages（max_tokens 必填）
+    //   responses -> OpenAI Responses（input 数组）
+    let payload = match proto {
+        "messages" => serde_json::json!({
+            "model": target_model,
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Ping: 请仅回答 PONG"}
+            ],
+            "stream": true,
+        }),
+        "responses" => serde_json::json!({
+            "model": target_model,
+            "input": "Ping: 请仅回答 PONG",
+            "max_output_tokens": 100,
+            "stream": true,
+        }),
+        _ => serde_json::json!({
+            "model": target_model,
+            "messages": [
+                {"role": "user", "content": "Ping: 请仅回答 PONG"}
+            ],
+            "max_tokens": 100,
+            "stream": true,
+            "chat_template_kwargs": {"enable_thinking": false}
+        }),
+    };
 
     let resp = match client.post(&url).json(&payload).send().await {
         Ok(r) => r,
@@ -414,6 +445,7 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
                 latency_ms: start.elapsed().as_millis() as u64,
                 ttft_ms: None,
                 error: Some(e.to_string()),
+                protocol: proto.to_string(),
             });
         }
     };
@@ -430,6 +462,7 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
             latency_ms: start.elapsed().as_millis() as u64,
             ttft_ms: None,
             error: Some(format!("HTTP {status}: {snippet}")),
+            protocol: proto.to_string(),
         });
     }
 
@@ -477,11 +510,27 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
             let Ok(val) = serde_json::from_str::<serde_json::Value>(data) else {
                 continue;
             };
-            // 只取 choices[0].delta.content；空内容（如 role 帧）与 reasoning_content 均不计 TTFT
-            let delta = val
-                .pointer("/choices/0/delta/content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            // 按协议解析文本增量：
+            //   chat      -> choices[0].delta.content
+            //   messages  -> content_block_delta.delta.text（Anthropic）
+            //   responses -> response.output_text.delta（Codex Responses 语义事件）
+            let delta = match proto {
+                "messages" => val
+                    .pointer("/delta/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                "responses" => {
+                    if val.get("type").and_then(|v| v.as_str()) == Some("response.output_text.delta") {
+                        val.get("delta").and_then(|v| v.as_str()).unwrap_or("")
+                    } else {
+                        ""
+                    }
+                }
+                _ => val
+                    .pointer("/choices/0/delta/content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            };
             if delta.is_empty() {
                 continue;
             }
@@ -507,6 +556,7 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
             latency_ms,
             ttft_ms: None,
             error: Some(err),
+            protocol: proto.to_string(),
         });
     }
 
@@ -517,6 +567,7 @@ pub async fn proxy_test_chat(port: u16, model: Option<String>) -> Result<TestCha
         latency_ms,
         ttft_ms,
         error: None,
+        protocol: proto.to_string(),
     })
 }
 

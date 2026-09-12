@@ -207,7 +207,7 @@
             <div class="card">
               <div class="card-header-flex">
                 <h3 class="card-title">本地接入端点</h3>
-                <span class="badge badge-info">OpenAI 兼容</span>
+                <span id="dash-protocol-badge" class="badge badge-info">协议检测中</span>
               </div>
               <div class="copy-input-group">
                 <label class="field-label">Base URL</label>
@@ -233,14 +233,22 @@
                 <h3 class="card-title">接口连通性测试</h3>
                 <p class="card-desc">向本地反代发送真实测试完成请求，检验链路健康与响应延迟</p>
               </div>
-              <button id="btn-test-chat" class="btn btn-secondary">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                测试连通性
-              </button>
+              <div class="actions" style="display: flex; align-items: center; gap: 8px;">
+                <select id="select-test-protocol" class="input mono" style="min-width: 190px;" title="选择要验证的协议端点">
+                  <option value="chat">Chat Completions (/v1/chat/completions)</option>
+                  <option value="messages">Anthropic Messages (/v1/messages)</option>
+                  <option value="responses">Codex Responses (/v1/responses)</option>
+                </select>
+                <button id="btn-test-chat" class="btn btn-secondary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  测试连通性
+                </button>
+              </div>
             </div>
             <div id="test-result-box" class="test-result-box hidden">
               <div class="test-status-line">
                 <span id="test-status-tag" class="badge badge-valid">成功</span>
+                <span class="muted">协议: <strong id="test-protocol-tag" class="mono">chat</strong></span>
                 <span class="muted">模型: <strong id="test-model-tag" class="mono">glm-5.3-flash</strong></span>
                 <!-- 首字时延（TTFT）：仅在测试结果携带 ttft_ms 时显示，是核心体验指标故用主色突出 -->
                 <span id="test-ttft-wrap" class="muted hidden">首字: <strong id="test-ttft" class="mono">— ms</strong></span>
@@ -372,6 +380,25 @@
               <div class="divider"></div>
               <div class="agent-actions">
                 <button id="btn-guide-claude" class="btn btn-primary btn-sm">终端直连引导</button>
+              </div>
+            </div>
+
+            <!-- Codex CLI 卡片 -->
+            <div class="card agent-card">
+              <div class="agent-card-header">
+                <div class="agent-icon" style="background: linear-gradient(135deg, #10b981, #047857); color: white; font-weight: bold;">X</div>
+                <div>
+                  <h3 class="agent-name">Codex CLI</h3>
+                  <p class="muted agent-sub">OpenAI 官方编码智能体（Responses 协议）</p>
+                </div>
+                <span class="badge badge-success">原生协议就绪</span>
+              </div>
+              <p class="agent-desc">内核已内置 OpenAI Responses API（<code>POST /v1/responses</code>），SSE 事件完整携带 <code>sequence_number</code> / <code>response_id</code> / <code>item_id</code> 规范字段，可原生直连 Codex CLI。</p>
+              <div class="agent-path-text">兼容端点: <span class="mono">http://127.0.0.1:8787/v1</span></div>
+              <div id="codex-guide" hidden></div>
+              <div class="divider"></div>
+              <div class="agent-actions">
+                <button id="btn-guide-codex" class="btn btn-primary btn-sm">配置引导</button>
               </div>
             </div>
           </div>
@@ -588,6 +615,22 @@ print(response.choices[0].message.content)</code></pre>
               <label class="field-label">凭据存储目录</label>
               <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\workbuddy2api\accounts.json" />
               <p class="muted field-hint">所有登录账号的 Token 统一保存在此文件中，与 WorkBuddy 桌面端完全解耦。</p>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- 高级运行时开关（不在 AppConfig 中，需环境变量 + 重启内核） -->
+            <div class="form-group" id="runtime-advanced-hint">
+              <label class="field-label">高级运行时开关（环境变量配置）</label>
+              <p class="muted field-hint" style="margin-top: 4px;">
+                以下开关<b>不写入 settings.json</b>，需设置环境变量后<b>重启内核</b>才生效（当前运行中的内核不会热加载）：
+              </p>
+              <ul class="muted field-hint" style="margin: 6px 0 0 18px; padding: 0; font-size: 11px; line-height: 1.9;">
+                <li><code class="mono">WORKBUDDY2API_OPTIMIZE_CONTEXT=1</code> —— 启用 Codex 长上下文投影压缩（默认关闭；有损压缩，会截断历史与工具参数，按需开启）</li>
+                <li><code class="mono">WORKBUDDY2API_MAX_IMAGE_MB</code> —— 远程多模态图片单图下载上限（默认 8；设为 <code class="mono">0</code> 完全禁用远程图片下载）</li>
+                <li><code class="mono">WORKBUDDY2API_MAX_BODY_MB</code> —— 请求体大小上限（默认 16；超限在 ASGI 层按块熔断返回 413）</li>
+                <li><code class="mono">WORKBUDDY2API_USER_AGENT</code> —— 覆盖出站 User-Agent（默认仿真官方客户端标识）</li>
+              </ul>
             </div>
           </div>
         </section>

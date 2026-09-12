@@ -111,10 +111,18 @@ function updateServiceStatus(isRunning, data = null) {
 // ---------------------------------------------------------------------------
 // 连通性测试 (Test Chat)
 // ---------------------------------------------------------------------------
+const TEST_PROTOCOL_LABELS = {
+  chat: 'Chat Completions',
+  messages: 'Anthropic Messages',
+  responses: 'Codex Responses',
+};
+
 export function initTestChat() {
   const btn = document.getElementById('btn-test-chat');
   const box = document.getElementById('test-result-box');
   const tag = document.getElementById('test-status-tag');
+  const protocolTag = document.getElementById('test-protocol-tag');
+  const protocolSelect = document.getElementById('select-test-protocol');
   const modelTag = document.getElementById('test-model-tag');
   const latency = document.getElementById('test-latency');
   const ttftWrap = document.getElementById('test-ttft-wrap');
@@ -134,17 +142,25 @@ export function initTestChat() {
   };
 
   btn?.addEventListener('click', async () => {
+    const protocol = protocolSelect?.value || 'chat';
+    const protocolLabel = TEST_PROTOCOL_LABELS[protocol] || protocol;
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span>请求中...`;
     box.classList.remove('hidden');
     tag.className = 'badge badge-info';
     tag.textContent = '请求中...';
+    if (protocolTag) protocolTag.textContent = protocolLabel;
     latency.textContent = '— ms';
     renderTtft(null); // 请求开始时隐藏首字指标，避免残留上次结果
-    output.textContent = '正在向本地反代发起聊天完成测试...';
+    output.textContent = `正在通过 ${protocolLabel} 协议向本地反代发起测试请求...`;
 
     try {
-      const res = await invokeTauri('proxy_test_chat', { port: state.port, model: 'glm-5.3-flash' });
+      const res = await invokeTauri('proxy_test_chat', {
+        port: state.port,
+        model: 'glm-5.3-flash',
+        protocol,
+      });
+      if (protocolTag) protocolTag.textContent = res.protocol || protocolLabel;
       if (res.success) {
         tag.className = 'badge badge-valid';
         tag.textContent = '测试通过';
@@ -152,7 +168,7 @@ export function initTestChat() {
         latency.textContent = `${res.latency_ms} ms`;
         renderTtft(res.ttft_ms);
         output.textContent = res.response || '(模型返回内容为空)';
-        showToast('接口连通测试成功！', 'success');
+        showToast(`${protocolLabel} 连通测试成功！`, 'success');
       } else {
         tag.className = 'badge badge-expired';
         tag.textContent = '请求异常';
@@ -160,7 +176,7 @@ export function initTestChat() {
         latency.textContent = `${res.latency_ms} ms`;
         renderTtft(res.ttft_ms);
         output.textContent = res.error || '未返回有效结果';
-        showToast('测试失败，请检查服务状态', 'error');
+        showToast(`${protocolLabel} 测试失败，请检查服务状态`, 'error');
       }
     } catch (e) {
       tag.className = 'badge badge-expired';
