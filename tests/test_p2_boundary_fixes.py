@@ -146,3 +146,38 @@ def test_state_flip_still_writes_immediately(alias_env, monkeypatch):
     converter._mark_model_unavailable("kimi-k3-1", uid=uid)
     data = json.loads(alias_env.read_text(encoding="utf-8"))
     assert data["accounts"][uid]["kimi-k3-1"]["source"] == "runtime-11102"
+
+
+# ── ④ 内存状态连续性（评审补充：force=True 使「只更新内存」名不副实） ──
+
+def test_same_state_remark_no_disk_read_memory_continuity(alias_env, monkeypatch):
+    """同状态窗口内的重复标记：不读盘（签名缓存命中）且内存 lastSeenMs 连续推进。
+
+    旧实现 force=True 每次强制重读磁盘：内存里的新 lastSeenMs 下次调用即被
+    磁盘旧值覆盖，「只更新内存」名不副实。新实现走签名缓存——唯一写者是
+    converter 自身（AGENTS.md 铁律），签名命中即内存真源。
+    """
+    import pathlib
+
+    uid = "uid-mem"
+    converter._mark_model_available("glm-5.3-flash", uid=uid)  # 首次：读盘 + 写盘
+
+    reads = {"n": 0}
+    orig_read_text = pathlib.Path.read_text
+
+    def counting_read_text(self, *a, **kw):
+        if str(self) == str(alias_env):
+            reads["n"] += 1
+        return orig_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", counting_read_text)
+
+    converter._mark_model_available("glm-5.3-flash", uid=uid)  # 同状态窗口内
+    assert reads["n"] == 0, f"同状态重复标记仍强制读盘 {reads['n']} 次"
+
+    # 内存连续性：缓存 lastSeenMs ≥ 磁盘值（磁盘反映最近一次落盘，允许滞后）
+    cache_entry = converter._availability_cache["accounts"][uid]["glm-5.3-flash"]
+    disk_entry = json.loads(orig_read_text(alias_env, encoding="utf-8"))["accounts"][uid]["glm-5.3-flash"]
+    assert cache_entry["lastSeenMs"] >= disk_entry["lastSeenMs"]
+    # source 恒准确（决策字段不依赖 lastSeenMs）
+    assert cache_entry["source"] == disk_entry["source"] == "runtime-200"

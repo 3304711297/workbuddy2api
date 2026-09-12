@@ -740,14 +740,16 @@ def _save_availability(data: dict) -> None:
 def _update_availability_entry(model: str, source: str, uid: str | None = None) -> None:
     """写入一条可用性证据（per-uid，源 runtime-200 / runtime-11102），幂等更新 lastSeenMs。
 
-    写盘节流：源未变化且 lastSeenMs 距上次 < 5 分钟时只更新内存，不落盘——
-    高频成功请求（Agent 长会话）不必每次全量写 JSON；状态翻转立即落盘。
+    读写均走 mtime+size 签名缓存（本文件唯一写者是 converter 自身，签名命中即内存真源）：
+    - 写盘节流：源未变化且 lastSeenMs 距上次 < 5 分钟时只更新内存，不落盘——
+      高频成功请求（Agent 长会话）不必每次全量写 JSON；状态翻转立即落盘。
+    - 内存连续：同窗口内重复标记时 lastSeenMs 在内存中连续推进，不会被磁盘旧值回灌。
     """
     global _availability_cache
     uid = str(uid or "").strip() or "default"
     now_ms = int(time.time() * 1000)
     with _AVAILABILITY_LOCK:
-        data = json.loads(json.dumps(_load_availability(force=True)))
+        data = json.loads(json.dumps(_load_availability()))
         accounts = data.get("accounts")
         if not isinstance(accounts, dict):
             accounts = {}
