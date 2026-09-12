@@ -738,7 +738,11 @@ def _save_availability(data: dict) -> None:
 
 
 def _update_availability_entry(model: str, source: str, uid: str | None = None) -> None:
-    """写入一条可用性证据（per-uid，源 runtime-200 / runtime-11102），幂等更新 lastSeenMs。"""
+    """写入一条可用性证据（per-uid，源 runtime-200 / runtime-11102），幂等更新 lastSeenMs。
+
+    写盘节流：源未变化且 lastSeenMs 距上次 < 5 分钟时只更新内存，不落盘——
+    高频成功请求（Agent 长会话）不必每次全量写 JSON；状态翻转立即落盘。
+    """
     global _availability_cache
     uid = str(uid or "").strip() or "default"
     now_ms = int(time.time() * 1000)
@@ -753,6 +757,15 @@ def _update_availability_entry(model: str, source: str, uid: str | None = None) 
             entry = {}
             accounts[uid] = entry
         prev = entry.get(model)
+        # 同状态节流：5 分钟内重复同一 source 只刷内存 lastSeenMs
+        if (
+            isinstance(prev, dict)
+            and prev.get("source") == source
+            and (now_ms - prev.get("lastSeenMs", 0)) < 300_000
+        ):
+            prev["lastSeenMs"] = now_ms
+            _availability_cache = data
+            return
         entry[model] = {
             "source": source,
             "firstSeenMs": prev["firstSeenMs"] if isinstance(prev, dict) and prev.get("firstSeenMs") else now_ms,
@@ -1864,6 +1877,19 @@ async def api_rate_limit():
         "config_source": "hot" if load_app_settings().get("rotate_mode") else "default",
     }
 
+    # 降级感知：最近发生的静默降级（requested → actual），供插件/控制台展示
+    # 「你以为在用的模型 ≠ 实际模型」。内存记录，随内核重启清零。
+    # 锁内快照：写入侧在同一锁内增删/淘汰条目，无锁遍历存在竞争窗口。
+    with _FALLBACK_LOCK:
+        fallback_snapshot = {
+            req: {
+                "actual": ev["actual"],
+                "reason": ev["reason"],
+                "count": ev["count"],
+                "lastLocal": time.strftime("%m-%d %H:%M:%S", time.localtime(ev["lastMs"] / 1000)),
+            }
+            for req, ev in _FALLBACK_EVENTS.items()
+        }
     return {
         "models": models,
         "rollingUsage": {m: _rolling_usage(m) for m in snapshot or {}},
@@ -1877,17 +1903,7 @@ async def api_rate_limit():
         "nickname": nickname,
         "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
         "rotation": rotation_info,
-        # 降级感知：最近发生的静默降级（requested → actual），供插件/控制台展示
-        # 「你以为在用的模型 ≠ 实际模型」。内存记录，随内核重启清零。
-        "fallbacks": {
-            req: {
-                "actual": ev["actual"],
-                "reason": ev["reason"],
-                "count": ev["count"],
-                "lastLocal": time.strftime("%m-%d %H:%M:%S", time.localtime(ev["lastMs"] / 1000)),
-            }
-            for req, ev in list(_FALLBACK_EVENTS.items())
-        },
+        "fallbacks": fallback_snapshot,
     }
 
 
@@ -2110,7 +2126,9 @@ async def chat_completions(request: Request,
         raise HTTPException(status_code=502, detail={"error": {"message": "failed to collect upstream response", "type": "upstream_error"}})
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     if fallback_reason is None:
-        _mark_model_available(model_name, uid=uid)  # 运行时学习：该账号成功调用过
+        # 记 mapped 后的正式名（body["model"]），别名（gpt-4o→gpt-5.6-luna）成功时
+        # 需解除的是正式名的预标记；记别名行会写进 /v1/models 不存在的 id。
+        _mark_model_available(body["model"], uid=uid)  # 运行时学习：该账号成功调用过
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
@@ -2329,7 +2347,8 @@ async def anthropic_messages(
 
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     if fallback_reason is None:
-        _mark_model_available(model_name, uid=uid)  # 运行时学习：该账号成功调用过
+        # 记 mapped 后的正式名（body["model"]），别名成功须解除正式名的预标记
+        _mark_model_available(body["model"], uid=uid)  # 运行时学习：该账号成功调用过
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
@@ -2685,7 +2704,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
         req_m = requested_model or model_name
         yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
     elif curr_uid:
-        _mark_model_available(model_name, uid=curr_uid)  # 运行时学习：该账号成功调用过
+        _mark_model_available(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
     async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms,
                                               retry_count=retry_count, retry_reason=retry_reason,
                                               actual_model=actual_model, fallback_reason=fallback_reason,
@@ -3180,10 +3199,9 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     # 流结束：输出完成日志
     if fallback_tried:
-        req_m = requested_model or model_name
-        _mark_model_unavailable(req_m, uid=curr_uid)  # 运行时学习：即使流式也记不可用
+        _mark_model_unavailable(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
     elif err_msg is None and curr_uid:
-        _mark_model_available(model_name, uid=curr_uid)  # 运行时学习：该账号成功调用过
+        _mark_model_available(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
     elapsed = time.time() - t0 if t0 else 0
     tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
     req_m = requested_model or model_name
