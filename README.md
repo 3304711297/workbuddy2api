@@ -2,20 +2,20 @@
 
 # 🚀 WorkBuddy2API
 
-### 独立桌面控制台 · WorkBuddy 转 OpenAI / Anthropic 双协议 API 网关 · 多账号资产管理 · Coding Agent 接入引导
+### 独立桌面控制台 · WorkBuddy 转 OpenAI / Anthropic / Responses 三协议 API 网关 · 多账号资产管理 · Coding Agent 接入引导
 
-> **说明**：本项目原名 `codebuddy2openai`。随着架构全面升级并原生支持 **Anthropic Messages (`/v1/messages`)** 协议，本项目已正式更名为 **WorkBuddy2API**，提供兼顾 OpenAI 与 Anthropic 两大主流生态的统一本地 API 网关。
+> **说明**：本项目原名 `codebuddy2openai`。随着架构全面升级并原生支持 **Anthropic Messages (`/v1/messages`)** 与 **OpenAI Responses (`/v1/responses`)** 协议，本项目已正式更名为 **WorkBuddy2API**，提供兼顾 OpenAI Chat、Responses 与 Anthropic 三大主流生态的统一本地 API 网关。
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/3304711297/workbuddy2api)
-[![Protocol](https://img.shields.io/badge/Protocol-OpenAI%20%7C%20Anthropic%20Messages-green.svg)](#-核心接口与协议速查)
+[![Protocol](https://img.shields.io/badge/Protocol-OpenAI%20Chat%20%7C%20Anthropic%20Messages%20%7C%20Codex%20Responses-green.svg)](#-核心接口与协议速查)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8.svg?logo=tauri)](https://tauri.app/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python)](https://www.python.org/)
 
 <p align="center">
   <b>无需下载或安装原版腾讯 WorkBuddy 客户端</b>，直接在浏览器中完成网页授权，<br/>
-  将腾讯代码助手能力转换为标准的 <code>OpenAI (/v1/chat/completions)</code> 与 <code>Anthropic (/v1/messages)</code> 双协议接口，<br/>
-  原生直连驱动 <b>Claude Code CLI</b>、<b>Hermes Agent</b>、<b>Cline</b>、<b>Roo Code</b>、<b>Cherry Studio</b> 等各类主流 Coding Agent 与开发工具！
+  将腾讯代码助手能力转换为标准的 <code>OpenAI (/v1/chat/completions)</code>、<code>Anthropic (/v1/messages)</code> 与 <code>Responses (/v1/responses)</code> 三协议接口，<br/>
+  原生直连驱动 <b>Codex CLI</b>、<b>Claude Code CLI</b>、<b>Hermes Agent</b>、<b>Cline</b>、<b>Roo Code</b>、<b>Cherry Studio</b> 等各类主流 Coding Agent 与开发工具！
 </p>
 
 </div>
@@ -41,6 +41,7 @@
   - **自然日今日用量统计**：自动统计当日请求数（`reqsToday`）、消耗 Token 数（`tokensToday`）与 429 频控次数；
   - **动态感知官方夜间限免**：自动识别 `23:00–08:00` 官方限免时段，前端实时打上 **「🌙 夜间限免中」** 专属徽章。
 - 🤖 **Agent 智能体接入引导（只读，不改写客户端配置）**：
+  - **Codex CLI**：在 `~/.codex/config.toml` 中配置 `wire_api = "responses"` 与 `base_url = "http://127.0.0.1:8787/v1"` 即可原生直连，享受自动上下文投影压缩与原生工具调用支持。
   - **Claude Code CLI**：终端配置 `ANTHROPIC_BASE_URL="http://127.0.0.1:8787"` 与 `ANTHROPIC_API_KEY="local"` 即可一键直连驱动官方 Claude Code，双向协议无缝转换并支持流式与工具调用。
   - **Hermes Agent**：提供推荐配置项与一键复制，按说明在 Hermes 的 `config.yaml` 中手动填写（供应商 + 模型别名）。
   - **ZCode**：采用引导式接入——展示接口地址/密钥/模型清单，点击任意值即复制，在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴即可；状态徽章基于本地服务端口真实可达性探测。
@@ -48,7 +49,7 @@
 - 🛡️ **安全脱敏、流量削峰与请求防护**：
   - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
   - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
-  - **413 请求体超限安全防护**：对 `/v1/chat/completions` 与 `/v1/messages` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`），超限报文网关层直接秒拒返回 413，防御超大 payload 拖垮本地内存与被上游拦截连坐（借鉴 `linguo2625469/workbuddy2api-panel`）；
+  - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`），超限报文网关层直接秒拒返回 413，防御超大 payload 拖垮本地内存与被上游拦截连坐（借鉴 `linguo2625469/workbuddy2api-panel`）；
   - **多模态远程图片自动转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`（直接传 http 链接报错 400）。网关自动异步下载远程图片并内联嵌入，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）；
   - **官方客户端 User-Agent 仿真**：出站请求智能仿真官方客户端标识（国内版 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 触发 10085 拦截与官网使用端归因失真，亦支持 `WORKBUDDY2API_USER_AGENT` 动态配置（借鉴 `ardeyouxipianyi` 与 `turbomind66`）。
 
