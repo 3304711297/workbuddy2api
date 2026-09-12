@@ -31,17 +31,21 @@ test('models.js 标签筛选支持「需授权」虚拟标签（点徽章可筛�
 });
 
 test('settings.js buildSettingsPayload 透传 model_list_mode（整对象覆盖防回滚契约）', () => {
-  const start = SETTINGS_JS.indexOf('const buildSettingsPayload = ()');
+  const start = SETTINGS_JS.indexOf('const buildSettingsPayload = (patch = {})');
   assert.ok(start > -1, '未找到 buildSettingsPayload');
   const block = SETTINGS_JS.slice(start, SETTINGS_JS.indexOf('};', start));
   assert.ok(block.includes('model_list_mode'), 'buildSettingsPayload 缺少 model_list_mode 字段');
 });
 
 test('settings.js 持久化前回读磁盘真源并保留 model_list_mode', () => {
-  const start = SETTINGS_JS.indexOf('const persistSettings = async () =>');
+  const start = SETTINGS_JS.indexOf('const persistSettings = async (patch = {})');
   assert.ok(start > -1, '未找到 persistSettings');
   const block = SETTINGS_JS.slice(start, start + 900);
-  assert.ok(block.includes('model_list_mode'), 'persistSettings 回读磁盘时未保留 model_list_mode，会被覆盖回滚');
+  // dirty merge 契约：回读时带 ('model_list_mode' in patch) 守卫——本次未修改才回填磁盘值
+  assert.ok(
+    block.includes("('model_list_mode' in patch)"),
+    'persistSettings 回读磁盘时未按 dirty 守卫保留 model_list_mode，会被覆盖回滚'
+  );
 });
 
 test('index.html 设置页含模型清单模式选择器', () => {

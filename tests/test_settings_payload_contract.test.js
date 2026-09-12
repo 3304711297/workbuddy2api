@@ -35,7 +35,7 @@ test('AppConfig 字段全集可被提取（契约基线）', () => {
 
 test('settings.js 的 buildSettingsPayload 必须带全 AppConfig 全部字段（防整对象覆盖回滚）', () => {
   const fields = extractAppConfigFields();
-  const start = SETTINGS_JS.indexOf('const buildSettingsPayload = ()');
+  const start = SETTINGS_JS.indexOf('const buildSettingsPayload = (patch = {})');
   assert.ok(start > -1, '未找到 buildSettingsPayload');
   const block = SETTINGS_JS.slice(start, SETTINGS_JS.indexOf('};', start));
 
@@ -48,7 +48,7 @@ test('settings.js 的 buildSettingsPayload 必须带全 AppConfig 全部字段�
 });
 
 test('persistSettings 写盘前先读磁盘真源（防止陈旧缓存反向覆盖）', () => {
-  const start = SETTINGS_JS.indexOf('const persistSettings = async () =>');
+  const start = SETTINGS_JS.indexOf('const persistSettings = async (patch = {}) =>');
   assert.ok(start > -1, '未找到 persistSettings');
   // 按函数体边界切片（而非固定字符窗口）：函数体增长时固定窗口会把写入调用挤出，
   // 造成「契约成立却测试失败」的假警报。

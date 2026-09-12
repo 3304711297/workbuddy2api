@@ -488,6 +488,66 @@ pub async fn proxy_checkin_status(port: u16) -> Result<serde_json::Value, String
     resp.json().await.map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// 连通性测试探针（纯函数，便于单测；proxy_test_chat 调用）
+// ---------------------------------------------------------------------------
+
+/// 协议归一：chat（默认）| messages（Anthropic）| responses（Codex）
+fn test_chat_proto(protocol: Option<&str>) -> &'static str {
+    match protocol {
+        Some("messages") => "messages",
+        Some("responses") => "responses",
+        _ => "chat",
+    }
+}
+
+/// 各协议的探测 URL。chat 必须用完整路由 /v1/chat/completions——
+/// 内核只有这三个路由，/v1/chat 不存在（曾致 GUI 连通性测试 404 {"detail":"Not Found"}）。
+fn test_chat_url(port: u16, proto: &str) -> String {
+    let path = match proto {
+        "chat" => "chat/completions",
+        other => other,
+    };
+    format!("http://127.0.0.1:{port}/v1/{path}")
+}
+
+/// 各协议的探测请求体形态不同，但都在服务端被转换为同一 Chat 语义后再回译为对应协议：
+///   chat      -> OpenAI chat/completions
+///   messages  -> Anthropic Messages（max_tokens 必填）
+///   responses -> OpenAI Responses（input 数组）
+fn test_chat_payload(model: &str, proto: &str) -> serde_json::Value {
+    // 探测预算 512：glm-5.3-flash 等模型默认带 reasoning（实测约 60~120 token，
+    // 见 converter.log 22:26:31 finish=length tokens=119），100 预算会被思考吃满
+    // 导致正文为空，被误判为「未返回有效结果」。512 给正文留足空间，也让思考档
+    // 差异（低/中档）不会饿死正文。上游对 glm 的关闭信号不敏感（实测无效），
+    // 因此不加关思考参数伪装。
+    match proto {
+        "messages" => serde_json::json!({
+            "model": model,
+            "max_tokens": 512,
+            "messages": [
+                {"role": "user", "content": "Ping: 请仅回答 PONG"}
+            ],
+            "stream": true,
+        }),
+        "responses" => serde_json::json!({
+            "model": model,
+            "input": "Ping: 请仅回答 PONG",
+            "max_output_tokens": 512,
+            "stream": true,
+        }),
+        _ => serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "Ping: 请仅回答 PONG"}
+            ],
+            "max_tokens": 512,
+            "stream": true,
+            "chat_template_kwargs": {"enable_thinking": false}
+        }),
+    }
+}
+
 #[tauri::command]
 pub async fn proxy_test_chat(
     port: u16,
@@ -495,13 +555,8 @@ pub async fn proxy_test_chat(
     protocol: Option<String>,
 ) -> Result<TestChatResult, String> {
     let target_model = model.unwrap_or_else(|| "glm-5.3-flash".into());
-    // 协议归一：chat（默认）| messages（Anthropic）| responses（Codex）
-    let proto = match protocol.as_deref() {
-        Some("messages") => "messages",
-        Some("responses") => "responses",
-        _ => "chat",
-    };
-    let url = format!("http://127.0.0.1:{port}/v1/{proto}");
+    let proto = test_chat_proto(protocol.as_deref());
+    let url = test_chat_url(port, proto);
     let start = std::time::Instant::now();
 
     // 30s 总超时：reqwest 客户端级 timeout 覆盖「发起连接 → 响应体读取完毕」全过程，
@@ -509,35 +564,7 @@ pub async fn proxy_test_chat(
     // 同时绕过环境代理，避免本机请求被送去 3067 而受 Karing 节点状态牵连
     let client = super::shared::local_client(30);
 
-    // 各协议的请求体形态不同，但都在服务端被转换为同一 Chat 语义后再回译为对应协议：
-    //   chat      -> OpenAI chat/completions
-    //   messages  -> Anthropic Messages（max_tokens 必填）
-    //   responses -> OpenAI Responses（input 数组）
-    let payload = match proto {
-        "messages" => serde_json::json!({
-            "model": target_model,
-            "max_tokens": 100,
-            "messages": [
-                {"role": "user", "content": "Ping: 请仅回答 PONG"}
-            ],
-            "stream": true,
-        }),
-        "responses" => serde_json::json!({
-            "model": target_model,
-            "input": "Ping: 请仅回答 PONG",
-            "max_output_tokens": 100,
-            "stream": true,
-        }),
-        _ => serde_json::json!({
-            "model": target_model,
-            "messages": [
-                {"role": "user", "content": "Ping: 请仅回答 PONG"}
-            ],
-            "max_tokens": 100,
-            "stream": true,
-            "chat_template_kwargs": {"enable_thinking": false}
-        }),
-    };
+    let payload = test_chat_payload(&target_model, proto);
 
     let resp = match client.post(&url).json(&payload).send().await {
         Ok(r) => r,
@@ -1014,6 +1041,57 @@ pub fn usage_events(
         .collect();
     let q = UsageQuery { model, status, since_ms, page, page_size };
     Ok(query_usage_events(&records, &q))
+}
+
+#[cfg(test)]
+mod test_chat_probe_tests {
+    use super::*;
+
+    #[test]
+    fn chat_probe_url_uses_full_chat_completions_path() {
+        // 回归：chat 协议曾拼成 /v1/chat —— 内核无此路由，必 404 {"detail":"Not Found"}
+        assert_eq!(
+            test_chat_url(8787, "chat"),
+            "http://127.0.0.1:8787/v1/chat/completions"
+        );
+        assert_eq!(test_chat_url(8787, "messages"), "http://127.0.0.1:8787/v1/messages");
+        assert_eq!(test_chat_url(8787, "responses"), "http://127.0.0.1:8787/v1/responses");
+    }
+
+    #[test]
+    fn chat_probe_proto_normalization() {
+        assert_eq!(test_chat_proto(None), "chat");
+        assert_eq!(test_chat_proto(Some("chat")), "chat");
+        assert_eq!(test_chat_proto(Some("messages")), "messages");
+        assert_eq!(test_chat_proto(Some("responses")), "responses");
+        assert_eq!(test_chat_proto(Some("bogus")), "chat");
+    }
+
+    #[test]
+    fn chat_probe_payload_budget_leaves_room_for_reasoning() {
+        // glm-5.3-flash 等模型默认带 reasoning：100 token 预算会被思考吃满导致正文为空
+        // （converter.log 实测 22:26:31 finish=length tokens=119）。三协议探测统一给 512。
+        for proto in ["chat", "messages", "responses"] {
+            let p = test_chat_payload("glm-5.3-flash", proto);
+            let budget = match proto {
+                "responses" => p.get("max_output_tokens").and_then(|v| v.as_u64()),
+                _ => p.get("max_tokens").and_then(|v| v.as_u64()),
+            };
+            assert_eq!(budget, Some(512), "协议 {proto} 的探测预算应为 512");
+        }
+    }
+
+    #[test]
+    fn chat_probe_model_is_injected() {
+        assert_eq!(
+            test_chat_payload("my-model", "responses").get("model").and_then(|v| v.as_str()),
+            Some("my-model")
+        );
+        assert_eq!(
+            test_chat_payload("my-model", "chat").get("model").and_then(|v| v.as_str()),
+            Some("my-model")
+        );
+    }
 }
 
 #[cfg(test)]

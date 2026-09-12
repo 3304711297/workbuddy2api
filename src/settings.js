@@ -102,6 +102,12 @@ export function initSettings() {
   // ⚠️ 后端 save_app_settings 是「整对象覆盖写盘」，payload 缺字段会被 serde default 抹回默认值。
   // 因此任何新增的 AppConfig 字段都必须在此显式带上，否则用户改动会被静默回滚。
   // rotate_mode / rotate_count 由「账号与资产」页的调度策略卡负责写入，这里只做透传保留。
+  //
+  // dirty merge 模型（2026-09-12 评审修复）：persistSettings(patch) 的 patch 声明「本次
+  // 明确修改的字段」，在最终 payload 中最后展开（优先级最高）；磁盘真源只用于回填
+  // 「本次未修改」的字段。修复前 persistSettings 会把磁盘旧值无条件回灌 cache，
+  // 导致 LAN 开关 / log_level / log_payloads / model_list_mode 首次修改保存不生效、
+  // 「清空密钥」永远清不掉（空输入恰好满足回灌条件把旧 key 读回来）。
   let rotateModeCache = 'off';
   let rotateCountCache = 1;
   let modelListModeCache = 'all';
@@ -109,7 +115,7 @@ export function initSettings() {
   let logLevelCache = 'info';
   let logPayloadsCache = false;
   let listenHostCache = '127.0.0.1';
-  const buildSettingsPayload = () => {
+  const buildSettingsPayload = (patch = {}) => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
       close_action: currentClose,
@@ -124,30 +130,33 @@ export function initSettings() {
       api_key: apiKeyCache,
       log_level: logLevelCache,
       log_payloads: logPayloadsCache,
-      listen_host: listenHostCache
+      listen_host: listenHostCache,
+      // dirty 字段最后展开：显式声明的「本次修改」优先于磁盘回填与 cache
+      ...patch
     };
   };
 
-  const persistSettings = async () => {
+  const persistSettings = async (patch = {}) => {
     try {
-      // 写盘前先读一次磁盘真源，避免用陈旧的内存缓存覆盖别处刚写入的轮换配置
+      // 写盘前先读一次磁盘真源：只回填「本次未修改」的字段（dirty 字段绝不回灌，
+      // 否则用户刚改的值会被磁盘旧值覆盖——清空密钥 / LAN 开关曾因此失效）
       try {
         const latest = await invokeTauri('get_app_settings');
         if (latest) {
-          if (latest.rotate_mode) rotateModeCache = latest.rotate_mode;
-          if (latest.rotate_count) rotateCountCache = latest.rotate_count;
-          if (latest.model_list_mode) modelListModeCache = latest.model_list_mode;
-          if (latest.log_level) logLevelCache = latest.log_level;
-          if (typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
-          if (latest.listen_host) listenHostCache = latest.listen_host;
-          // 密钥以输入框当前值为准（用户可能刚改完就点保存），仅在未输入时回退磁盘值
+          if (!('rotate_mode' in patch) && latest.rotate_mode) rotateModeCache = latest.rotate_mode;
+          if (!('rotate_count' in patch) && latest.rotate_count) rotateCountCache = latest.rotate_count;
+          if (!('model_list_mode' in patch) && latest.model_list_mode) modelListModeCache = latest.model_list_mode;
+          if (!('log_level' in patch) && latest.log_level) logLevelCache = latest.log_level;
+          if (!('log_payloads' in patch) && typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
+          if (!('listen_host' in patch) && latest.listen_host) listenHostCache = latest.listen_host;
+          // 密钥：本次未修改且输入框为空时才回退磁盘值（用户可能刚改完就点保存）
           const apiKeyEl = document.getElementById('input-api-key');
-          if (apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
+          if (!('api_key' in patch) && apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
             apiKeyCache = latest.api_key;
           }
         }
       } catch { /* 读取失败则沿用上次已知值 */ }
-      await invokeTauri('save_app_settings', { settings: buildSettingsPayload() });
+      await invokeTauri('save_app_settings', { settings: buildSettingsPayload(patch) });
       return true;
     } catch (err) {
       showToast(`保存设置失败: ${err.message || err}`, 'error');
@@ -211,7 +220,7 @@ export function initSettings() {
   selectModelListMode?.addEventListener('change', async (e) => {
     const v = e.target.value === 'available' ? 'available' : 'all';
     modelListModeCache = v;
-    if (await persistSettings()) {
+    if (await persistSettings({ model_list_mode: v })) {
       showToast(v === 'available' ? '已切换为仅展示可用模型（Hermes 等客户端刷新模型列表后生效）' : '已切换为全量展示（含需授权模型标记）', 'success');
     }
   });
@@ -231,7 +240,7 @@ export function initSettings() {
     const key = genApiKey();
     if (inputApiKey) inputApiKey.value = key;
     apiKeyCache = key;
-    if (await persistSettings()) {
+    if (await persistSettings({ api_key: key })) {
       showToast(state.running ? '已生成并保存新密钥，重启内核后生效' : '已生成并保存新密钥', 'success');
     }
   });
@@ -253,7 +262,8 @@ export function initSettings() {
   document.getElementById('btn-clear-api-key')?.addEventListener('click', async () => {
     if (inputApiKey) inputApiKey.value = '';
     apiKeyCache = '';
-    if (await persistSettings()) {
+    // 显式声明空值：此前空输入会满足磁盘回灌条件把旧 key 读回来，清空永远不生效
+    if (await persistSettings({ api_key: '' })) {
       showToast(
         state.running
           ? '已清空密钥并保存，重启内核后恢复为不鉴权（仅建议回环监听时使用）'
@@ -266,7 +276,7 @@ export function initSettings() {
   // 手动编辑：只更新缓存，由用户点击「保存设置」链路之外的交互触发（失焦/回车即保存）
   inputApiKey?.addEventListener('change', async () => {
     apiKeyCache = (inputApiKey.value || '').trim();
-    if (await persistSettings()) {
+    if (await persistSettings({ api_key: (inputApiKey.value || '').trim() })) {
       showToast(state.running ? '密钥已保存，重启内核后生效' : '密钥已保存', 'success');
     }
   });
@@ -278,14 +288,14 @@ export function initSettings() {
   selectLogLevel?.addEventListener('change', async (e) => {
     const v = ['info', 'debug', 'trace'].includes(e.target.value) ? e.target.value : 'info';
     logLevelCache = v;
-    if (await persistSettings()) {
+    if (await persistSettings({ log_level: v })) {
       showToast(`日志级别已设为 ${v}${state.running ? '，重启内核后生效' : ''}`, 'success');
     }
   });
 
   chkLogPayloads?.addEventListener('change', async (e) => {
     logPayloadsCache = !!e.target.checked;
-    if (await persistSettings()) {
+    if (await persistSettings({ log_payloads: logPayloadsCache })) {
       if (logPayloadsCache) {
         // 明确警示：正文将以明文落盘
         showToast(
@@ -328,7 +338,7 @@ export function initSettings() {
     }
     listenHostCache = wantEnable ? '0.0.0.0' : '127.0.0.1';
     await syncLanAddressRow(wantEnable);
-    if (await persistSettings()) {
+    if (await persistSettings({ listen_host: listenHostCache })) {
       showToast(
         wantEnable
           ? `已允许局域网访问${state.running ? '，重启内核后生效' : ''}：请确保密钥已同步到各客户端`

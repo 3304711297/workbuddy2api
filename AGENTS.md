@@ -105,6 +105,13 @@ workbuddy2api.exe (GUI)
      没机会点）。已拆分为纯渲染的 `renderRotationPolicyUI()`（change 专用）与
      读盘的 `syncRotationPolicyCard()`（仅初始化/保存后回读用）。
      **改动交互控件时，先确认回调是纯渲染还是带副作用。**
+  3. **persistSettings 采用 dirty merge，磁盘回灌必须带 dirty 守卫**（2026-09-12 评审修复）：
+     `persistSettings(patch)` 的 patch 显式声明「本次修改的字段」，在 payload 末尾
+     `...patch` 展开（优先级最高）；`get_app_settings` 回读只用于回填**本次未修改**的
+     字段，且每条回灌必须带 `('<字段>' in patch)` 守卫。禁止任何形式的
+     「读盘 → 无条件回灌 cache → 写盘」——它会让 LAN 开关 / log_level / log_payloads /
+     model_list_mode 首次修改保存不生效、「清空密钥」永远清不掉（空输入恰好满足
+     回灌条件把旧 key 读回来）。锁定契约：`tests/test_settings_dirty_merge.test.js`。
 - **模型可用性感知（`model_availability.json` 三真源，改一处漏两处会静默不一致）**：
   「需授权」预标记有**三个同步维护的真源**：① `converter.py` 的 `GPT_FALLBACK_MAP`
   键（运行时降级判定 + 预标记）、② `billing.rs` 的 `GPT_PREMARKED`（控制台模型表）、

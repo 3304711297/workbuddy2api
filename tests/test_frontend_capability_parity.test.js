@@ -118,9 +118,9 @@ test('P3 连通性测试支持三种协议（前端入口 + 内核分发）', ()
     PROXY_RS.includes('protocol'),
     'proxy.rs 的 proxy_test_chat 未接收 protocol 参数'
   );
-  // 协议分发：三条路径由同一函数按 proto 动态拼装（/v1/{proto}）
+  // 协议分发：三条路径由同一函数按 proto 动态拼装（/v1/{path}，chat → chat/completions）
   assert.ok(
-    PROXY_RS.includes('/v1/{proto}'),
+    PROXY_RS.includes('/v1/{path}'),
     'proxy.rs 未按 proto 动态拼装端点路径'
   );
   assert.ok(
