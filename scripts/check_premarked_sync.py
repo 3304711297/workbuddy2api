@@ -69,6 +69,12 @@ def collect_problems(py_text: str, rs_text: str) -> list[str]:
 
 
 def main() -> int:
+    # Windows 管道 stdout 默认 cp1252（GitHub Actions runner 亦然），
+    # 打印 ✓/中文会 UnicodeEncodeError 崩溃退出——显式转 UTF-8 并以替换模式兜底。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
     problems = collect_problems(
         CONVERTER_PY.read_text(encoding="utf-8"),
         BILLING_RS.read_text(encoding="utf-8"),
