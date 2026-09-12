@@ -3110,6 +3110,12 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             yield b": ping\n\n"
                     collected, ttft_ms = await collect_task
         except httpx.HTTPError as e:
+            if rotator and attempt < max_attempts - 1:
+                failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
+                if failover:
+                    curr_uid, curr_headers = failover
+                    await _failover_jitter(rid)
+                    continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             _record_usage(actual_model, False, t0, error=f"upstream error: {e}",
                           retry_count=retry_count, retry_reason=retry_reason,
