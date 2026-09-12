@@ -68,6 +68,20 @@ except ImportError:
     chat_response_to_responses = None
 
 try:
+    from deepseek_thinking import inject_thinking, backfill_reasoning_content
+except ImportError:
+    def inject_thinking(body):
+        return body
+    def backfill_reasoning_content(body):
+        return body
+
+try:
+    from responses_projection import project_responses_chat_body
+except ImportError:
+    def project_responses_chat_body(body):
+        return body, {"mode": "none"}
+
+try:
     from request_pacer import RequestPacer
 except ImportError:
     RequestPacer = None
@@ -2137,6 +2151,10 @@ async def chat_completions(request: Request,
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
 
+    # DeepSeek 思维链开关注入与多轮 reasoning_content 一致性回填（防 11133 与思维链丢失）
+    body = inject_thinking(body)
+    body = backfill_reasoning_content(body)
+
     # 快速模式（Fast Mode / service_tier 支持）：仅 priority 与 fast 触发；auto 保持系统自动选择语义
     is_fast_mode = (
         (payload.get("service_tier") in ("priority", "fast"))
@@ -2376,6 +2394,10 @@ async def anthropic_messages(
 
     body["model"] = mapped_model
 
+    # DeepSeek 思维链开关注入与多轮 reasoning_content 一致性回填（防 11133 与思维链丢失）
+    body = inject_thinking(body)
+    body = backfill_reasoning_content(body)
+
     # 快速模式（Fast Mode / service_tier 支持）：仅 priority 与 fast 触发；auto 保持系统自动选择语义
     is_fast_mode = (
         (payload.get("service_tier") in ("priority", "fast"))
@@ -2579,6 +2601,12 @@ async def openai_responses(
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"invalid responses request: {e}", "type": "invalid_request_error"}})
 
+    # Codex CLI 长上下文最小语义闭包投影压缩（借鉴 ShouZhuo0413/codebuddy2api）
+    if CONFIG.get("optimize_context", True) and project_responses_chat_body:
+        chat_payload, proj_stats = project_responses_chat_body(chat_payload)
+        if proj_stats.get("aggressive"):
+            _log(f"✂️ [Codex投影压缩] 原消息 {proj_stats.get('original_messages')}条({proj_stats.get('original_message_chars')}字) → 投影后 {proj_stats.get('projected_messages')}条({proj_stats.get('projected_message_chars')}字), 剥离模板 {proj_stats.get('dropped_harness_messages')}条")
+
     client_wants_stream = bool(raw_body.get("stream", True))
     body = {k: chat_payload[k] for k in PASSTHROUGH_BODY_KEYS if k in chat_payload}
     body.setdefault("model", "auto")
@@ -2592,6 +2620,10 @@ async def openai_responses(
     model_name = raw_body.get("model", "auto")
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
+
+    # DeepSeek 思维链开关注入与多轮 reasoning_content 一致性回填（防 11133 与思维链丢失）
+    body = inject_thinking(body)
+    body = backfill_reasoning_content(body)
 
     rid = os.urandom(4).hex()
     _log(f"[{rid}] ▶ RESPONSES /v1/responses {model_name} | stream={client_wants_stream}")

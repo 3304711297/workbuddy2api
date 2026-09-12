@@ -25,9 +25,10 @@
 ## ✨ 核心特性
 
 - 🔄 **原生三协议网关支持 (Tri-Protocol Gateway)**：
-  - **OpenAI Responses 协议 (`POST /v1/responses`)**：采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机），原生支持 **Codex CLI**（wire_api="responses"）、OpenCode 等长上下文 Agent，支持流式语义事件与非流式响应。
+  - **OpenAI Responses 协议 (`POST /v1/responses`)**：采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机），原生支持 **Codex CLI**（wire_api="responses"）、OpenCode 等长上下文 Agent，支持流式语义事件与非流式响应；内建 **Codex 长上下文最小语义闭包投影压缩 (`responses_projection.py`)**，自动剥离 harness 模板、收敛工具 schema 与折叠早前历史，节约 60%~85% 显存/Token 并大幅规避内容审查误拦。
   - **Anthropic Messages 协议 (`POST /v1/messages`)**：采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机），原生直连驱动官方 **Claude Code CLI**、Cline、Roo Code 等工具，支持流式输出与函数调用（tool_use）。
   - **OpenAI 对话补全端点 (`POST /v1/chat/completions`, `GET /v1/models`)**：完整支持标准流式 SSE、原生 tools / tool_calls 函数调用，兼容各类 OpenAI SDK、IDE 插件与智能体。
+  - **DeepSeek 思维链开关注入与多轮一致性回填 (`deepseek_thinking.py`)**：自动对 DeepSeek 模型注入 `thinking: {"type": "enabled"}` 与 effort 档位，并在多轮对话中自动为 assistant 历史补齐 `reasoning_content: ""`，根除上游 `11133 model_param_invalid` 参数报错与思维链静默丢失。
 - 🖥️ **独立现代化桌面 GUI (Tauri v2 + 原生深色设计)**：提供直观的服务看板、端口设置、实时延迟测试与状态指示。
 - 🔑 **无需安装原版 WorkBuddy**：集成浏览器 OAuth 授权全自动轮询流程，直接扫码/验证码登录获取凭据。
 - 👥 **多账号管理与切换**：凭据统一持久化于本地数据库，支持一键切换活跃账号、手动刷新 Token 与账号删除。

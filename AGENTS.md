@@ -127,8 +127,10 @@ workbuddy2api.exe (GUI)
   是否符合 SSE 规范，不要反向去掉注释行。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
-- **OpenAI Responses 兼容层 (`POST /v1/responses`)**：
-  采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机）。支持 Codex CLI（`wire_api="responses"`）、OpenCode 等长上下文 Agent 原生直连。错误返回标准 OpenAI 格式。
+- **OpenAI Responses 兼容层 (`POST /v1/responses`) 与 Codex 投影压缩**：
+  采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机，`responses_projection.py` 最小语义闭包投影压缩）。支持 Codex CLI（`wire_api="responses"`）、OpenCode 等长上下文 Agent 原生直连；自动过滤 harness 模板与冗余 schema description，大幅削减 token 消耗。
+- **DeepSeek 思维链注入与历史一致性回填 (`deepseek_thinking.py`)**：
+  对 `deepseek*` 模型自动注入 `thinking: {"type": "enabled"}` 与 effort 档位（默认 high）；多轮对话检测到任一 assistant 含有 reasoning 时，自动为缺少该字段的 assistant 补齐 `reasoning_content: ""`，根除上游 `11133 model_param_invalid` 错误。
 - **按积分到期日分层选号（先烧快过期额度，借鉴 momo0410/workbuddy-switch-gateway）**：
   `AccountRotator` 内部调度由 `get_candidate_uids_tiered()` 驱动：从各账号 session/credit 提取有效到期日（兼容秒/毫秒/时间串），按日粒度（YYYY-MM-DD）分层分组。最早到期日的账号集合拥有最高调度优先级，同档内平均轮换，未标记到期日账号作为保底垫底。确保快过期额度被确定性优先消耗，杜绝资产过期浪费。
 - **并发削峰平滑器 (`request_pacer.py`)**：
