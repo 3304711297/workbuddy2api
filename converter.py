@@ -57,6 +57,17 @@ except ImportError:
     AnthropicStreamTranslator = None
 
 try:
+    from responses_compat import (
+        responses_request_to_chat,
+        ResponsesStreamConverter,
+        chat_response_to_responses,
+    )
+except ImportError:
+    responses_request_to_chat = None
+    ResponsesStreamConverter = None
+    chat_response_to_responses = None
+
+try:
     from request_pacer import RequestPacer
 except ImportError:
     RequestPacer = None
@@ -1227,7 +1238,7 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
-        if request.method in ("POST", "PUT") and request.url.path in ("/v1/chat/completions", "/v1/messages"):
+        if request.method in ("POST", "PUT") and request.url.path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
             cl_header = request.headers.get("content-length")
             if cl_header:
                 try:
@@ -1676,6 +1687,36 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             _ACCOUNT_COOLDOWNS[(curr_uid, model)] = dict(entry)
 
 
+def _parse_expiry_timestamp(v: Any) -> int:
+    """解析资产到期时间，兼容 epoch 秒、毫秒与常见时间字符串（参考 momo0410/workbuddy-switch-gateway）。"""
+    if v is None:
+        return 0
+    if isinstance(v, (int, float)):
+        val = int(v)
+        if val <= 0:
+            return 0
+        if val > 1_000_000_000_000:
+            return val // 1000
+        return val
+    s = str(v).strip()
+    if not s:
+        return 0
+    try:
+        val = int(s)
+        if val > 1_000_000_000_000:
+            return val // 1000
+        return val
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.datetime.strptime(s.split(".")[0], fmt)
+            return int(dt.timestamp())
+        except Exception:
+            continue
+    return 0
+
+
 class AccountRotator:
     """多账号凭证调度引擎。
     支持三种轮换模式：
@@ -1712,6 +1753,47 @@ class AccountRotator:
         ready = [uid for uid, _ in all_accs if not _is_account_cooldown(uid, model)]
         return ready
 
+    def get_account_expire_at(self, uid: str) -> int:
+        """获取指定账号资产的最早到期时间（Unix 秒），0 表示未知。"""
+        for u, session in self.get_all_accounts():
+            if u == uid and isinstance(session, dict):
+                credit = session.get("credit") or {}
+                if isinstance(credit, dict):
+                    for k in ("soonest_expire_at", "expire_at", "soonestExpireAt", "expireAt"):
+                        if k in credit:
+                            ts = _parse_expiry_timestamp(credit[k])
+                            if ts > 0:
+                                return ts
+                for k in ("soonest_expire_at", "expire_at"):
+                    if k in session:
+                        ts = _parse_expiry_timestamp(session[k])
+                        if ts > 0:
+                            return ts
+        return 0
+
+    def get_candidate_uids_tiered(self, model: str) -> list[str]:
+        """两级候选筛选（借鉴 momo0410/workbuddy-switch-gateway）：
+        1. 到期分层：优先消耗最快过期的额度（日粒度 YYYY-MM-DD），避免资产过期作废；
+        2. 未知到期日：作为兜底档排在最后。
+        """
+        ready = self.get_candidate_uids(model)
+        if len(ready) <= 1:
+            return ready
+
+        now = int(time.time())
+        items = []
+        for uid in ready:
+            exp = self.get_account_expire_at(uid)
+            if exp > now:
+                day_key = time.strftime("%Y-%m-%d", time.localtime(exp))
+                items.append((uid, exp, day_key))
+            else:
+                items.append((uid, 0, "9999-99-99"))
+
+        # 按到期日升序排序（最先过期的排最前面）
+        items.sort(key=lambda x: (x[2], x[1]))
+        return [uid for uid, _, _ in items]
+
     def get_retry_budget(self, model: str) -> int:
         if self.mode not in ("failover", "roundrobin"):
             return 1
@@ -1732,7 +1814,7 @@ class AccountRotator:
             if len(all_accs) <= 1:
                 return active_uid, self.cred_mgr.get_headers()
 
-            candidates = self.get_candidate_uids(model)
+            candidates = self.get_candidate_uids_tiered(model)
             if not candidates:
                 return active_uid, self.cred_mgr.get_headers()
 
@@ -1788,7 +1870,7 @@ class AccountRotator:
             if len(all_accs) <= 1:
                 return None
 
-            candidates = [u for u in self.get_candidate_uids(model) if u != current_uid]
+            candidates = [u for u in self.get_candidate_uids_tiered(model) if u != current_uid]
             if not candidates:
                 _log(f"⚠️ [多账号调度] 账号 {current_uid[:8] if current_uid else '当前'}... 触发限流，但无其他可用就绪账号（模型 {model} 全池冷却）")
                 return None
@@ -2460,6 +2542,160 @@ async def anthropic_messages(
         resp_headers["X-Requested-Model"] = model_name
         resp_headers["X-Fallback-Reason"] = fallback_reason or "11102 unauthorized"
     return JSONResponse(content=anthropic_resp, headers=resp_headers or None)
+
+
+@app.post("/v1/responses")
+async def openai_responses(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key"),
+):
+    """OpenAI Responses API 协议端点（原生支持 Codex CLI 等 Agent）。"""
+    _check_auth(authorization, x_api_key)
+    cred = _cred()
+
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": {
+                    "message": f"request body size ({len(body_bytes)} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
+                    "type": "invalid_request_error",
+                    "code": "request_body_too_large",
+                }
+            },
+        )
+    try:
+        raw_body = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+
+    if responses_request_to_chat is None or ResponsesStreamConverter is None:
+        raise HTTPException(status_code=500, detail={"error": {"message": "responses_compat module not available", "type": "api_error"}})
+
+    try:
+        chat_payload = responses_request_to_chat(raw_body)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"invalid responses request: {e}", "type": "invalid_request_error"}})
+
+    client_wants_stream = bool(raw_body.get("stream", True))
+    body = {k: chat_payload[k] for k in PASSTHROUGH_BODY_KEYS if k in chat_payload}
+    body.setdefault("model", "auto")
+    body["stream"] = True
+    if "stream_options" not in body:
+        body["stream_options"] = {"include_usage": True}
+
+    if CONFIG.get("desensitize"):
+        body = desensitize_body(body, roles=("system", "assistant"))
+
+    model_name = raw_body.get("model", "auto")
+    mapped_model = MODEL_MAP.get(model_name, model_name)
+    body["model"] = mapped_model
+
+    rid = os.urandom(4).hex()
+    _log(f"[{rid}] ▶ RESPONSES /v1/responses {model_name} | stream={client_wants_stream}")
+
+    rotator = _get_rotator()
+    uid, headers = rotator.select_account(model_name) if rotator else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+
+    url = f"{BACKEND}/v2/chat/completions"
+    t0 = time.time()
+
+    pacer_ctx = _REQUEST_PACER.acquire(model_name) if _REQUEST_PACER else None
+
+    if client_wants_stream:
+        async def _responses_stream_generator():
+            try:
+                if pacer_ctx:
+                    await pacer_ctx.__aenter__()
+                converter_inst = ResponsesStreamConverter(model=mapped_model)
+                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
+                    try:
+                        text = chunk.decode("utf-8", errors="replace")
+                        for line in text.split("\n"):
+                            line_s = line.strip()
+                            if not line_s or not line_s.startswith("data:"):
+                                continue
+                            data_part = line_s[5:].strip()
+                            if data_part == "[DONE]":
+                                continue
+                            try:
+                                chunk_json = json.loads(data_part)
+                                res_sse = converter_inst.feed_chunk(chunk_json)
+                                if res_sse:
+                                    yield res_sse.encode("utf-8")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                finish_sse = converter_inst.finish()
+                if finish_sse:
+                    yield finish_sse.encode("utf-8")
+            finally:
+                if pacer_ctx:
+                    await pacer_ctx.__aexit__(None, None, None)
+
+        return StreamingResponse(_responses_stream_generator(), media_type="text/event-stream")
+
+    retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
+    max_attempts = retry_budget + 1
+    fallback_tried = False
+    actual_model = body["model"]
+    fallback_reason = None
+    collected = None
+    ttft_ms = None
+
+    for attempt in range(max_attempts):
+        try:
+            async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
+                async with httpx.AsyncClient(timeout=300) as c:
+                    async with c.stream("POST", url, headers=headers, json=body) as r:
+                        if r.status_code != 200:
+                            raw = await r.aread()
+                            err_str = raw.decode("utf-8", "replace")
+                            _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
+                            _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
+                            if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
+                                fallback_tried = True
+                                fb = GPT_FALLBACK_MAP[body["model"]]
+                                fallback_reason = "11102 unauthorized"
+                                actual_model = fb
+                                _mark_model_unavailable(body["model"], uid=uid)
+                                _record_fallback_event(model_name, actual_model, fallback_reason)
+                                body["model"] = fb
+                                continue
+                            if attempt < max_attempts - 1 and rotator:
+                                failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
+                                if failover:
+                                    uid, headers = failover
+                                    await _failover_jitter(rid)
+                                    continue
+                            raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
+                        collected, ttft_ms = await _collect_stream(r, t0)
+                        break
+        except HTTPException as e:
+            if attempt >= max_attempts - 1:
+                _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
+                raise
+        except httpx.HTTPError as e:
+            if attempt < max_attempts - 1 and rotator:
+                failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
+                if failover:
+                    uid, headers = failover
+                    await _failover_jitter(rid)
+                    continue
+            _record_usage(actual_model, False, t0, error=f"upstream error: {e}", requested_model=model_name, fallback_reason=fallback_reason)
+            raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "api_error"}})
+
+    _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
+    if fallback_reason is None:
+        _mark_model_available(body["model"], uid=uid)
+    _u = collected.get("usage") or {}
+    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason)
+
+    responses_obj = chat_response_to_responses(collected, model=model_name)
+    return JSONResponse(content=responses_obj)
 
 
 def _last_user_text(messages: list) -> str:
