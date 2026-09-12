@@ -136,9 +136,14 @@ pub fn proxy_start(
     // 模型清单模式：内核每次 /v1/models 请求热读 settings.json，这里透传仅作启动兜底
     let list_mode = if cfg.model_list_mode.is_empty() { "all".to_string() } else { cfg.model_list_mode.clone() };
     cmd.arg("--model-list-mode").arg(&list_mode);
-    // 客户端鉴权：密钥非空时追加（空值不下发，见上方守卫）
+    // 客户端鉴权：密钥非空时通过环境变量注入（非空守卫见上方）
+    // ⚠️ 刻意不走 `cmd.arg("--api-key").arg(&api_key)`：密钥一旦进入子进程 argv，
+    // 本机任意有足够权限的进程都能从任务管理器 / wmic / WMI Win32_Process.CommandLine
+    // 读到明文（settings.json 已是明文，不该再开第二处暴露面）。
+    // 内核 argparse 的 --api-key 默认值本就取自 _env_compat("KEY", "")
+    // （即 WORKBUDDY2API_KEY / 旧名 CODEBUDDY2OPENAI_KEY），故内核零改动即可生效。
     if !api_key.is_empty() {
-        cmd.arg("--api-key").arg(&api_key);
+        cmd.env("WORKBUDDY2API_KEY", &api_key);
     }
     // 用量统计：每次聊天请求完成后由 converter 向该文件追加一行 JSONL，供 usage_summary 聚合
     let usage_dir = local_app_dir().join("usage");

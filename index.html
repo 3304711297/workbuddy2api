@@ -670,15 +670,19 @@ print(response.choices[0].message.content)</code></pre>
             <div class="divider"></div>
 
             <!-- 局域网访问（对标 EasyCLIProxyAPI 的 get_lan_ipv4 / 网络设置） -->
+            <!-- ⚠️ 文案刻意不写「仅局域网」：实现是 --host 0.0.0.0，即绑定**所有网卡**
+                 （Wi-Fi / 有线 / VPN / 虚拟网卡），不止「同一 Wi-Fi」。 -->
             <div class="form-group" id="lan-access-field">
               <label class="switch-label">
                 <input id="chk-lan-access" type="checkbox" />
                 <span class="switch-slider"></span>
-                <span class="switch-text">允许局域网内其它设备访问（--host 0.0.0.0）</span>
+                <span class="switch-text">允许其它设备访问（监听所有网卡，含局域网 / VPN / 虚拟网卡）</span>
               </label>
               <p class="muted field-hint" style="margin-top: 6px;">
-                ⚠️ <b>安全风险</b>：开启后同一网络（Wi-Fi / 办公室局域网）内的任何设备都能连接本服务，
-                并使用你的账号额度。因此<b>必须同时配置上方的客户端鉴权密钥</b>，否则内核会拒绝启动。
+                ⚠️ <b>安全风险</b>：开启后服务监听 <code class="mono">0.0.0.0</code>，即<b>本机所有网卡</b>——
+                不仅是同一 Wi-Fi 下的设备，<b>VPN 隧道对端、虚拟网卡（Hyper-V / VMware / WSL / Docker）</b>
+                所在网络内的设备也都能连接本服务并消耗你的账号额度。
+                因此<b>必须同时配置上方的客户端鉴权密钥</b>，否则内核会拒绝启动。
                 仅建议在受信任的私有网络短时开启。
               </p>
               <p class="muted field-hint" id="lan-address" style="display: none;">

@@ -234,6 +234,14 @@ workbuddy2api.exe (GUI)
   密钥生成必须用 CSPRNG（`crypto.getRandomValues`），禁止 `Math.random()`（可预测，等于没鉴权）。
   前端两处 `save_app_settings` 写入点都是**整对象覆盖写盘**：`settings.js` 的 `buildSettingsPayload` 必须显式带上 `api_key`，否则会被 serde default 抹成空串（`accounts.js` 用展开式浅合并，天然安全）。
   该字段不受热读机制覆盖——密钥在启动时以 CLI 参数注入，改后必须重启内核。
+  **密钥注入方式（2026-09-12 P2，改动必读）**：禁止用
+  `cmd.arg("--api-key").arg(&api_key)` 传参——密钥进入子进程 argv 后，本机任意
+  有足够权限的进程都能从任务管理器 / wmic / WMI `Win32_Process.CommandLine`
+  读到明文（settings.json 已是明文，不该再开第二处暴露面）。
+  正确做法：`cmd.env("WORKBUDDY2API_KEY", &api_key)` 注入子进程环境——
+  内核 argparse 的 `--api-key` 默认值本就取自 `_env_compat("KEY", "")`，内核零改动。
+  契约锁定：`tests/test_secret_injection.test.js`（会剥离注释后断言代码里
+  不得再出现 `"--api-key"` 传参）。
 - **结构化日志透传（AppConfig.log_level / log_payloads）**：
   不传 `--log` 时内核 `_log()` 因 `log_path` 为空**直接丢弃**全部结构化行（请求摘要/耗时/错误详情），日志页只能看到 uvicorn 原始 stdout——所以 `proxy_start` 必须显式传 `--log` 指向 `converter.log`。
   `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
@@ -241,6 +249,12 @@ workbuddy2api.exe (GUI)
   日志文件写入前需保证目录存在；新增 `--log-level` 取值仅 info/debug/trace，非法值归一到 info。
 - **局域网访问（AppConfig.listen_host + lan_ipv4 命令）**：
   `listen_host` 默认必须是 `127.0.0.1`（安全默认，任何情况下不得默认 `0.0.0.0`）。
+  **语义准确性（2026-09-12 P2）**：开关实际下发 `0.0.0.0` = 绑定**所有网卡**
+  （Wi-Fi / 有线 / VPN / 虚拟网卡），**不是**「仅局域网」。UI 文案必须如实写成
+  「监听所有网卡（含局域网 / VPN / 虚拟网卡）」并点出 VPN 与虚拟网卡暴露面，
+  不得简化成「允许局域网内其它设备访问」——那会让用户低估暴露范围。
+  （未做「让用户选择具体 LAN IP」的产品级增强，属后续可选项。）
+  契约锁定：`tests/test_lan_semantics.test.js`。
   `proxy_start` 在**非回环 + 密钥为空**时必须 `return Err` 拒绝启动并给出可操作提示——内核也会 exit 1，但用户看到的是「内核启动后立刻退出」而无从判断原因。刻意**不**提供 `--unsafe-expose` 放行开关：GUI 不应鼓励无鉴权暴露。
   `lan_ipv4` 用 UDP `connect` 查路由表选出默认出口网卡（不发包、不依赖外网连通性），失败返回 `None` 由前端降级；不要改用需要联网请求的方案。
   前端开关在无密钥时须拦截并引导先生成密钥（与内核判定一致），`buildSettingsPayload` 必须带上 `listen_host`。
