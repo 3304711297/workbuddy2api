@@ -232,6 +232,11 @@ workbuddy2api.exe (GUI)
   `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
   `--log-payloads` 会把完整 Prompt/响应正文以**明文**落盘：默认关闭、UI 必须警示，且内核侧有「payload 开关 + trace 级」双闸门（`_log_payload`），前端不要试图绕过。
   日志文件写入前需保证目录存在；新增 `--log-level` 取值仅 info/debug/trace，非法值归一到 info。
+- **局域网访问（AppConfig.listen_host + lan_ipv4 命令）**：
+  `listen_host` 默认必须是 `127.0.0.1`（安全默认，任何情况下不得默认 `0.0.0.0`）。
+  `proxy_start` 在**非回环 + 密钥为空**时必须 `return Err` 拒绝启动并给出可操作提示——内核也会 exit 1，但用户看到的是「内核启动后立刻退出」而无从判断原因。刻意**不**提供 `--unsafe-expose` 放行开关：GUI 不应鼓励无鉴权暴露。
+  `lan_ipv4` 用 UDP `connect` 查路由表选出默认出口网卡（不发包、不依赖外网连通性），失败返回 `None` 由前端降级；不要改用需要联网请求的方案。
+  前端开关在无密钥时须拦截并引导先生成密钥（与内核判定一致），`buildSettingsPayload` 必须带上 `listen_host`。
 - **凭证轮换（P1，**已交付** 2026-09-11，见上方「多账号调度」条目）**：
   多账号就位后按既定要点实施完毕（`AccountRotator` + GUI 策略卡）。
   token 续期由 `converter.py` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /
