@@ -620,6 +620,29 @@ print(response.choices[0].message.content)</code></pre>
 
             <div class="divider"></div>
 
+            <!-- 客户端鉴权密钥（对标 EasyCLIProxyAPI 的 ApiAccessPage） -->
+            <div class="form-group" id="api-key-field">
+              <label class="field-label">客户端鉴权密钥（可选）</label>
+              <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
+                <input id="input-api-key" class="input mono" type="text" placeholder="留空 = 不鉴权（仅建议回环监听时）"
+                       style="flex: 1; min-width: 260px;" autocomplete="off" spellcheck="false" />
+                <button id="btn-gen-api-key" class="btn btn-secondary btn-sm" title="生成 32 位随机密钥（CSPRNG）">生成</button>
+                <button id="btn-copy-api-key" class="btn btn-secondary btn-sm">复制</button>
+                <button id="btn-clear-api-key" class="btn btn-secondary btn-sm">清空</button>
+              </div>
+              <p class="muted field-hint" style="margin-top: 6px;">
+                设置后，所有客户端（Claude Code / Codex CLI / Hermes 等）必须携带
+                <code class="mono">Authorization: Bearer &lt;密钥&gt;</code> 或 <code class="mono">x-api-key: &lt;密钥&gt;</code>，
+                否则返回 <code class="mono">401 invalid api key</code>。
+              </p>
+              <p class="muted field-hint">
+                ⚠️ <b>修改后需重启内核生效</b>（密钥在启动时以 <code class="mono">--api-key</code> 传入，不热加载）。
+                若将来监听非回环地址（<code class="mono">0.0.0.0</code>）暴露给局域网，<b>必须</b>设置密钥，否则服务处于无鉴权暴露状态。
+              </p>
+            </div>
+
+            <div class="divider"></div>
+
             <!-- 高级运行时开关（不在 AppConfig 中，需环境变量 + 重启内核） -->
             <div class="form-group" id="runtime-advanced-hint">
               <label class="field-label">高级运行时开关（环境变量配置）</label>

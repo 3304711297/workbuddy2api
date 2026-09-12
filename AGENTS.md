@@ -221,6 +221,12 @@ workbuddy2api.exe (GUI)
   `usage_events(model, status, since_ms, page, page_size)` 契约：筛选在 Rust 侧完成（`filter_usage_records`），**最新在前**排序后再分页；`analysis.models` 基于**过滤后全集**计算（不受分页影响），否则分组统计与筛选口径会自相矛盾。
   分页默认 50/页；`page`/`page_size` 为 0 时按 1 处理，越界页返回空列表但 `total`/`total_pages` 如实上报（前端据此禁用按钮）；空输入时 `total_pages` 仍为 1，避免前端除零。
   前端 `usage.js` 明细与汇总各自持有独立请求序号（`_usageRequestSeq` / `_usageEventsSeq`）——共用一个会让两个并行请求互相丢弃。
+- **客户端鉴权密钥（AppConfig.api_key，对标 EasyCLIProxyAPI ApiAccessPage）**：
+  `AppConfig.api_key` 带 `#[serde(default)]`（旧 settings.json 缺字段必须仍能反序列化，否则启动即崩）。
+  `proxy_start` 仅在**密钥非空**时追加 `--api-key`：内核 `_check_auth` 对空 key 直接放行，但传空串会开启校验却无有效密钥，导致全部客户端 401。
+  密钥生成必须用 CSPRNG（`crypto.getRandomValues`），禁止 `Math.random()`（可预测，等于没鉴权）。
+  前端两处 `save_app_settings` 写入点都是**整对象覆盖写盘**：`settings.js` 的 `buildSettingsPayload` 必须显式带上 `api_key`，否则会被 serde default 抹成空串（`accounts.js` 用展开式浅合并，天然安全）。
+  该字段不受热读机制覆盖——密钥在启动时以 CLI 参数注入，改后必须重启内核。
 - **凭证轮换（P1，**已交付** 2026-09-11，见上方「多账号调度」条目）**：
   多账号就位后按既定要点实施完毕（`AccountRotator` + GUI 策略卡）。
   token 续期由 `converter.py` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /

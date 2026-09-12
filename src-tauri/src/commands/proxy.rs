@@ -120,6 +120,12 @@ pub fn proxy_start(
     // 模型清单模式：内核每次 /v1/models 请求热读 settings.json，这里透传仅作启动兜底
     let list_mode = if cfg.model_list_mode.is_empty() { "all".to_string() } else { cfg.model_list_mode.clone() };
     cmd.arg("--model-list-mode").arg(&list_mode);
+    // 客户端鉴权：仅在密钥非空时追加——传空串会让内核开启校验却没有有效密钥可校验，
+    // 导致所有客户端请求被 401 拒绝（回环监听下内核默认不校验，故空值应完全不下发）
+    let api_key = cfg.api_key.trim();
+    if !api_key.is_empty() {
+        cmd.arg("--api-key").arg(api_key);
+    }
     // 用量统计：每次聊天请求完成后由 converter 向该文件追加一行 JSONL，供 usage_summary 聚合
     let usage_dir = local_app_dir().join("usage");
     let _ = std::fs::create_dir_all(&usage_dir);

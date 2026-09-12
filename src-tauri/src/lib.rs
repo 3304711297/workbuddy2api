@@ -50,6 +50,10 @@ pub struct AppConfig {
     /// /v1/models 清单模式：all（全量带可用性标记）| available（剔除不可用）；默认 all 兼容旧版
     #[serde(default = "default_model_list_mode")]
     pub model_list_mode: String,
+    /// 客户端鉴权密钥（可选）：非空时内核要求所有请求携带 Bearer/x-api-key；
+    /// serde default 保证旧 settings.json 缺字段时反序列化兼容（空串 = 不鉴权，回环默认）
+    #[serde(default)]
+    pub api_key: String,
 }
 
 fn default_proxy_port() -> u16 {
@@ -83,6 +87,7 @@ impl Default for AppConfig {
             rotate_mode: default_rotate_mode(),
             rotate_count: default_rotate_count(),
             model_list_mode: default_model_list_mode(),
+            api_key: String::new(), // 默认不鉴权（回环监听场景）
         }
     }
 }

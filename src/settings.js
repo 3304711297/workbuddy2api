@@ -105,6 +105,7 @@ export function initSettings() {
   let rotateModeCache = 'off';
   let rotateCountCache = 1;
   let modelListModeCache = 'all';
+  let apiKeyCache = '';
   const buildSettingsPayload = () => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
@@ -115,7 +116,9 @@ export function initSettings() {
       desensitize: state.desensitize,
       rotate_mode: rotateModeCache,
       rotate_count: rotateCountCache,
-      model_list_mode: modelListModeCache
+      model_list_mode: modelListModeCache,
+      // 客户端鉴权密钥：留空即不鉴权；每次保存都带上，避免被整对象覆盖写盘抹除
+      api_key: apiKeyCache
     };
   };
 
@@ -128,6 +131,11 @@ export function initSettings() {
           if (latest.rotate_mode) rotateModeCache = latest.rotate_mode;
           if (latest.rotate_count) rotateCountCache = latest.rotate_count;
           if (latest.model_list_mode) modelListModeCache = latest.model_list_mode;
+          // 密钥以输入框当前值为准（用户可能刚改完就点保存），仅在未输入时回退磁盘值
+          const apiKeyEl = document.getElementById('input-api-key');
+          if (apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
+            apiKeyCache = latest.api_key;
+          }
         }
       } catch { /* 读取失败则沿用上次已知值 */ }
       await invokeTauri('save_app_settings', { settings: buildSettingsPayload() });
@@ -199,6 +207,61 @@ export function initSettings() {
     }
   });
 
+  // —— 客户端鉴权密钥（对标 EasyCLIProxyAPI ApiAccessPage） ——
+  const inputApiKey = document.getElementById('input-api-key');
+
+  // 生成 32 位十六进制随机密钥：必须用 CSPRNG（crypto.getRandomValues），
+  // Math.random() 可预测，绝不能用于凭据生成。
+  const genApiKey = () => {
+    const buf = new Uint8Array(16);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  document.getElementById('btn-gen-api-key')?.addEventListener('click', async () => {
+    const key = genApiKey();
+    if (inputApiKey) inputApiKey.value = key;
+    apiKeyCache = key;
+    if (await persistSettings()) {
+      showToast(state.running ? '已生成并保存新密钥，重启内核后生效' : '已生成并保存新密钥', 'success');
+    }
+  });
+
+  document.getElementById('btn-copy-api-key')?.addEventListener('click', async () => {
+    const val = (inputApiKey?.value || '').trim();
+    if (!val) {
+      showToast('当前未设置密钥，无需复制', 'info');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(val);
+      showToast('密钥已复制到剪贴板', 'success');
+    } catch (e) {
+      showToast('复制失败，请手动选择文本复制', 'error');
+    }
+  });
+
+  document.getElementById('btn-clear-api-key')?.addEventListener('click', async () => {
+    if (inputApiKey) inputApiKey.value = '';
+    apiKeyCache = '';
+    if (await persistSettings()) {
+      showToast(
+        state.running
+          ? '已清空密钥并保存，重启内核后恢复为不鉴权（仅建议回环监听时使用）'
+          : '已清空密钥（不鉴权，仅建议回环监听时使用）',
+        'info'
+      );
+    }
+  });
+
+  // 手动编辑：只更新缓存，由用户点击「保存设置」链路之外的交互触发（失焦/回车即保存）
+  inputApiKey?.addEventListener('change', async () => {
+    apiKeyCache = (inputApiKey.value || '').trim();
+    if (await persistSettings()) {
+      showToast(state.running ? '密钥已保存，重启内核后生效' : '密钥已保存', 'success');
+    }
+  });
+
   // 读取后端配置（放最后：先绑定监听，异步返回后不覆盖用户已手动改动的值）
   (async () => {
     try {
@@ -232,6 +295,11 @@ export function initSettings() {
         if (selectModelListMode) {
           selectModelListMode.value = cfg.model_list_mode === 'available' ? 'available' : 'all';
           modelListModeCache = selectModelListMode.value;
+        }
+        // 客户端鉴权密钥回读：null/undefined 都归一到空串
+        if (inputApiKey) {
+          apiKeyCache = typeof cfg.api_key === 'string' ? cfg.api_key : '';
+          inputApiKey.value = apiKeyCache;
         }
         // 自动拉起：应用启动时按持久化设置执行一次（托盘隐藏重开不触发——前端只加载一次；
         // proxy_start 本身幂等，与首次 checkHealth 的竞态由 800ms 延迟 + state.running 守卫兜底）
