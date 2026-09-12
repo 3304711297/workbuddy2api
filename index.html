@@ -718,6 +718,71 @@ print(response.choices[0].message.content)</code></pre>
             </div>
             <div id="usage-chart-axis" class="usage-chart-axis mono"></div>
           </div>
+
+          <!-- 请求明细下钻（对标 EasyCLIProxyAPI 的 UsageRecordsPage 事件 Tab） -->
+          <div class="card" style="margin-top: 16px;">
+            <div class="card-header-flex">
+              <h3 class="card-title">请求明细</h3>
+              <span class="muted" style="font-size: 12px;">逐条记录 · 含失败原因与降级链路</span>
+            </div>
+            <div class="usage-filters" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0;">
+              <input id="usage-events-model" class="input mono" type="text" placeholder="按模型筛选（子串，如 terra）"
+                     style="font-size: 12px; padding: 4px 8px; max-width: 240px;" />
+              <select id="select-usage-status" class="input mono" style="font-size: 12px; padding: 4px 8px;" title="按请求结果筛选">
+                <option value="">全部结果</option>
+                <option value="ok">仅成功</option>
+                <option value="failed">仅失败</option>
+              </select>
+              <span class="muted mono" id="usage-events-range-hint" style="font-size: 11px;">时间范围随上方选择器</span>
+              <button id="btn-usage-events-reset" class="btn btn-secondary btn-sm">重置</button>
+            </div>
+            <div class="card" style="padding: 0; overflow-x: auto; margin-top: 10px;">
+              <table class="data-table usage-events-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>模型</th>
+                    <th>结果</th>
+                    <th>Tokens</th>
+                    <th>时延</th>
+                    <th>详情</th>
+                  </tr>
+                </thead>
+                <tbody id="usage-events-body">
+                  <tr><td colspan="6" class="muted" style="text-align: center;">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="usage-pager" style="display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 10px;">
+              <button id="usage-page-prev" class="btn btn-secondary btn-sm">上一页</button>
+              <span id="usage-page-info" class="muted mono" style="font-size: 12px;">— / —</span>
+              <button id="usage-page-next" class="btn btn-secondary btn-sm">下一页</button>
+            </div>
+          </div>
+
+          <!-- 按模型分布（对标 EasyCLIProxyAPI 的 UsageAnalysis） -->
+          <div class="card" style="margin-top: 16px;">
+            <div class="card-header-flex">
+              <h3 class="card-title">按模型分布</h3>
+              <span class="muted" style="font-size: 12px;">随上方筛选同步</span>
+            </div>
+            <div class="card" style="padding: 0; overflow-x: auto; margin-top: 10px;">
+              <table class="data-table usage-models-table">
+                <thead>
+                  <tr>
+                    <th>模型</th>
+                    <th>请求</th>
+                    <th>成功 / 失败</th>
+                    <th>Tokens（入 / 出）</th>
+                    <th>平均时延</th>
+                  </tr>
+                </thead>
+                <tbody id="usage-models-body">
+                  <tr><td colspan="5" class="muted" style="text-align: center;">暂无数据</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </section>
 
       </div>

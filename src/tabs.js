@@ -10,7 +10,7 @@ import { loadAccountsData } from './accounts.js';
 import { loadAgentsStatus } from './agents.js';
 import { loadModelsMatrix } from './models.js';
 import { loadLogs } from './logs.js';
-import { loadUsageData } from './usage.js';
+import { loadUsageData, loadUsageEvents } from './usage.js';
 
 export function initTabs() {
   const navItems = document.querySelectorAll('.nav-item');
@@ -49,7 +49,7 @@ export function initTabs() {
       if (tab === 'dashboard') checkHealth();
       if (tab === 'models') loadModelsMatrix();
       if (tab === 'logs') loadLogs();
-      if (tab === 'usage') loadUsageData();
+      if (tab === 'usage') { loadUsageData(); loadUsageEvents(1); }
     });
   });
 

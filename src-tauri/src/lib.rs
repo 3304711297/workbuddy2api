@@ -516,6 +516,7 @@ pub fn run_app() {
             commands::open_logs_dir,
             // 用量统计聚合与版本更新检查（前端 invoke）
             commands::usage_summary,
+            commands::usage_events,
             commands::check_app_update
         ])
         .run(tauri::generate_context!())

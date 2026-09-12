@@ -594,11 +594,13 @@ fn usage_log_path() -> PathBuf {
 }
 
 /// 单行用量记录（与 converter.py `_record_usage` 的 JSONL 字段一一对应）
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default, Clone)]
 struct UsageRecord {
     ts: i64,
     #[serde(default)]
     ok: bool,
+    #[serde(default)]
+    model: String,
     #[serde(default)]
     input_tokens: Option<i64>,
     #[serde(default)]
@@ -607,6 +609,176 @@ struct UsageRecord {
     latency_ms: i64,
     #[serde(default)]
     ttft_ms: Option<i64>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    retry_count: i64,
+    #[serde(default)]
+    retry_reason: Option<String>,
+    #[serde(default)]
+    requested_model: Option<String>,
+    #[serde(default)]
+    actual_model: Option<String>,
+    #[serde(default)]
+    fallback_reason: Option<String>,
+}
+
+/// 用量明细查询入参（缺省字段即不过滤；page 从 1 起）
+#[derive(Debug, Default, Deserialize)]
+struct UsageQuery {
+    #[serde(default)]
+    model: Option<String>,
+    /// "ok" | "failed"（其他值按不过滤处理）
+    #[serde(default)]
+    status: Option<String>,
+    /// 起始 epoch 毫秒（含）
+    #[serde(default)]
+    since_ms: Option<i64>,
+    #[serde(default)]
+    page: Option<usize>,
+    #[serde(default)]
+    page_size: Option<usize>,
+}
+
+// ——— 用量明细纯函数（TDD：测试见 usage_tests） ———
+
+/// 按 model / status / since_ms 过滤。
+/// model 为大小写不敏感子串匹配（便于搜 "terra" 这类片段）；空白串视为不过滤。
+/// status 仅识别 "ok" / "failed"，其他值忽略。
+fn filter_usage_records<'a>(records: &'a [UsageRecord], q: &UsageQuery) -> Vec<&'a UsageRecord> {
+    let needle = q
+        .model
+        .as_deref()
+        .map(|m| m.trim().to_lowercase())
+        .filter(|m| !m.is_empty());
+    let status = q
+        .status
+        .as_deref()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| s == "ok" || s == "failed");
+    records
+        .iter()
+        .filter(|r| {
+            if let Some(n) = &needle {
+                if !r.model.to_lowercase().contains(n.as_str()) {
+                    return false;
+                }
+            }
+            match status.as_deref() {
+                Some("ok") if !r.ok => return false,
+                Some("failed") if r.ok => return false,
+                _ => {}
+            }
+            if let Some(since) = q.since_ms {
+                if r.ts < since {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// 分页：返回 (当页条目, 总数, 总页数)。
+/// page 从 1 起，0 或越界页收敛为空列表；page_size 为 0 时按 1 处理；
+/// 空输入时 total_pages 仍为 1，避免前端除零。
+fn paginate_usage_refs<'a>(
+    items: &[&'a UsageRecord],
+    page: usize,
+    page_size: usize,
+) -> (Vec<&'a UsageRecord>, usize, usize) {
+    let total = items.len();
+    let page_size = page_size.max(1);
+    let total_pages = total.div_ceil(page_size).max(1);
+    let page = page.max(1);
+    let start = (page - 1).saturating_mul(page_size);
+    let slice = if start < total {
+        &items[start..(start + page_size).min(total)]
+    } else {
+        &[]
+    };
+    (slice.to_vec(), total, total_pages)
+}
+
+/// 按模型分组统计：requests 降序（并列保持首次出现顺序）。
+/// 空模型名归入 "(未知)"；avg_latency_ms 为该组算术均值。
+fn group_usage_by_model(records: &[UsageRecord]) -> Vec<serde_json::Value> {
+    type Agg = (i64, i64, i64, i64, i64, i64); // requests, ok, failed, in, out, latency_sum
+    let mut agg: std::collections::HashMap<String, Agg> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for r in records {
+        let key = if r.model.is_empty() { "(未知)".to_string() } else { r.model.clone() };
+        if !agg.contains_key(&key) {
+            order.push(key.clone());
+        }
+        let e = agg.entry(key).or_insert((0, 0, 0, 0, 0, 0));
+        e.0 += 1;
+        if r.ok { e.1 += 1 } else { e.2 += 1 }
+        e.3 += r.input_tokens.unwrap_or(0);
+        e.4 += r.output_tokens.unwrap_or(0);
+        e.5 += r.latency_ms;
+    }
+    let groups: Vec<serde_json::Value> = order
+        .into_iter()
+        .map(|k| {
+            let (req, ok, failed, tin, tout, lat) = agg[&k];
+            serde_json::json!({
+                "model": k,
+                "requests": req,
+                "ok": ok,
+                "failed": failed,
+                "input_tokens": tin,
+                "output_tokens": tout,
+                "avg_latency_ms": if req > 0 { lat / req } else { 0 },
+            })
+        })
+        .collect();
+    let mut indexed: Vec<(usize, serde_json::Value)> = groups.into_iter().enumerate().collect();
+    indexed.sort_by(|a, b| {
+        let ra = b.1["requests"].as_i64().unwrap_or(0);
+        let rb = a.1["requests"].as_i64().unwrap_or(0);
+        ra.cmp(&rb).then(a.0.cmp(&b.0)) // 并列时按首次出现顺序
+    });
+    indexed.into_iter().map(|(_, v)| v).collect()
+}
+
+/// 组装用量明细查询响应：过滤 → 最新在前 → 分页 → 附加按模型分组分析。
+/// 分析基于**过滤后全集**（不受分页影响），使前端筛选与分组口径一致。
+fn query_usage_events(records: &[UsageRecord], q: &UsageQuery) -> serde_json::Value {
+    let mut filtered: Vec<&UsageRecord> = filter_usage_records(records, q);
+    filtered.sort_by(|a, b| b.ts.cmp(&a.ts)); // 最新在前
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(50).max(1); // 默认 50/页（对齐 EasyCLIProxyAPI）
+    let (items, total, total_pages) = paginate_usage_refs(&filtered, page, page_size);
+    let items_json: Vec<serde_json::Value> = items
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "ts": r.ts,
+                "model": r.model,
+                "ok": r.ok,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "latency_ms": r.latency_ms,
+                "ttft_ms": r.ttft_ms,
+                "error": r.error,
+                "retry_count": r.retry_count,
+                "retry_reason": r.retry_reason,
+                "requested_model": r.requested_model,
+                "actual_model": r.actual_model,
+                "fallback_reason": r.fallback_reason,
+            })
+        })
+        .collect();
+    let filtered_owned: Vec<UsageRecord> = filtered.iter().map(|r| (*r).clone()).collect();
+    serde_json::json!({
+        "items": items_json,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "analysis": { "models": group_usage_by_model(&filtered_owned) },
+    })
 }
 
 /// 读取用量文件字节内容；超过 10MB 时只读末尾 10MB 并丢弃首个不完整行（避免解析半行）。
@@ -732,6 +904,27 @@ pub fn usage_summary() -> Result<serde_json::Value, String> {
     Ok(aggregate_usage(&records, now_utc_ms, local_midnight_ms))
 }
 
+/// 用量明细查询命令（对标 EasyCLIProxyAPI 的 get_usage_events）：
+/// 支持模型子串 / 状态 / 起始时间过滤 + 分页 + 按模型分组分析。
+/// 复用 usage.jsonl 全量读取（超 10MB 只取尾部），与 usage_summary 同源。
+#[tauri::command]
+pub fn usage_events(
+    model: Option<String>,
+    status: Option<String>,
+    since_ms: Option<i64>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let bytes = read_usage_tail();
+    let text = String::from_utf8_lossy(&bytes);
+    let records: Vec<UsageRecord> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    let q = UsageQuery { model, status, since_ms, page, page_size };
+    Ok(query_usage_events(&records, &q))
+}
+
 #[cfg(test)]
 mod usage_tests {
     use super::*;
@@ -744,7 +937,227 @@ mod usage_tests {
             output_tokens: out,
             latency_ms: latency,
             ttft_ms: ttft,
+            ..Default::default()
         }
+    }
+
+    /// 带模型名的样本（明细查询测试用）
+    fn mrec(ts: i64, model: &str, ok: bool) -> UsageRecord {
+        UsageRecord {
+            ts,
+            ok,
+            model: model.to_string(),
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            latency_ms: 200,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn filter_by_model_is_case_insensitive_and_substring() {
+        let rs = vec![
+            mrec(100, "gpt-5.6-terra", true),
+            mrec(200, "gpt-5.6-sol", true),
+            mrec(300, "claude-sonnet-4.5", false),
+        ];
+        // 子串 + 大小写不敏感
+        let q = UsageQuery { model: Some("TERRA".into()), ..Default::default() };
+        let got = filter_usage_records(&rs, &q);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].model, "gpt-5.6-terra");
+
+        // 空前缀/空白视为不过滤
+        let q2 = UsageQuery { model: Some("   ".into()), ..Default::default() };
+        assert_eq!(filter_usage_records(&rs, &q2).len(), 3);
+    }
+
+    #[test]
+    fn filter_by_status_and_since() {
+        let rs = vec![
+            mrec(100, "a", true),
+            mrec(200, "b", false),
+            mrec(300, "c", true),
+        ];
+        let q = UsageQuery { status: Some("failed".into()), ..Default::default() };
+        let got = filter_usage_records(&rs, &q);
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].ok);
+
+        let q2 = UsageQuery { status: Some("ok".into()), ..Default::default() };
+        assert_eq!(filter_usage_records(&rs, &q2).len(), 2);
+
+        // since_ms 含边界（ts >= since）
+        let q3 = UsageQuery { since_ms: Some(200), ..Default::default() };
+        let got3 = filter_usage_records(&rs, &q3);
+        assert_eq!(got3.len(), 2);
+        assert_eq!(got3[0].ts, 200);
+
+        // 组合条件
+        let q4 = UsageQuery { status: Some("ok".into()), since_ms: Some(200), ..Default::default() };
+        let got4 = filter_usage_records(&rs, &q4);
+        assert_eq!(got4.len(), 1);
+        assert_eq!(got4[0].ts, 300);
+
+        // 未知 status 值 → 不过滤
+        let q5 = UsageQuery { status: Some("weird".into()), ..Default::default() };
+        assert_eq!(filter_usage_records(&rs, &q5).len(), 3);
+    }
+
+    #[test]
+    fn paginate_bounds_and_totals() {
+        let rs: Vec<UsageRecord> = (0..25).map(|i| mrec(i as i64, "m", true)).collect();
+        let refs: Vec<&UsageRecord> = rs.iter().collect();
+
+        // 第一页
+        let (page1, total, pages) = paginate_usage_refs(&refs, 1, 10);
+        assert_eq!(total, 25);
+        assert_eq!(pages, 3);
+        assert_eq!(page1.len(), 10);
+        assert_eq!(page1[0].ts, 0);
+
+        // 末页不足一整页
+        let (page3, _, _) = paginate_usage_refs(&refs, 3, 10);
+        assert_eq!(page3.len(), 5);
+        assert_eq!(page3[0].ts, 20);
+
+        // 越界页 → 空列表但 total/pages 如实
+        let (over, total2, pages2) = paginate_usage_refs(&refs, 99, 10);
+        assert!(over.is_empty());
+        assert_eq!(total2, 25);
+        assert_eq!(pages2, 3);
+
+        // page=0 视作 1；page_size=0 视作 1（防御脏入参）
+        let (p0, _, _) = paginate_usage_refs(&refs, 0, 10);
+        assert_eq!(p0.len(), 10);
+        let (ps0, _, pages3) = paginate_usage_refs(&refs, 1, 0);
+        assert_eq!(ps0.len(), 1);
+        assert_eq!(pages3, 25);
+
+        // 空输入
+        let (empty, t0, p0c) = paginate_usage_refs(&[], 1, 10);
+        assert!(empty.is_empty());
+        assert_eq!(t0, 0);
+        assert_eq!(p0c, 1); // 至少 1 页，避免前端除零
+    }
+
+    #[test]
+    fn group_by_model_orders_by_requests_desc() {
+        let rs = vec![
+            mrec(1, "alpha", true),
+            mrec(2, "beta", false),
+            mrec(3, "alpha", true),
+            mrec(4, "alpha", false),
+            mrec(5, "", true), // 空模型名归入 (未知)
+        ];
+        let groups = group_usage_by_model(&rs);
+        assert_eq!(groups.len(), 3);
+        // 降序：alpha(3) > beta(1)
+        assert_eq!(groups[0]["model"], "alpha");
+        assert_eq!(groups[0]["requests"], 3);
+        assert_eq!(groups[0]["ok"], 2);
+        assert_eq!(groups[0]["failed"], 1);
+        assert_eq!(groups[0]["input_tokens"], 300);
+        assert_eq!(groups[0]["output_tokens"], 150);
+        assert_eq!(groups[0]["avg_latency_ms"], 200);
+        assert_eq!(groups[1]["model"], "beta");
+        // (未知) 与 beta 同为 1 次，排序稳定即可（只断言存在）
+        let unknown = groups.iter().find(|g| g["model"] == "(未知)");
+        assert!(unknown.is_some(), "空模型名应归入 (未知)");
+        // 无数据 → 空数组（非 null）
+        assert!(group_usage_by_model(&[]).is_empty());
+    }
+
+    #[test]
+    fn query_events_assembles_paged_response_newest_first() {
+        let rs = vec![
+            mrec(1, "alpha", true),
+            mrec(2, "alpha", true),
+            mrec(3, "alpha", true),
+            mrec(4, "alpha", false),
+            mrec(5, "alpha", false),
+            mrec(6, "beta", true),
+        ];
+        // 过滤 alpha + ok：3 条（ts=1,2,3）；按最新在前 → [3,2,1]
+        let q = UsageQuery {
+            model: Some("alpha".into()),
+            status: Some("ok".into()),
+            page: Some(2),
+            page_size: Some(2),
+            ..Default::default()
+        };
+        let v = query_usage_events(&rs, &q);
+        assert_eq!(v["total"], 3);
+        assert_eq!(v["page"], 2);
+        assert_eq!(v["page_size"], 2);
+        assert_eq!(v["total_pages"], 2);
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "第 2 页应只剩 1 条");
+        assert_eq!(items[0]["ts"], 1, "最新在前后，第 2 页末条应是最早的 ts=1");
+        assert_eq!(items[0]["model"], "alpha");
+        assert_eq!(items[0]["ok"], true);
+        assert_eq!(items[0]["input_tokens"], 100);
+        assert_eq!(items[0]["output_tokens"], 50);
+        assert_eq!(items[0]["latency_ms"], 200);
+
+        // 缺省入参：page=1、page_size=50（与 EasyCLIProxyAPI 的 50/页 对齐）
+        let v2 = query_usage_events(&rs, &UsageQuery::default());
+        assert_eq!(v2["page"], 1);
+        assert_eq!(v2["page_size"], 50);
+        assert_eq!(v2["total"], 6);
+        let items2 = v2["items"].as_array().unwrap();
+        assert_eq!(items2[0]["ts"], 6, "首条应为最新的 ts=6");
+
+        // 空输入 → 空 items 且 total=0、total_pages=1
+        let v3 = query_usage_events(&[], &UsageQuery::default());
+        assert_eq!(v3["total"], 0);
+        assert_eq!(v3["total_pages"], 1);
+        assert!(v3["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn query_events_includes_failure_and_fallback_fields() {
+        let mut failed = mrec(10, "gpt-5.6-terra", false);
+        failed.error = Some("HTTP 429 rate limited".into());
+        failed.retry_count = 2;
+        failed.retry_reason = Some("503".into());
+        let mut downgraded = mrec(20, "gpt-5.6-sol", true);
+        downgraded.requested_model = Some("gpt-5.6-terra".into());
+        downgraded.actual_model = Some("gpt-5.6-sol".into());
+        downgraded.fallback_reason = Some("model unavailable".into());
+        let rs = vec![failed, downgraded];
+
+        let v = query_usage_events(&rs, &UsageQuery::default());
+        let items = v["items"].as_array().unwrap();
+        // 最新在前 → downgraded 在前
+        assert_eq!(items[0]["requested_model"], "gpt-5.6-terra");
+        assert_eq!(items[0]["fallback_reason"], "model unavailable");
+        assert_eq!(items[1]["error"], "HTTP 429 rate limited");
+        assert_eq!(items[1]["retry_count"], 2);
+    }
+
+    #[test]
+    fn query_events_includes_model_analysis() {
+        let rs = vec![
+            mrec(1, "alpha", true),
+            mrec(2, "alpha", true),
+            mrec(3, "beta", false),
+        ];
+        let v = query_usage_events(&rs, &UsageQuery::default());
+        let models = v["analysis"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2, "两个模型应各成一组");
+        assert_eq!(models[0]["model"], "alpha");
+        assert_eq!(models[0]["requests"], 2);
+        assert_eq!(models[0]["ok"], 2);
+        assert_eq!(models[1]["model"], "beta");
+        assert_eq!(models[1]["failed"], 1);
+
+        // 分析随过滤器同步（只看 beta → 只剩 beta 组）
+        let q = UsageQuery { model: Some("beta".into()), ..Default::default() };
+        let v2 = query_usage_events(&rs, &q);
+        let models2 = v2["analysis"]["models"].as_array().unwrap();
+        assert_eq!(models2.len(), 1);
+        assert_eq!(models2[0]["model"], "beta");
     }
 
     #[test]

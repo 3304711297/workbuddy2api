@@ -216,6 +216,11 @@ workbuddy2api.exe (GUI)
   ⚠️ 改这块先读第 4 节「AppConfig 整对象覆盖写盘」两条铁律。
 - **今日用量与夜间限免窗口（A2/A3/B1/C1/C2 已完成，2026-09-11 交付）**：
   已在 `converter.py`、`src/accounts.js`、`token-stats` 插件落地：自然日（UTC+8）今日用量（`reqsToday`/`tokensToday`/`err429_today`）优先展示，兼容 5h/24h；动态感知 `23:00–08:00` 免费时段并打上「🌙 夜间限免中」徽章。提交 `83ef9e2`（c2o 仓） / `894f500`（hermes 仓 hermes 分支）。
+- **用量明细契约（usage_events，对标 EasyCLIProxyAPI v0.2.90）**：
+  `UsageRecord` 必须完整解析 `converter.py` 写入的 JSONL 字段（`model`/`error`/`retry_count`/`retry_reason`/`requested_model`/`actual_model`/`fallback_reason`）——少解析字段会让前端明细缺列而不报错。
+  `usage_events(model, status, since_ms, page, page_size)` 契约：筛选在 Rust 侧完成（`filter_usage_records`），**最新在前**排序后再分页；`analysis.models` 基于**过滤后全集**计算（不受分页影响），否则分组统计与筛选口径会自相矛盾。
+  分页默认 50/页；`page`/`page_size` 为 0 时按 1 处理，越界页返回空列表但 `total`/`total_pages` 如实上报（前端据此禁用按钮）；空输入时 `total_pages` 仍为 1，避免前端除零。
+  前端 `usage.js` 明细与汇总各自持有独立请求序号（`_usageRequestSeq` / `_usageEventsSeq`）——共用一个会让两个并行请求互相丢弃。
 - **凭证轮换（P1，**已交付** 2026-09-11，见上方「多账号调度」条目）**：
   多账号就位后按既定要点实施完毕（`AccountRotator` + GUI 策略卡）。
   token 续期由 `converter.py` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /

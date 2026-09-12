@@ -499,6 +499,8 @@ body {
 .badge-stopped { background: var(--danger-subtle); color: var(--danger-bright); }
 .badge-running { background: var(--success-subtle); color: var(--success); }
 .badge-info { background: var(--primary-subtle); color: var(--primary); }
+/* 失败结果徽章（用量明细用） */
+.badge-danger { background: var(--danger-subtle); color: var(--danger); }
 
 /* --------------------------------------------------------------------------
    控制台组件
