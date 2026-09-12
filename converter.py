@@ -72,7 +72,6 @@ except ImportError:
 
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
-USER_AGENT = "workbuddy2api/2.0"
 
 # ---------------------------------------------------------------------------
 # 平台相关：定位 auth 目录与 WSL 宿主穿透
@@ -194,6 +193,33 @@ def _env_compat(suffix: str, default: str = "") -> str:
     if v is None or v == "":
         v = os.environ.get(f"CODEBUDDY2OPENAI_{suffix}")
     return v if v not in (None, "") else default
+
+
+# ---------------------------------------------------------------------------
+# 出站 User-Agent 与 请求体防护 (借鉴开源生态优秀实践)
+# ---------------------------------------------------------------------------
+
+# 官方客户端标准 User-Agent (参考 ardeyouxipianyi/workbuddy2api-intl 与 turbomind66/workbuddy2api-python)
+DEFAULT_UA_CN = "CLI/2.63.2 CodeBuddy/2.63.2"
+DEFAULT_UA_INTL = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
+
+
+def _get_user_agent(domain: str | None = None) -> str:
+    """获取出站 User-Agent：优先读取环境变量覆盖，否则按 domain 仿真官方客户端。"""
+    env_ua = _env_compat("USER_AGENT", "")
+    if env_ua:
+        return env_ua.strip()
+    if domain and "workbuddy.ai" in domain:
+        return DEFAULT_UA_INTL
+    return DEFAULT_UA_CN
+
+
+USER_AGENT = _get_user_agent()
+
+# 请求体大小限制（防大包与内存拖垮，参考 linguo2625469/workbuddy2api-panel）
+# 默认 16MB，可通过 WORKBUDDY2API_MAX_BODY_MB 环境变量自定义
+MAX_BODY_MB = float(_env_compat("MAX_BODY_MB", "16"))
+MAX_BODY_BYTES = int(MAX_BODY_MB * 1024 * 1024)
 
 
 def _app_settings_file() -> Path:
@@ -542,7 +568,7 @@ class CredentialManager:
             "X-Enterprise-Id": account.get("enterpriseId", ""),
             "X-Tenant-Id": account.get("enterpriseId", ""),
             "X-Domain": domain,
-            "User-Agent": USER_AGENT,
+            "User-Agent": _get_user_agent(domain),
         }
         # 设备风控头：桌面端所有敏感请求均携带（Turing Shield SDK 生成）。
         # 取不到时优雅降级为不带该头（借鉴 xiaofan6ya/workbuddy2api，MIT）。
@@ -1193,7 +1219,49 @@ class LocalHostOnlyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
+    """请求体大小防护中间件（防恶意超大报文导致 OOM，借鉴 linguo2625469/workbuddy2api-panel）。
+
+    针对 /v1/chat/completions 与 /v1/messages，当 Content-Length 超过 MAX_BODY_BYTES
+    时直接在网关层秒拒并返回 413，不转发上游、不触发切号、不污染账号状态。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT") and request.url.path in ("/v1/chat/completions", "/v1/messages"):
+            cl_header = request.headers.get("content-length")
+            if cl_header:
+                try:
+                    content_length = int(cl_header)
+                    if content_length > MAX_BODY_BYTES:
+                        is_anthropic = request.url.path == "/v1/messages"
+                        if is_anthropic:
+                            return JSONResponse(
+                                status_code=413,
+                                content={
+                                    "type": "error",
+                                    "error": {
+                                        "type": "invalid_request_error",
+                                        "message": f"request body size ({content_length} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
+                                    },
+                                },
+                            )
+                        return JSONResponse(
+                            status_code=413,
+                            content={
+                                "error": {
+                                    "message": f"request body size ({content_length} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
+                                    "type": "invalid_request_error",
+                                    "code": "request_body_too_large",
+                                }
+                            },
+                        )
+                except ValueError:
+                    pass
+        return await call_next(request)
+
+
 app.add_middleware(LocalHostOnlyMiddleware)
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -1946,8 +2014,20 @@ async def chat_completions(request: Request,
     _check_auth(authorization, x_api_key)
     cred = _cred()
 
+    raw_body = await request.body()
+    if len(raw_body) > MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": {
+                    "message": f"request body size ({len(raw_body)} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
+                    "type": "invalid_request_error",
+                    "code": "request_body_too_large",
+                }
+            },
+        )
     try:
-        payload = await request.json()
+        payload = json.loads(raw_body)
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
@@ -2165,8 +2245,20 @@ async def anthropic_messages(
         )
     cred = _cred()
 
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_BODY_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"request body size ({len(body_bytes)} bytes) exceeds limit of {MAX_BODY_BYTES} bytes ({MAX_BODY_MB:g} MB)",
+                },
+            },
+        )
     try:
-        raw_body = await request.json()
+        raw_body = json.loads(body_bytes)
     except Exception as e:
         return JSONResponse(
             status_code=400,
