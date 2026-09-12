@@ -55,6 +55,13 @@
 
 - **每日签到链路**：`POST /v2/billing/meter/checkin-activity-status` 与 `POST /v2/billing/meter/daily-checkin` 的接口形态、业务码语义（1001=今日已领 / 1002=无资格 / 1003=活动已结束）参考了上述两仓库对 WorkBuddy 桌面端的逆向分析结论。本仓库按自身定位实现为 **GUI 手动按钮触发**（`/api/checkin/status`、`/api/checkin/claim`），不包含上游的自动定时签到逻辑。
 
+## 5. 开源生态优秀实践借鉴（2026-09 横向对比采纳）
+
+| 借鉴源 | 许可证 | 借鉴项 | 移植落点与说明 |
+|---|---|---|---|
+| `linguo2625469/workbuddy2api-panel` | MIT | 请求体上限保护机制（413 Payload Too Large） | `converter.py`：引入 `MAX_BODY_MB` 与 `RequestBodyLimitMiddleware`，超限请求直接秒拒返回标准 413 `request_body_too_large`，防御超大 payload 击穿本地内存与上游 WAF |
+| `ardeyouxipianyi/workbuddy2api-intl` & `turbomind66/workbuddy2api-python` | MIT | 官方客户端 User-Agent 仿真与可配置环境变量 | `converter.py`：出站 UA 从硬编码升级为仿真官方客户端规范（`CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），并支持 `WORKBUDDY2API_USER_AGENT` 动态覆盖，规避上游非标 UA 导致的 10085 拦截与归因异常 |
+
 ---
 
 ## 许可证说明

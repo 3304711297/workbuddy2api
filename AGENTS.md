@@ -131,6 +131,9 @@ workbuddy2api.exe (GUI)
   基于 `asyncio.Semaphore` 与单调时钟调度槽，支持环境变量 `WORKBUDDY2API_MAX_CONCURRENCY`（默认 5，兼容旧名 `CODEBUDDY2OPENAI_MAX_CONCURRENCY`）与 `WORKBUDDY2API_MIN_INTERVAL_MS`（默认 50ms，兼容旧名）削平并发脉冲。流式与非流式请求均在上下文周期内自动持槽与平滑释放。环境变量统一经 `_env_compat()` 读取：新名优先，旧名兜底，避免升级后行为静默变化。
 - **后台主动令牌续期 (`token_refresher.py`)**：
   由 FastAPI `lifespan` 生命周期管控，后台每 300s 巡检活跃账号凭据，剩余有效时间小于 1800s（30 分钟）时主动触发异步续期并防重入，避免用户请求遭遇被动刷新时延。
+- **413 请求体大小保护与官方 User-Agent 仿真（2026-09 横向对比采纳）**：
+  - **413 防护**：`MAX_BODY_MB`（环境变量 `WORKBUDDY2API_MAX_BODY_MB`，默认 16MB）。在 `RequestBodyLimitMiddleware`（按 `Content-Length` 秒拒）与路由入口（防 chunked 穿透）双层拦截，超限返回标准 413，不打上游、不触发切号、不罚账号。
+  - **出站 User-Agent**：出站请求（计费、对话、模型）统一调用 `_get_user_agent(domain)` 仿真官方客户端（国服 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 导致的 10085 违规拦截，并使官网使用端归因正常。亦支持 `WORKBUDDY2API_USER_AGENT`（兼容旧名 `CODEBUDDY2OPENAI_USER_AGENT`）自定义。
 
   **风控拦截机制（2026-09-10 实测，判断要不要扩脱敏范围时看这里）**：
 
