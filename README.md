@@ -24,13 +24,17 @@
 
 ## ✨ 核心特性
 
-- 🔄 **原生双协议网关支持 (Dual Protocol Gateway)**：
+- 🔄 **原生三协议网关支持 (Tri-Protocol Gateway)**：
+  - **OpenAI Responses 协议 (`POST /v1/responses`)**：采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机），原生支持 **Codex CLI**（wire_api="responses"）、OpenCode 等长上下文 Agent，支持流式语义事件与非流式响应。
   - **Anthropic Messages 协议 (`POST /v1/messages`)**：采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机），原生直连驱动官方 **Claude Code CLI**、Cline、Roo Code 等工具，支持流式输出与函数调用（tool_use）。
-  - **OpenAI 兼容端点 (`POST /v1/chat/completions`, `GET /v1/models`)**：完整支持标准流式 SSE、原生 tools / tool_calls 函数调用，兼容各类 OpenAI SDK、IDE 插件与智能体。
+  - **OpenAI 对话补全端点 (`POST /v1/chat/completions`, `GET /v1/models`)**：完整支持标准流式 SSE、原生 tools / tool_calls 函数调用，兼容各类 OpenAI SDK、IDE 插件与智能体。
 - 🖥️ **独立现代化桌面 GUI (Tauri v2 + 原生深色设计)**：提供直观的服务看板、端口设置、实时延迟测试与状态指示。
 - 🔑 **无需安装原版 WorkBuddy**：集成浏览器 OAuth 授权全自动轮询流程，直接扫码/验证码登录获取凭据。
 - 👥 **多账号管理与切换**：凭据统一持久化于本地数据库，支持一键切换活跃账号、手动刷新 Token 与账号删除。
-- 🔀 **多账号智能调度（三模式可选）**：`off`（默认关闭）/ `failover`（遇 429 / 6004 自动切号重试）/ `roundrobin`（按请求数轮询分摊）；账号级冷却隔离（按「账号 + 模型」维度）；调度策略运行时热读 `settings.json`，GUI 改完**免重启内核**即生效；`/api/rate_limit` 的 `rotation.config_source` 字段可观测当前策略来源（`hot`=已热加载 / `default`=回退兜底）。
+- 🔀 **多账号智能调度与到期日分层（先烧快过期额度）**：
+  - 支持 `off`（默认关闭）/ `failover`（遇 429 / 6004 自动切号重试）/ `roundrobin`（按请求数轮询分摊）；
+  - **按积分到期日分层优先（借鉴 momo0410/workbuddy-switch-gateway）**：自动提取各账号资产的最早到期日（日粒度 YYYY-MM-DD），优先调度最快过期的账号池，杜绝资产临期作废；同档账号平均轮换，未标记到期日账号保底兜底；
+  - 账号级冷却隔离（按「账号 + 模型」维度）；调度策略运行时热读 `settings.json`，GUI 改完**免重启内核**即生效；`/api/rate_limit` 的 `rotation.config_source` 字段可观测当前策略来源（`hot`=已热加载 / `default`=回退兜底）。
 - 📊 **内嵌真实积分资产看板与夜间限免感知**：
   - 逆向对接腾讯官方计量计费接口，实时掌握账户剩余积分、资源包配额明细与使用进度条；
   - **自然日今日用量统计**：自动统计当日请求数（`reqsToday`）、消耗 Token 数（`tokensToday`）与 429 频控次数；
@@ -54,8 +58,9 @@
 
 | 协议 / 功能分类 | 接口端点 | 适用客户端 / 场景 | 推荐鉴权 Header |
 |---|---|---|---|
-| **Anthropic Messages 协议** | `POST /v1/messages` | **Claude Code CLI**, Cline, Roo Code, Anthropic SDK | `x-api-key: local` 或 `Authorization: Bearer local` |
-| **OpenAI 对话补全协议** | `POST /v1/chat/completions` | **Hermes Agent**, Cherry Studio, NextChat, OpenAI SDK | `Authorization: Bearer local` |
+| **OpenAI Responses 协议** | `POST /v1/responses` | **Codex CLI**, OpenCode, Responses SDK | `Authorization: Bearer *** 或 `x-api-key: *** |
+| **Anthropic Messages 协议** | `POST /v1/messages` | **Claude Code CLI**, Cline, Roo Code, Anthropic SDK | `x-api-key: *** 或 `Authorization: Bearer *** |
+| **OpenAI 对话补全协议** | `POST /v1/chat/completions` | **Hermes Agent**, Cherry Studio, NextChat, OpenAI SDK | `Authorization: Bearer *** |
 | **模型列表探测** | `GET /v1/models` | OpenAI 格式标准模型列表（动态拉取上游全部模型） | `Authorization: Bearer local` |
 | **服务健康与探活** | `GET /health` | 本地健康检测 / 心跳探测（安全收窄，不泄露敏感身份信息） | 无需鉴权 |
 | **用量统计与积分概览** | `GET /api/usage_summary` | 当前账号积分余额、今日用量（请求数/Token/429） | `Authorization: Bearer local` |
@@ -299,6 +304,8 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   - **Claude 客户端指纹脱敏与精准改写层（P0 已落地）**：借鉴其对已知客户端特征句做中性改写的思路（`_rewrite_known_fingerprints`），改写 Claude Code 身份短语、移除 `x-anthropic-billing-header:` 等触发源，彻底解决上游 11128 安全策略拦截；
   - **多凭证轮换与账号调度（已交付，2026-09-11）**：参考其凭据生命周期感知与平滑轮换设计，已交付多账号调度（failover / roundrobin 双模式 + 账号级冷却 + 策略热读免重启）。
 - 以下安全与协议兼容优秀实践借鉴自开源生态（2026-09 横向对比采纳）：
+  - **OpenAI Responses 协议原生端点 (`POST /v1/responses`)**（借鉴 [ShouZhuo0413/codebuddy2api](https://github.com/ShouZhuo0413/codebuddy2api) 与 [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api)，MIT）：引入 `responses_compat.py`，原生支持 Codex CLI 等长上下文 Agent 的双向协议转换与流式事件状态机；
+  - **按积分到期日分层选号调度**（借鉴 [momo0410/workbuddy-switch-gateway](https://github.com/momo0410/workbuddy-switch-gateway)，MIT）：引入日粒度到期日分层，多账号调度优先消耗快要过期的额度，避免资产过期浪费；
   - **413 请求体超限安全防护**（借鉴 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)，MIT）：`converter.py` 引入大小守卫，秒拒超大报文保护本地与上游；
   - **官方客户端 User-Agent 规范仿真**（借鉴 [ardeyouxipianyi/workbuddy2api-intl](https://github.com/ardeyouxipianyi/workbuddy2api-intl) 与 [turbomind66/workbuddy2api-python](https://github.com/turbomind66/workbuddy2api-python)，MIT）：出站请求智能仿真官方客户端标识，并支持环境变量动态自定义。
 - 本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。

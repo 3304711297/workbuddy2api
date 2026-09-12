@@ -127,6 +127,10 @@ workbuddy2api.exe (GUI)
   是否符合 SSE 规范，不要反向去掉注释行。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
+- **OpenAI Responses 兼容层 (`POST /v1/responses`)**：
+  采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机）。支持 Codex CLI（`wire_api="responses"`）、OpenCode 等长上下文 Agent 原生直连。错误返回标准 OpenAI 格式。
+- **按积分到期日分层选号（先烧快过期额度，借鉴 momo0410/workbuddy-switch-gateway）**：
+  `AccountRotator` 内部调度由 `get_candidate_uids_tiered()` 驱动：从各账号 session/credit 提取有效到期日（兼容秒/毫秒/时间串），按日粒度（YYYY-MM-DD）分层分组。最早到期日的账号集合拥有最高调度优先级，同档内平均轮换，未标记到期日账号作为保底垫底。确保快过期额度被确定性优先消耗，杜绝资产过期浪费。
 - **并发削峰平滑器 (`request_pacer.py`)**：
   基于 `asyncio.Semaphore` 与单调时钟调度槽，支持环境变量 `WORKBUDDY2API_MAX_CONCURRENCY`（默认 5，兼容旧名 `CODEBUDDY2OPENAI_MAX_CONCURRENCY`）与 `WORKBUDDY2API_MIN_INTERVAL_MS`（默认 50ms，兼容旧名）削平并发脉冲。流式与非流式请求均在上下文周期内自动持槽与平滑释放。环境变量统一经 `_env_compat()` 读取：新名优先，旧名兜底，避免升级后行为静默变化。
 - **后台主动令牌续期 (`token_refresher.py`)**：
