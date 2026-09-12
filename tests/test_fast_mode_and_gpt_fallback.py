@@ -470,3 +470,80 @@ def test_e2e_anthropic_stream_unauthorized_gpt_model_fallback_observability(fake
     assert rec["actual_model"] == "fast-model"
     assert rec["fallback_reason"] == "11102 unauthorized"
 
+
+# ── _safe_stream_upstream failover 重试语义钉子 ─────────────────────
+
+class _Rotator:
+    """测试桩：恒定 retry_budget，记录 failover 调用。
+
+    succeed_calls=None → 恒切号成功（返回新的 (uid, headers)）；其余 → 恒失败（返回 None）。
+    """
+
+    def __init__(self, budget: int, succeed_calls=None):
+        self.budget = budget
+        self.succeed = succeed_calls is None
+        self.failover_calls = 0
+
+    def get_retry_budget(self, model_name: str) -> int:
+        return self.budget
+
+    def record_failure_and_failover(self, uid, model, status_code, err_text):
+        self.failover_calls += 1
+        if self.succeed:
+            return f"uid-{self.failover_calls}", {}
+        return None  # 无备用账号，failover 不生效 → 流以错误事件终止
+
+
+@pytest.mark.anyio
+async def test_safe_stream_upstream_failover_attempts(monkeypatch, tmp_path):
+    """钉住 _safe_stream_upstream 的 failover 重试语义（重构 0 基循环时的回归防线）。
+
+    契约（与 A/B/D 三处 0 基循环的守卫语义一致）：
+    - failover 恒成功：record_failure_and_failover 恰好被调 retry_budget 次
+      （max_attempts = budget + 1，最后一次尝试守卫挡住不再切号，随后错误事件收尾）；
+    - failover 恒失败：第一次 429 切号失败即 yield 错误事件结束流（本函数与
+      A/B 的「吞异常续圈」不同），failover 恰好被调 1 次。
+    守卫写多或写少一格都会让本测试变红。
+    """
+    async def mock_sleep(d):  # 跳过 failover 抖动
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+    monkeypatch.setitem(converter.CONFIG, "usage_log", str(tmp_path / "usage.jsonl"))
+    monkeypatch.setattr(converter, "_failover_jitter", mock_sleep)
+
+    def mock_handler(request: httpx.Request):
+        return httpx.Response(429, json={"code": 6004, "msg": "频率限制"})
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    orig_async_client = httpx.AsyncClient
+
+    def mock_async_client(**kw):
+        kw["transport"] = mock_transport
+        return orig_async_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_async_client)
+
+    async def run(budget: int, succeed_calls):
+        rotator = _Rotator(budget, succeed_calls)
+        chunks = []
+        async for chunk in converter._safe_stream_upstream(
+            "http://upstream.test/v1/chat/completions",
+            {}, {"model": "deepseek-v4-pro"}, model_name="deepseek-v4-pro",
+            rotator=rotator, uid="uid-t",
+        ):
+            chunks.append(chunk)
+        return rotator.failover_calls, chunks
+
+    # failover 恒成功：恰好 budget 次切号（守卫挡住最后一次），错误事件收尾
+    for budget in (2, 4):
+        calls, chunks = await run(budget, succeed_calls=None)
+        assert calls == budget, (budget, calls)
+        assert chunks and b'"error"' in chunks[-1], chunks[-3:]
+
+    # failover 恒失败：首次切号失败即结束，只调 1 次
+    for budget in (2, 4):
+        calls, chunks = await run(budget, succeed_calls=0)
+        assert calls == 1, (budget, calls)
+        assert chunks and b'"error"' in chunks[-1], chunks[-3:]
+

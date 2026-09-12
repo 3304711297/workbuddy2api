@@ -2630,7 +2630,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     curr_uid = uid
     curr_headers = dict(headers)
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(max_attempts):
         try:
             async with httpx.AsyncClient(timeout=300) as c:
                 async with c.stream("POST", url, headers=curr_headers, json=body) as r:
@@ -2650,7 +2650,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
                             continue
-                        if rotator and attempt < max_attempts:
+                        if rotator and attempt < max_attempts - 1:
                             failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                             if failover:
                                 curr_uid, curr_headers = failover
@@ -2684,17 +2684,17 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
 
         # 校验 tool_calls 完整性
         valid, reason = _validate_tool_calls(tool_calls)
-        if valid or attempt >= max_attempts:
+        if valid or attempt >= max_attempts - 1:
             if not valid:
                 _log(f"{prefix}⚠️ tool_calls 校验未通过 ({reason})，已达最大重试次数，尝试原样下发")
                 retry_reason = reason
-            elif attempt > 1:
-                _log(f"{prefix}✅ tool_calls 重试成功修复 (attempt {attempt})")
+            elif attempt > 0:
+                _log(f"{prefix}✅ tool_calls 重试成功修复 (attempt {attempt + 1})")
             break
 
         retry_count += 1
         retry_reason = reason
-        _log(f"{prefix}⚠️ 检测到腾讯后端流式 tool_calls 损坏 ({reason})，自动重试 ({attempt}/{max_attempts})...")
+        _log(f"{prefix}⚠️ 检测到腾讯后端流式 tool_calls 损坏 ({reason})，自动重试 ({attempt + 1}/{max_attempts})...")
         await asyncio.sleep(0.5)
 
     if collected is None:
