@@ -6,26 +6,42 @@ tests/test_model_availability.py - 模型可用性感知（运行时学习 + 预
 2. _mark_model_unavailable()：运行时学习写入 model_availability.json（per-uid），幂等去重；
 3. _mark_model_available()：成功调用覆盖不可用记录（套餐升级后可恢复）；
 4. _load_availability()：损坏文件降级为空映射，不抛异常；
-5. _premarked_unavailable()：GPT_FALLBACK_MAP 键即预标记来源；
-6. _effective_unavailable()：预标记兜底，运行时证据（200/11102）优先；
-7. /v1/models 清单两种模式端到端：all 全量带 availability 字段；available 剔除不可用。
+5. _effective_unavailable()：预标记兜底，运行时证据（200/11102）优先；
+6. /v1/models 清单两种模式端到端：all 全量带 availability 字段；available 剔除不可用。
+7. test_premarked_covers_all_gpt_fallback_keys：三真源对拍（独立校验器）。
 """
 
 import json
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
 import converter
 from converter import (
-    GPT_FALLBACK_MAP,
     _effective_unavailable,
     _load_availability,
     _mark_model_available,
     _mark_model_unavailable,
     _normalize_list_mode,
-    _premarked_unavailable,
 )
+
+# 三真源对拍校验器（scripts/check_premarked_sync.py，CI 亦直接调用）
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+from check_premarked_sync import collect_problems as _collect_premarked_problems
+
+
+def _check_premarked_sync() -> int:
+    """CLI 脚本的测试壳：0=同步，1=漂移（漂移明细打印到 pytest 输出）。"""
+    problems = _collect_premarked_problems(
+        (_REPO_ROOT / "converter.py").read_text(encoding="utf-8"),
+        (_REPO_ROOT / "src-tauri" / "src" / "commands" / "billing.rs").read_text(encoding="utf-8"),
+    )
+    for p in problems:
+        print(f"  - {p}")
+    return 1 if problems else 0
 
 
 # ── 纯函数：模式归一 ──────────────────────────────────────────────
@@ -41,13 +57,21 @@ def test_normalize_list_mode_falls_back_to_all():
     assert _normalize_list_mode("garbage") == "all"
 
 
-# ── 预标记：GPT_FALLBACK_MAP 键即「需海外套餐」来源 ──────────────
+# ── 三真源同步：GPT_FALLBACK_MAP ↔ Rust GPT_PREMARKED ────────────
 
 def test_premarked_covers_all_gpt_fallback_keys():
-    pre = _premarked_unavailable()
-    for key in GPT_FALLBACK_MAP:
-        assert key in pre
-    assert "deepseek-v4-pro" not in pre  # 降级目标本身可用
+    """真源对拍（独立校验器，非源内引用）：Python 键集 == Rust 常量键集。
+
+    历史 bug：旧版断言 GPT_FALLBACK_MAP 键 ⊆ _premarked_unavailable()，
+    而后者就是 set(GPT_FALLBACK_MAP.keys())——自己对自己断言，恒真，
+    Rust GPT_PREMARKED 漂移永远不会红。现改用 CI 脚本 scripts/check_premarked_sync.py
+    独立提取两侧源码对拍，测试只是脚本的一层薄壳（CI 亦直接调用该脚本）。
+    """
+    assert _check_premarked_sync() == 0, (
+        "三真源不同步：见上方校验器输出。"
+        "新增/删除需授权模型时必须三处一起改："
+        "converter.py GPT_FALLBACK_MAP / billing.rs GPT_PREMARKED / 本文件。"
+    )
 
 
 # ── 持久化：运行时学习 ───────────────────────────────────────────

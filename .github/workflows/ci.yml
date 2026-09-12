@@ -49,6 +49,9 @@ jobs:
       - name: Run pytest
         run: pytest -q
 
+      - name: Three-source sync check (GPT_FALLBACK_MAP <-> GPT_PREMARKED)
+        run: python scripts/check_premarked_sync.py
+
       - name: Run frontend unit tests
         run: npm test
 
