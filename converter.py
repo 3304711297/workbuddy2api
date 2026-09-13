@@ -4367,6 +4367,27 @@ def preflight() -> bool:
     return ok
 
 
+def _snapshot_settings_from_args(args):
+    """快照开关解析（GUI 设置 → CLI → CONFIG 的契约函数）。
+
+    显式 CLI flag 优先；未传时回退环境变量（默认开/留 200，与 CONFIG 初始化一致）。
+    返回 (snapshots: bool, keep: int)。
+    """
+    if getattr(args, "snapshots", None) is not None:
+        snap = bool(args.snapshots)
+    else:
+        snap = _env_compat("SNAPSHOTS", "1").lower() in ("1", "true", "yes")
+    raw_keep = getattr(args, "snapshots_keep", None)
+    if isinstance(raw_keep, bool) or raw_keep is None:
+        keep = _env_int("SNAPSHOTS_KEEP", 200)
+    else:
+        try:
+            keep = max(10, int(raw_keep))
+        except (TypeError, ValueError):
+            keep = _env_int("SNAPSHOTS_KEEP", 200)
+    return snap, keep
+
+
 def main():
     ap = argparse.ArgumentParser(description="WorkBuddy2API — CodeBuddy/WorkBuddy 转 OpenAI + Anthropic 兼容端点（直连后端）")
     ap.add_argument("--host", default="127.0.0.1")
@@ -4393,6 +4414,12 @@ def main():
                     help="开启请求快照（调试 Tab 数据源）：每个聊天请求完成后追加一条 JSONL"
                          "（端点/模型/状态/耗时/请求体/响应摘要/错误），超 2*keep 行轮转保留 keep 条。"
                          "请求体含完整 prompt 明文（已脱敏 Token/Key）。不传则不记录。")
+    ap.add_argument("--snapshots", dest="snapshots", action="store_true", default=None,
+                    help="启用请求快照（默认启用；GUI 设置页开关透传此 flag，修改后重启内核生效）。")
+    ap.add_argument("--no-snapshots", dest="snapshots", action="store_false",
+                    help="禁用请求快照：不再落盘请求体。")
+    ap.add_argument("--snapshots-keep", type=int, default=None, metavar="N",
+                    help="快照保留条数（默认 200，GUI 设置页透传，修改后重启内核生效）。")
     ap.add_argument("--desensitize", action="store_true",
                     help="启用脱敏：对 system 消息里的合规模板敏感词（DoS/exploit/credential 等）"
                          "插入零宽空格，缓解被后端内容审核误拦。默认关闭。")
@@ -4461,6 +4488,8 @@ def main():
     CONFIG["log_payloads"] = args.log_payloads or _env_compat("LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
     CONFIG["usage_log"] = args.usage_log if args.usage_log else (_env_compat("USAGE_LOG", "") or None)
     CONFIG["snapshots_log"] = args.snapshots_log if args.snapshots_log else (_env_compat("SNAPSHOTS_LOG", "") or None)
+    # 快照开关/保留条数：显式 CLI flag（GUI 设置页透传）优先，否则沿用环境变量默认值
+    CONFIG["snapshots"], CONFIG["snapshots_keep"] = _snapshot_settings_from_args(args)
     init_cred()
 
     if not args.skip_check:

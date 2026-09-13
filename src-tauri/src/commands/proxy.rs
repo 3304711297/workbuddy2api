@@ -151,6 +151,10 @@ pub fn proxy_start(
     cmd.arg("--usage-log").arg(usage_dir.join("usage.jsonl"));
     // 请求快照（调试 Tab 数据源）：与用量文件同目录，converter 以 --snapshots-log 注入路径
     cmd.arg("--snapshots-log").arg(usage_dir.join("snapshots.jsonl"));
+    // 快照开关/保留条数：GUI 设置 → CLI → 内核 CONFIG（修改后重启内核生效）
+    for a in snapshot_cli_args(cfg.snapshots, cfg.snapshots_keep) {
+        cmd.arg(a);
+    }
 
     // 结构化日志：内核 _log() 在 log_path 为空时直接丢弃——不传 --log 则丢失
     // 请求摘要/耗时/错误详情等结构化行（日志页只能看到 uvicorn 原始 stdout）。
@@ -1060,6 +1064,16 @@ fn snapshots_log_path() -> PathBuf {
     local_app_dir().join("usage").join("snapshots.jsonl")
 }
 
+/// 快照开关的 CLI 参数组装（纯函数，便于单测）：GUI 设置 → 内核 flag。
+/// 开 → --snapshots；关 → --no-snapshots；keep 原值透传（内核侧钳制下限）。
+fn snapshot_cli_args(snapshots: bool, keep: u32) -> Vec<String> {
+    let mut v = Vec::with_capacity(3);
+    v.push(if snapshots { "--snapshots" } else { "--no-snapshots" }.to_string());
+    v.push("--snapshots-keep".to_string());
+    v.push(keep.to_string());
+    v
+}
+
 /// 组装快照查询响应（纯函数，便于单测）：坏行跳过，最新在前，limit 上限 500。
 fn query_snapshots(text: &str, limit: usize) -> serde_json::Value {
     let limit = limit.clamp(1, 500);
@@ -1580,5 +1594,14 @@ mod test_snapshot_query_tests {
         let bad_ep: serde_json::Value = serde_json::from_str(
             r#"{"id":"z","endpoint":"http://evil/x","req":{"a":1}}"#).unwrap();
         assert!(extract_replay_target(&bad_ep).is_err());
+    }
+
+    #[test]
+    fn snapshot_cli_args_mirror_gui_settings() {
+        // GUI 关 → 必须传 --no-snapshots；GUI 开 → --snapshots；keep 原值透传
+        assert_eq!(snapshot_cli_args(false, 200),
+                   vec!["--no-snapshots".to_string(), "--snapshots-keep".to_string(), "200".to_string()]);
+        assert_eq!(snapshot_cli_args(true, 500),
+                   vec!["--snapshots".to_string(), "--snapshots-keep".to_string(), "500".to_string()]);
     }
 }
