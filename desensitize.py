@@ -183,6 +183,36 @@ def desensitize_messages(messages: Iterable[dict],
     return out
 
 
+def scan_messages(messages, roles: tuple[str, ...] = ("system", "assistant")) -> list[dict]:
+    """干跑脱敏：逐条报告文本是否会被改写及命中哪一层，不修改输入。
+
+    供 POST /api/desensitize_check 做 11128 毒历史定位：把可疑会话的
+    messages 贴进来，即可看到哪条 system/assistant 历史带指纹。
+    返回 [{index, role, layers: [fingerprint|term], preview}]。
+    """
+    out: list[dict] = []
+    for i, m in enumerate(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role not in roles:
+            continue
+        for text, _ in _iter_text_blocks(m.get("content")):
+            if not isinstance(text, str) or not text:
+                continue
+            after_fp = _rewrite_known_fingerprints(text)
+            after_full = desensitize_text(text)
+            layers = []
+            if after_fp != text:
+                layers.append("fingerprint")
+            if after_full != after_fp:
+                layers.append("term")
+            if layers:
+                out.append({"index": i, "role": role, "layers": layers,
+                            "preview": text[:80]})
+    return out
+
+
 def desensitize_body(body: dict, roles: tuple[str, ...] = ("system",)) -> dict:
     """对请求体里的 messages 做脱敏，返回新的 body（浅拷贝）。"""
     if not body.get("messages"):

@@ -46,10 +46,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 try:
-    from desensitize import desensitize_body
+    from desensitize import desensitize_body, scan_messages
 except ImportError:  # 模块缺失时降级为不脱敏
     def desensitize_body(body, roles=("system",)):
         return body
+
+    def scan_messages(messages, roles=("system", "assistant")):
+        return []
 
 try:
     from anthropic_compat import translate_anthropic_request, translate_openai_response_to_anthropic
@@ -223,6 +226,45 @@ def _env_compat(suffix: str, default: str = "") -> str:
     return v if v not in (None, "") else default
 
 
+def _safe_int(v, default: int) -> int:
+    """任意值 → int，非法/缺失回退 default（启动与请求路径数值解析统一入口）。"""
+    if isinstance(v, bool):
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(v, default: float) -> float:
+    if isinstance(v, bool):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(suffix: str, default: int) -> int:
+    raw = _env_compat(suffix, "")
+    if raw in (None, ""):
+        return default
+    v = _safe_int(raw, default)
+    if v == default and str(raw) != str(default):
+        sys.stderr.write(f"[workbuddy2api] 环境变量 {suffix}={raw!r} 非法，回退默认值 {default}\n")
+    return v
+
+
+def _env_float(suffix: str, default: float) -> float:
+    raw = _env_compat(suffix, "")
+    if raw in (None, ""):
+        return default
+    v = _safe_float(raw, default)
+    if v == default and str(raw) != str(default):
+        sys.stderr.write(f"[workbuddy2api] 环境变量 {suffix}={raw!r} 非法，回退默认值 {default}\n")
+    return v
+
+
 # ---------------------------------------------------------------------------
 # 出站 User-Agent 与 请求体防护 (借鉴开源生态优秀实践)
 # ---------------------------------------------------------------------------
@@ -246,12 +288,12 @@ USER_AGENT = _get_user_agent()
 
 # 请求体大小限制（防大包与内存拖垮，参考 linguo2625469/workbuddy2api-panel）
 # 默认 16MB，可通过 WORKBUDDY2API_MAX_BODY_MB 环境变量自定义
-MAX_BODY_MB = float(_env_compat("MAX_BODY_MB", "16"))
+MAX_BODY_MB = _env_float("MAX_BODY_MB", 16.0)
 MAX_BODY_BYTES = int(MAX_BODY_MB * 1024 * 1024)
 
 # 远程多模态图片下载上限（防 SSRF 与内存放大：单图默认 8MB）
 # 可通过 WORKBUDDY2API_MAX_IMAGE_MB 自定义；设为 0 表示禁用远程图片下载
-MAX_IMAGE_MB = float(_env_compat("MAX_IMAGE_MB", "8"))
+MAX_IMAGE_MB = _env_float("MAX_IMAGE_MB", 8.0)
 MAX_IMAGE_BYTES = int(MAX_IMAGE_MB * 1024 * 1024)
 
 
@@ -309,6 +351,12 @@ def _load_active_session(cfg: dict) -> tuple[str, dict]:
     if not isinstance(session, dict):
         raise ValueError(f"accounts.json 中不存在活跃账号 {active_uid} 的会话")
     return active_uid, session
+
+
+def _auth_is_expired(auth: dict) -> bool:
+    """纯函数：auth 是否过期（提前 60s；缺 expiresAt 视为过期，与 _is_expired 同口径）。"""
+    expires_at = (auth or {}).get("expiresAt") or 0
+    return time.time() * 1000 >= (expires_at - 60_000)
 
 
 def _read_all_accounts() -> tuple[str, dict[str, dict]]:
@@ -506,9 +554,11 @@ class CredentialManager:
 
     def get_active_session(self) -> dict:
         """获取当前活跃会话字典（包含 auth 与 account 节点）。"""
+        if self._is_expired():
+            with self._lock:
+                if self._is_expired():  # 二次确认：等待锁期间可能已被刷新
+                    self._refresh()
         with self._lock:
-            if self._is_expired():
-                self._refresh()
             return self._session()
 
     def peek_active_session(self) -> dict:
@@ -517,10 +567,7 @@ class CredentialManager:
             return self._session()
 
     def _is_expired(self) -> bool:
-        s = self._session()
-        expires_at = (s.get("auth") or {}).get("expiresAt") or 0
-        # 提前 60s 判定过期
-        return time.time() * 1000 >= (expires_at - 60_000)
+        return _auth_is_expired((self._session().get("auth") or {}))
 
     def _save_tokens(self, arg1: dict, arg2: dict | None = None):
         """明确 accounts.json 为真源，.info 为兼容镜像。
@@ -620,11 +667,14 @@ class CredentialManager:
 
     def get_headers(self) -> dict:
         """返回带最新 token 的后端请求 header；必要时先刷新。"""
+        if self._is_expired():
+            with self._lock:
+                if self._is_expired():
+                    self._refresh()
         with self._lock:
-            if self._is_expired():
-                self._refresh()
             s = self._session()
-            return self._build_headers_from(s.get("auth") or {}, s.get("account") or {})
+        # 建头移出锁：turing fork 不再阻塞其他线程的请求
+        return self._build_headers_from(s.get("auth") or {}, s.get("account") or {})
 
     def get_active_uid(self) -> str:
         s = self._session()
@@ -640,23 +690,31 @@ class CredentialManager:
         return list(accounts.items())
 
     def get_headers_for_uid(self, uid: str) -> dict:
+        # 全程无锁读文件 + 锁外调 get_headers：消除锁内重入 self._lock 的自死锁
+        active_uid, accounts = _read_all_accounts()
+        if not accounts:
+            return self.get_headers()
+        session = accounts.get(uid)
+        if not session or not isinstance(session, dict):
+            return self.get_headers()
+        auth = session.get("auth") or {}
+        account = session.get("account") or {}
+        if not _auth_is_expired(auth):
+            return self._build_headers_from(auth, account)
         with self._lock:
-            active_uid, accounts = _read_all_accounts()
-            if not accounts:
-                return self.get_headers()
-            session = accounts.get(uid)
-            if not session or not isinstance(session, dict):
-                return self.get_headers()
+            _, accounts = _read_all_accounts()
+            session = accounts.get(uid, session)
             auth = session.get("auth") or {}
             account = session.get("account") or {}
+            # 保持原语义：缺 expiresAt 的会话不触发刷新（legacy 长效 token）
             expires_at = auth.get("expiresAt") or 0
-            if expires_at and time.time() * 1000 >= (expires_at - 60_000):
+            if expires_at and _auth_is_expired(auth):
                 self._refresh_session_tokens(uid, session)
                 _, accounts = _read_all_accounts()
                 session = accounts.get(uid, session)
                 auth = session.get("auth") or {}
                 account = session.get("account") or {}
-            return self._build_headers_from(auth, account)
+        return self._build_headers_from(auth, account)
 
     def switch_active_account(self, uid: str) -> bool:
         with self._lock:
@@ -1354,7 +1412,7 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "desensitize": False, "wsl": False, "scan_all_users": False,
                 # 多账号凭据轮换：默认 off 关闭；failover (限流自动故障转移) / roundrobin (按请求轮询分摊)
                 "rotate_mode": _env_compat("ROTATE_MODE", "off").lower(),
-                "rotate_count": int(_env_compat("ROTATE_COUNT", "1")),
+                "rotate_count": _env_int("ROTATE_COUNT", 1),
                 # 流式 tool_calls 损坏防御（实验性阻塞聚合重试）：默认关闭（优先原生真流式透传，杜绝 60s/140s 超时）
                 # 可通过 --repair-stream-tools 或环境变量 WORKBUDDY2API_REPAIR_STREAM_TOOLS=1 开启（兼容旧名 CODEBUDDY2OPENAI_*）
                 "repair_stream_tools": _env_compat("REPAIR_STREAM_TOOLS", "0").lower() in ("1", "true", "yes"),
@@ -1373,8 +1431,8 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
 
 # 并发削峰与流量节奏平滑器
 _REQUEST_PACER = RequestPacer(
-    max_concurrency=int(_env_compat("MAX_CONCURRENCY", "5")),
-    min_interval_ms=float(_env_compat("MIN_INTERVAL_MS", "50")),
+    max_concurrency=_env_int("MAX_CONCURRENCY", 5),
+    min_interval_ms=_env_float("MIN_INTERVAL_MS", 50.0),
 ) if RequestPacer else None
 
 # 后台主动令牌续期任务
@@ -1425,8 +1483,8 @@ async def lifespan(app: FastAPI):
         if cred is not None:
             _TOKEN_REFRESHER = BackgroundTokenRefresher(
                 credential_manager=cred,
-                check_interval_seconds=float(_env_compat("REFRESH_INTERVAL", "300")),
-                threshold_seconds=float(_env_compat("REFRESH_THRESHOLD", "1800")),
+                check_interval_seconds=_env_float("REFRESH_INTERVAL", 300.0),
+                threshold_seconds=_env_float("REFRESH_THRESHOLD", 1800.0),
             )
             _TOKEN_REFRESHER.start()
             _log("后台主动令牌续期任务已启动 (巡检间隔: 300s, 提前续期阈值: 1800s)")
@@ -2300,11 +2358,7 @@ def _get_rotator() -> AccountRotator:
     mode = str(disk.get("rotate_mode") or CONFIG.get("rotate_mode") or "off").lower()
     if mode not in ("off", "failover", "roundrobin"):
         mode = "off"
-    try:
-        count = int(disk.get("rotate_count") or CONFIG.get("rotate_count") or 1)
-    except (TypeError, ValueError):
-        count = int(CONFIG.get("rotate_count") or 1)
-    count = max(1, count)
+    count = max(1, _safe_int(disk.get("rotate_count"), _safe_int(CONFIG.get("rotate_count"), 1)))
 
     if _ACCOUNT_ROTATOR is None:
         _ACCOUNT_ROTATOR = AccountRotator(cred_mgr=CONFIG.get("cred"), mode=mode, rotate_count=count)
@@ -2367,6 +2421,27 @@ def _rolling_usage(model: str) -> dict:
         "last429Local": time.strftime("%m-%d %H:%M:%S", time.localtime(last429 / 1000)) if last429 else None,
         "nightFree": is_night_free,
     }
+
+
+@app.post("/api/desensitize_check")
+async def api_desensitize_check(request: Request,
+                                authorization: Optional[str] = Header(default=None),
+                                x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """11128 毒历史自查（只诊断不改写）：逐条报告 messages 里会被脱敏的文本。
+
+    用户把可疑会话的 messages 贴进来，即可定位哪条 system/assistant 历史
+    带客户端指纹，回客户端 state.db 修那条消息或放弃会话。
+    """
+    _check_auth(authorization, x_api_key)
+    try:
+        payload = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+    messages = (payload or {}).get("messages")
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail={"error": {"message": "messages must be a list", "type": "invalid_request_error"}})
+    results = scan_messages(messages)
+    return {"poisoned": bool(results), "results": results}
 
 
 @app.get("/api/rate_limit")
