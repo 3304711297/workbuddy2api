@@ -3603,7 +3603,8 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
                   retry_count=retry_count,
                   retry_reason=retry_reason,
                   requested_model=req_m,
-                  fallback_reason=fallback_reason)
+                  fallback_reason=fallback_reason,
+                  snapshot_resp=_snapshot_excerpt(collected))
 
 
 async def _safe_stream_upstream(url: str, headers: dict, body: dict,
