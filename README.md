@@ -76,7 +76,8 @@
 | **模型列表探测** | `GET /v1/models` | OpenAI 格式标准模型列表（动态拉取上游全部模型） | `Authorization: Bearer local` |
 | **服务健康与探活** | `GET /health` | 本地健康检测 / 心跳探测（安全收窄，不泄露敏感身份信息） | 无需鉴权 |
 | **用量统计与积分概览** | `GET /api/usage_summary` | 当前账号积分余额、今日用量（请求数/Token/429） | `Authorization: Bearer local` |
-| **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） + 多账号调度配置来源（`rotation.config_source`） | `Authorization: Bearer local` |
+| **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） + 多账号调度配置来源（`rotation.config_source`） | `Authorization: Bearer *** |
+| **11128 毒历史自查** | `POST /api/desensitize_check` | 干跑脱敏诊断：定位哪条 system/assistant 历史带客户端指纹（只报不改） | `Authorization: Bearer *** |
 
 ---
 
