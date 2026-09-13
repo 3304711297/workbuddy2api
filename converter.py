@@ -1429,11 +1429,37 @@ CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 # 需明确通过 --optimize-context 或 WORKBUDDY2API_OPTIMIZE_CONTEXT=1 或请求体 optimize_context: true 显式开启
                 "optimize_context": _env_compat("OPTIMIZE_CONTEXT", "0").lower() in ("1", "true", "yes")}  # cred: CredentialManager | None
 
-# 并发削峰与流量节奏平滑器
+# 并发削峰与流量节奏平滑器（模型级间隔默认开启：单模型脉冲同样被平滑）
 _REQUEST_PACER = RequestPacer(
     max_concurrency=_env_int("MAX_CONCURRENCY", 5),
     min_interval_ms=_env_float("MIN_INTERVAL_MS", 50.0),
+    by_model=True,
 ) if RequestPacer else None
+
+
+def _get_pacer():
+    """返回共享 pacer：先热读 settings.json 同步间隔策略（改完即生效）。
+
+    max_concurrency 涉及信号量重建，改动仍需重启内核；间隔与 by_model 热生效。
+    """
+    if _REQUEST_PACER is None:
+        return None
+    try:
+        disk = load_app_settings() or {}
+    except Exception:
+        return _REQUEST_PACER
+    iv = disk.get("pacer_min_interval_ms")
+    try:
+        iv = max(0.0, float(iv)) if iv is not None else None
+    except (TypeError, ValueError):
+        iv = None
+    bm = disk.get("pacer_by_model", True)
+    if isinstance(bm, str):
+        bm = bm.lower() in ("1", "true", "yes")
+    else:
+        bm = bool(bm)
+    _REQUEST_PACER.sync_limits(min_interval_ms=iv, by_model=bm)
+    return _REQUEST_PACER
 
 # 后台主动令牌续期任务
 _TOKEN_REFRESHER: Optional[Any] = None
@@ -2675,7 +2701,8 @@ async def chat_completions(request: Request,
 
     has_tools = bool(payload.get("tools"))
     need_tool_repair = client_wants_stream and has_tools and CONFIG.get("repair_stream_tools", True)
-    pacer_ctx = _REQUEST_PACER.acquire(model_name) if _REQUEST_PACER else None
+    _pacer = _get_pacer()
+    pacer_ctx = _pacer.acquire(model_name) if _pacer else None
 
     if client_wants_stream and not need_tool_repair:
         async def _paced_stream():
@@ -2909,7 +2936,8 @@ async def anthropic_messages(
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
-    pacer_ctx = _REQUEST_PACER.acquire(model_name) if _REQUEST_PACER else None
+    _pacer = _get_pacer()
+    pacer_ctx = _pacer.acquire(model_name) if _pacer else None
 
     if client_wants_stream:
         async def _anthropic_stream_gen():
@@ -3112,7 +3140,8 @@ async def openai_responses(
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
-    pacer_ctx = _REQUEST_PACER.acquire(model_name) if _REQUEST_PACER else None
+    _pacer = _get_pacer()
+    pacer_ctx = _pacer.acquire(model_name) if _pacer else None
 
     if client_wants_stream:
         async def _responses_stream_generator():

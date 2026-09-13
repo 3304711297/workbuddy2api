@@ -69,6 +69,16 @@ class RequestPacer:
     def by_model(self) -> bool:
         return self._by_model
 
+    def sync_limits(self, min_interval_ms=None, by_model=None) -> None:
+        """运行时热更新间隔策略（不重建信号量；max_concurrency 改动仍需重启）。"""
+        if min_interval_ms is not None:
+            try:
+                self._min_interval_ms = max(0.0, float(min_interval_ms))
+            except (TypeError, ValueError):
+                pass
+        if by_model is not None:
+            self._by_model = bool(by_model)
+
     def acquire(self, model: Optional[str] = None) -> _PacerContext:
         """获取并发上下文管理器。"""
         return _PacerContext(self, model)
