@@ -35,6 +35,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -1409,6 +1410,10 @@ PASSTHROUGH_BODY_KEYS = {
 CONFIG: dict = {"host": "127.0.0.1", "port": 8787, "api_key": "",
                 "cred": None, "log_path": None, "log_level": "info",
                 "log_payloads": False, "usage_log": None, "unsafe_expose": False,
+                # 请求快照（调试 Tab 数据源）：默认开启，留最近 snapshots_keep 条
+                "snapshots": _env_compat("SNAPSHOTS", "1").lower() in ("1", "true", "yes"),
+                "snapshots_keep": _env_int("SNAPSHOTS_KEEP", 200),
+                "snapshots_log": None,
                 "desensitize": False, "wsl": False, "scan_all_users": False,
                 # 多账号凭据轮换：默认 off 关闭；failover (限流自动故障转移) / roundrobin (按请求轮询分摊)
                 "rotate_mode": _env_compat("ROTATE_MODE", "off").lower(),
@@ -1823,6 +1828,65 @@ def _record_usage(model: str, ok: bool, t0: float, *,
                 pass
     except Exception:
         pass  # 统计失败不影响主流程
+
+
+_SNAP_LOCK = threading.Lock()
+
+
+def _record_snapshot(endpoint, model, ok, t0, *,
+                     request_body=None, response_excerpt=None,
+                     error=None, replay=False):
+    """追加一条请求快照到 CONFIG['snapshots_log']（JSONL），返回快照 id。
+
+    未启用 snapshots 开关或未配路径时返回 None；任何异常静默吞掉，
+    绝不影响主流程。请求体经 _sanitize_log_text 脱敏后截断 32KB，
+    响应摘要截断 4KB。超过 2*keep 行时回写保留最后 keep 行（轮转）。
+    """
+    if not CONFIG.get("snapshots"):
+        return None
+    path = CONFIG.get("snapshots_log") or ""
+    if not path:
+        return None
+    try:
+        sid = uuid.uuid4().hex[:12]
+        try:
+            body_text = _sanitize_log_text(
+                json.dumps(request_body or {}, ensure_ascii=False, default=str))
+        except Exception:
+            body_text = "{}"
+        if len(body_text) > 32768:
+            body_text = body_text[:32768] + "…[truncated]"
+        try:
+            req_obj = json.loads(body_text)
+        except Exception:
+            req_obj = {"_raw": body_text[:32768]}
+        rec = {
+            "id": sid,
+            "ts": int(time.time() * 1000),
+            "endpoint": endpoint,
+            "model": model,
+            "ok": bool(ok),
+            "latency_ms": int((time.time() - t0) * 1000) if t0 else 0,
+            "req": req_obj,
+            "resp": (_truncate(str(response_excerpt), 4000) if response_excerpt else None),
+            "error": (_truncate(str(error), 500) if error else None),
+            "replay": bool(replay),
+        }
+        keep = int(CONFIG.get("snapshots_keep") or 200)
+        with _SNAP_LOCK:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+                if len(lines) > 2 * keep:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.writelines(lines[-keep:])
+            except OSError:
+                pass
+        return sid
+    except Exception:
+        return None
 
 
 def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
@@ -4249,6 +4313,10 @@ def main():
                     help="开启用量统计：每个聊天请求（流式/非流式）完成后向该文件追加一行 JSONL"
                          "（ts/model/ok/input_tokens/output_tokens/latency_ms/ttft_ms/error/retry_count/retry_reason）。"
                          "不传则不记录。")
+    ap.add_argument("--snapshots-log", default=None, metavar="PATH",
+                    help="开启请求快照（调试 Tab 数据源）：每个聊天请求完成后追加一条 JSONL"
+                         "（端点/模型/状态/耗时/请求体/响应摘要/错误），超 2*keep 行轮转保留 keep 条。"
+                         "请求体含完整 prompt 明文（已脱敏 Token/Key）。不传则不记录。")
     ap.add_argument("--desensitize", action="store_true",
                     help="启用脱敏：对 system 消息里的合规模板敏感词（DoS/exploit/credential 等）"
                          "插入零宽空格，缓解被后端内容审核误拦。默认关闭。")
@@ -4316,6 +4384,7 @@ def main():
     CONFIG["log_level"] = args.log_level
     CONFIG["log_payloads"] = args.log_payloads or _env_compat("LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
     CONFIG["usage_log"] = args.usage_log if args.usage_log else (_env_compat("USAGE_LOG", "") or None)
+    CONFIG["snapshots_log"] = args.snapshots_log if args.snapshots_log else (_env_compat("SNAPSHOTS_LOG", "") or None)
     init_cred()
 
     if not args.skip_check:
