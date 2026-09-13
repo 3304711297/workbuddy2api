@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import collections
 import datetime
 import hmac
 import ipaddress
@@ -388,6 +389,9 @@ def init_cred() -> None:
 _TURING_TOKEN_CACHE: Optional[str] = None
 _TURING_TOKEN_AT: float = 0.0
 _TURING_TTL_SEC = 600.0
+# 失败负缓存：helper 失败后 60s 内不再 fork 子进程（SDK 缺失时每请求 fork 代价大）
+_TURING_FAIL_AT: float = 0.0
+_TURING_FAIL_BACKOFF_SEC = 60.0
 
 
 def _find_node_runtime() -> str:
@@ -407,10 +411,12 @@ def _find_node_runtime() -> str:
 
 def _get_turing_device_token() -> Optional[str]:
     """取得设备风控 token（进程内缓存 10 分钟）；任何失败返回 None，不抛异常。"""
-    global _TURING_TOKEN_CACHE, _TURING_TOKEN_AT
+    global _TURING_TOKEN_CACHE, _TURING_TOKEN_AT, _TURING_FAIL_AT
     now = time.time()
     if _TURING_TOKEN_CACHE is not None and (now - _TURING_TOKEN_AT) < _TURING_TTL_SEC:
         return _TURING_TOKEN_CACHE
+    if _TURING_TOKEN_CACHE is None and (now - _TURING_FAIL_AT) < _TURING_FAIL_BACKOFF_SEC:
+        return None  # 负缓存：上次失败不久，不再重复 fork 子进程
     try:
         helper = Path(__file__).resolve().parent / "turing_helper.cjs"
         if not helper.is_file():
@@ -425,15 +431,18 @@ def _get_turing_device_token() -> Optional[str]:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0:
+            _TURING_FAIL_AT = now
             return None
         data = json.loads(proc.stdout.decode("utf-8", "replace").strip())
         token = (data.get("token") or "").strip()
         if not token:
+            _TURING_FAIL_AT = now
             return None
         _TURING_TOKEN_CACHE = token
         _TURING_TOKEN_AT = now
         return token
     except Exception as exc:
+        _TURING_FAIL_AT = now
         _log(f"获取 device token 失败（优雅降级为不带 X-Device-Token）: {exc}")
         return None
 
@@ -1371,6 +1380,42 @@ _REQUEST_PACER = RequestPacer(
 # 后台主动令牌续期任务
 _TOKEN_REFRESHER: Optional[Any] = None
 
+# 热路径共享连接池：按 (timeout, client 类) 复用，避免逐请求建池重复 TLS 握手。
+# key 带上 httpx.AsyncClient 类对象——测试 monkeypatch 换类后自动隔离，
+# fake 实例不会泄漏到其他用例；生产环境类对象恒定，即单例复用。
+_SHARED_CLIENTS: dict = {}
+_SHARED_CLIENTS_LOCK = threading.Lock()
+
+
+def _shared_client(timeout):
+    key = (timeout, httpx.AsyncClient)
+    with _SHARED_CLIENTS_LOCK:
+        c = _SHARED_CLIENTS.get(key)
+        if c is None or getattr(c, "is_closed", False):
+            c = httpx.AsyncClient(timeout=timeout)
+            _SHARED_CLIENTS[key] = c
+        return c
+
+
+@asynccontextmanager
+async def _shared_client_ctx(timeout):
+    """共享池的 async-with 包装：只为零缩进替换建池点，从不关闭共享实例。"""
+    yield _shared_client(timeout)
+
+
+async def _aclose_shared_clients():
+    """lifespan shutdown 关闭共享池（测试不走 lifespan，无需清理）。"""
+    with _SHARED_CLIENTS_LOCK:
+        clients = list(_SHARED_CLIENTS.values())
+        _SHARED_CLIENTS.clear()
+    for c in clients:
+        try:
+            aclose = getattr(c, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        except Exception:
+            pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1390,6 +1435,7 @@ async def lifespan(app: FastAPI):
         await _TOKEN_REFRESHER.stop()
         _TOKEN_REFRESHER = None
         _log("后台主动令牌续期任务已停止")
+    await _aclose_shared_clients()
 
 
 app = FastAPI(title="workbuddy2api", version="2.0", lifespan=lifespan)
@@ -1607,6 +1653,59 @@ def _truncate(s: str, n: int = 80) -> str:
 
 _USAGE_LOCK = threading.Lock()
 
+# 用量内存 ring：(ts, model, ok, tokens, error) 瘦元组，上限 5 万条（约数 MB）。
+# JSONL 仍是持久化真源（桌面端直接读文件）；ring 只做聚合加速 + 外部写入同步。
+_USAGE_RING_MAX = 50000
+_USAGE_RING: collections.deque = collections.deque(maxlen=_USAGE_RING_MAX)
+_USAGE_RING_SOURCE: str = ""
+_USAGE_RING_POS: int = 0
+
+
+def _parse_usage_line(line: str):
+    """JSONL 行 → 瘦元组 (ts, model, ok, tokens, error)，非法行返回 None。"""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        rec = json.loads(line)
+    except Exception:
+        return None
+    if not rec.get("ts"):
+        return None
+    tokens = (_usage_int(rec.get("input_tokens")) or 0) + (_usage_int(rec.get("output_tokens")) or 0)
+    return (rec.get("ts"), rec.get("model"), bool(rec.get("ok")), tokens, rec.get("error"))
+
+
+def _sync_usage_ring_locked():
+    """调用方须持有 _USAGE_LOCK。路径切换→清空重载；同路径→按 size 尾部增量读；截断→重读。"""
+    global _USAGE_RING_SOURCE, _USAGE_RING_POS
+    path = CONFIG.get("usage_log") or ""
+    if _USAGE_RING_SOURCE != path:
+        _USAGE_RING.clear()
+        _USAGE_RING_POS = 0
+        _USAGE_RING_SOURCE = path
+    if not path or not os.path.exists(path):
+        return
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return
+    start = _USAGE_RING_POS if size >= _USAGE_RING_POS else 0
+    if start == size:
+        return  # 无新增，直接命中内存
+    if start == 0:
+        _USAGE_RING.clear()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            f.seek(start)
+            for line in f:
+                rec = _parse_usage_line(line)
+                if rec is not None:
+                    _USAGE_RING.append(rec)
+            _USAGE_RING_POS = f.tell()
+    except Exception:
+        _USAGE_RING_POS = 0  # 下次全量重读，避免半截重复
+
 
 def _usage_int(v) -> int | None:
     """token 数规范化：可转 int 的返回 int，缺失/非法一律 None（契约允许 null）。"""
@@ -1630,6 +1729,7 @@ def _record_usage(model: str, ok: bool, t0: float, *,
     若发生降级（requested_model != model），附带 requested_model / actual_model / fallback_reason。
     未启用 --usage-log 时直接丢弃；写入任何异常一律静默吞掉，绝不影响请求响应。
     """
+    global _USAGE_RING_POS
     path = CONFIG.get("usage_log")
     if not path:
         return
@@ -1652,9 +1752,17 @@ def _record_usage(model: str, ok: bool, t0: float, *,
             if fallback_reason:
                 rec["fallback_reason"] = fallback_reason
         with _USAGE_LOCK:  # 并发请求下保证逐行完整追加
+            _sync_usage_ring_locked()  # 先吸纳外部直接写盘的行，再追加本行
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 f.flush()  # 每行写完立即刷出，读取方（桌面端）可立即看到
+            _USAGE_RING.append((rec["ts"], model, bool(ok),
+                                (_usage_int(input_tokens) or 0) + (_usage_int(output_tokens) or 0),
+                                rec["error"]))
+            try:
+                _USAGE_RING_POS = os.path.getsize(path)
+            except OSError:
+                pass
     except Exception:
         pass  # 统计失败不影响主流程
 
@@ -1838,6 +1946,9 @@ async def api_usage_summary(
 #   {model: {"code":6004, "message":…, "resetAtMs":…, "firstSeenMs":…, "lastSeenMs":…}}
 _RATE_LIMIT_STATE: dict[str, dict] = {}
 _ACCOUNT_COOLDOWNS: dict[tuple[str, str], dict] = {}
+# model 名客户端可控，两个清单都必须有界（淘汰策略同 _FALLBACK_CAP）
+_RATE_LIMIT_CAP = 64
+_ACCOUNT_COOLDOWN_CAP = 256
 _RATE_LIMIT_LOCK = threading.Lock()
 
 # 6004 报文：{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-08 22:11:33 UTC+8 重置，…"}
@@ -1935,6 +2046,15 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
     now_ms = int(time.time() * 1000)
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)
+        if prev is None and len(_RATE_LIMIT_STATE) >= _RATE_LIMIT_CAP:
+            # 先清已过期的冷却痕迹，不够再淘汰最旧，保证清单有界
+            for k in [k for k, e in _RATE_LIMIT_STATE.items()
+                      if e.get("resetAtMs", 0) <= now_ms]:
+                _RATE_LIMIT_STATE.pop(k, None)
+            if len(_RATE_LIMIT_STATE) >= _RATE_LIMIT_CAP:
+                oldest = min(_RATE_LIMIT_STATE,
+                             key=lambda k: _RATE_LIMIT_STATE[k].get("lastSeenMs", 0))
+                _RATE_LIMIT_STATE.pop(oldest, None)
         entry = {
             "code": 6004,
             "message": (err_text or "")[:300],
@@ -1952,6 +2072,11 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             except Exception:
                 pass
         if curr_uid:
+            if ((curr_uid, model) not in _ACCOUNT_COOLDOWNS
+                    and len(_ACCOUNT_COOLDOWNS) >= _ACCOUNT_COOLDOWN_CAP):
+                oldest = min(_ACCOUNT_COOLDOWNS,
+                             key=lambda k: _ACCOUNT_COOLDOWNS[k].get("lastSeenMs", 0))
+                _ACCOUNT_COOLDOWNS.pop(oldest, None)
             _ACCOUNT_COOLDOWNS[(curr_uid, model)] = dict(entry)
 
 
@@ -2191,10 +2316,17 @@ def _get_rotator() -> AccountRotator:
 
 
 def _rolling_usage(model: str) -> dict:
-    """从 usage.jsonl 统计该模型今日(UTC+8)及近 5h/24h 的成功请求与 tokens（只读本地文件）。"""
+    """内存 ring 聚合该模型今日(UTC+8)及近 5h/24h 的成功请求与 tokens。
+
+    文件只做增量同步（stat + 尾部读），无新增时零 IO；文件缺失则退化为纯内存聚合。
+    """
     path = CONFIG.get("usage_log")
-    if not path or not os.path.exists(path):
+    if not path:
         return {}
+    with _USAGE_LOCK:
+        if os.path.exists(path):
+            _sync_usage_ring_locked()
+        records = list(_USAGE_RING) if _USAGE_RING_SOURCE == path else []
     now_ms = time.time() * 1000
     tz8 = datetime.timezone(datetime.timedelta(hours=8))
     now_dt = datetime.datetime.now(tz8)
@@ -2204,38 +2336,25 @@ def _rolling_usage(model: str) -> dict:
     reqs_today = tok_today = err_today = 0
     reqs5 = reqs24 = tok5 = tok24 = err5 = 0
     last429 = None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                ts = rec.get("ts")
-                if not ts or rec.get("model") != model or (now_ms - ts) > 24 * 3600 * 1000:
-                    continue
-                tokens = (rec.get("input_tokens") or 0) + (rec.get("output_tokens") or 0)
-                if rec.get("ok"):
-                    reqs24 += 1
-                    tok24 += tokens
-                    if (now_ms - ts) <= 5 * 3600 * 1000:
-                        reqs5 += 1
-                        tok5 += tokens
-                    if ts >= today_start_ms:
-                        reqs_today += 1
-                        tok_today += tokens
-                elif rec.get("error") == "HTTP 429":
-                    if (now_ms - ts) <= 5 * 3600 * 1000:
-                        err5 += 1
-                    if ts >= today_start_ms:
-                        err_today += 1
-                    if last429 is None or ts > last429:
-                        last429 = ts
-    except Exception:
-        return {}
+    for (ts, m, ok, tokens, error) in records:
+        if not ts or m != model or (now_ms - ts) > 24 * 3600 * 1000:
+            continue
+        if ok:
+            reqs24 += 1
+            tok24 += tokens
+            if (now_ms - ts) <= 5 * 3600 * 1000:
+                reqs5 += 1
+                tok5 += tokens
+            if ts >= today_start_ms:
+                reqs_today += 1
+                tok_today += tokens
+        elif error == "HTTP 429":
+            if (now_ms - ts) <= 5 * 3600 * 1000:
+                err5 += 1
+            if ts >= today_start_ms:
+                err_today += 1
+            if last429 is None or ts > last429:
+                last429 = ts
     return {
         "reqsToday": reqs_today,
         "tokensToday": tok_today,
@@ -2529,7 +2648,7 @@ async def chat_completions(request: Request,
     for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-                async with httpx.AsyncClient(timeout=300) as c:
+                async with _shared_client_ctx(timeout=300) as c:
                     async with c.stream("POST", url, headers=headers, json=body) as r:
                         if r.status_code != 200:
                             raw = await r.aread()
@@ -2769,7 +2888,7 @@ async def anthropic_messages(
     for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-                async with httpx.AsyncClient(timeout=300) as c:
+                async with _shared_client_ctx(timeout=300) as c:
                     async with c.stream("POST", url, headers=headers, json=body) as r:
                         if r.status_code != 200:
                             raw = await r.aread()
@@ -2965,7 +3084,7 @@ async def openai_responses(
     for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-                async with httpx.AsyncClient(timeout=300) as c:
+                async with _shared_client_ctx(timeout=300) as c:
                     async with c.stream("POST", url, headers=headers, json=body) as r:
                         if r.status_code != 200:
                             raw = await r.aread()
@@ -3276,7 +3395,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
 
     for attempt in range(max_attempts):
         try:
-            async with httpx.AsyncClient(timeout=300) as c:
+            async with _shared_client_ctx(timeout=300) as c:
                 async with c.stream("POST", url, headers=curr_headers, json=body) as r:
                     if r.status_code != 200:
                         raw = await r.aread()
@@ -3723,8 +3842,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     ttft_ms: int | None = None   # 首个含内容 chunk 距 t0 的毫秒数（TTFT）
     err_msg: str | None = None   # 上游错误摘要（None 表示流正常结束）
     buf = b""
-    raw_parts: list[bytes] = []   # 累积完整原始 SSE
-    forwarded_parts: list[bytes] = []  # 累积清洗后实际转发给客户端的 SSE
+    _capture_raw = bool(CONFIG.get("log_payloads"))
+    raw_parts: list[bytes] = []  # 仅 --log-payloads 调试时累积；默认关闭，零内存增长
     prefix = f"[{rid}] " if rid else ""
     coal = _ReasoningCoalescer()
     line_buf = _SseLineBuffer()
@@ -3777,7 +3896,6 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                 cleaned_lines.append(_maybe_sanitize_line(ln.decode("utf-8", "replace")))
             cleaned = ("\n".join(cleaned_lines) + "\n\n").encode("utf-8")
             _record_event_stats(cleaned)
-            forwarded_parts.append(cleaned)
             out += coal.feed(cleaned)
         return out
 
@@ -3792,7 +3910,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     for attempt in range(max_attempts):
         try:
-            async with httpx.AsyncClient(timeout=None) as c:
+            async with _shared_client_ctx(timeout=None) as c:
                 async with c.stream("POST", url, headers=curr_headers, json=body) as r:
                     if r.status_code != 200:
                         err = await r.aread()
@@ -3828,7 +3946,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                         yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
                     async for chunk in r.aiter_bytes():
                         if chunk:
-                            raw_parts.append(chunk)
+                            if _capture_raw:
+                                raw_parts.append(chunk)
                             for evt in _feed_and_coalesce(chunk):
                                 yield evt
                     for evt in coal.flush():
