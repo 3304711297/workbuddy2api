@@ -266,8 +266,10 @@ workbuddy2api.exe (GUI)
   快照腿独立于用量开关（`usage_log` 为空仍落快照）。文件 `%LOCALAPPDATA%/workbuddy2api/usage/snapshots.jsonl`
   由 `proxy_start` 以 `--snapshots-log` 注入；超 `2*keep` 行轮转保留 `keep` 条（默认 200）。
   快照默认开启（含完整 prompt 明文，Token/Key 已脱敏）：关了调试 Tab 即无新数据，别误报成采集 bug。
-  重放（`snapshot_replay`）只接受本机 `/v1/` 路径（防篡改快照打站外），调用方传 `port` + `api_key`（snake_case），
+  重放（`snapshot_replay`）只接受本机 `/v1/` 规范路径（禁 `..`/query/反斜杠/双斜杠，防篡改快照打站外），调用方传 `port` + `api_key`（snake_case），
   前端复制 curl 时密钥只放 `YOUR_KEY` 占位。
+  已知限制（不修）：`snapshots_clear`（Rust 直接清文件）与内核追加写之间无跨进程锁，
+  极端并发下可能多留/少留一行——调试记录级别的影响，不做原子替换。
 - **局域网访问（AppConfig.listen_host + lan_ipv4 命令）**：
   `listen_host` 默认必须是 `127.0.0.1`（安全默认，任何情况下不得默认 `0.0.0.0`）。
   **语义准确性（2026-09-12 P2）**：开关实际下发 `0.0.0.0` = 绑定**所有网卡**

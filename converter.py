@@ -1810,7 +1810,8 @@ def _record_usage(model: str, ok: bool, t0: float, *,
                   ttft_ms=None, error=None,
                   retry_count: int = 0, retry_reason: str | None = None,
                   requested_model: str | None = None,
-                  fallback_reason: str | None = None):
+                  fallback_reason: str | None = None,
+                  snapshot_resp: str | None = None):
     """向 CONFIG['usage_log'] 追加一行用量统计（JSONL，append 模式，每行写完即落盘）。
 
     行格式：{"ts": <epoch毫秒>, "model": str, "ok": bool, "input_tokens": int|null,
@@ -1826,7 +1827,8 @@ def _record_usage(model: str, ok: bool, t0: float, *,
         _snap_ctx = None
     if _snap_ctx:
         _record_snapshot(_snap_ctx[0], model, ok, t0,
-                         request_body=_snap_ctx[1], error=error)
+                         request_body=_snap_ctx[1], error=error,
+                         response_excerpt=snapshot_resp)
     global _USAGE_RING_POS
     path = CONFIG.get("usage_log")
     if not path:
@@ -1878,6 +1880,21 @@ def _snap_context(endpoint: str, request_body):
         _SNAP_CTX.set((endpoint, request_body))
     except Exception:
         pass
+
+
+def _snapshot_excerpt(collected) -> str | None:
+    """从上游聚合响应提取调试摘要：content → reasoning_content → 裁断 dump。"""
+    try:
+        if isinstance(collected, dict):
+            choices = collected.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message") or {}
+                text = msg.get("content") or msg.get("reasoning_content") or ""
+                if text:
+                    return _truncate(str(text), 4000)
+        return _truncate(json.dumps(collected, ensure_ascii=False, default=str), 4000)
+    except Exception:
+        return None
 
 
 def _record_snapshot(endpoint, model, ok, t0, *,
@@ -2925,7 +2942,8 @@ async def chat_completions(request: Request,
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   requested_model=model_name,
-                  fallback_reason=fallback_reason)
+                  fallback_reason=fallback_reason,
+                  snapshot_resp=_snapshot_excerpt(collected))
     resp_headers = {}
     if actual_model != model_name:
         resp_headers["X-Actual-Model"] = actual_model
@@ -3164,7 +3182,8 @@ async def anthropic_messages(
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   requested_model=model_name,
-                  fallback_reason=fallback_reason)
+                  fallback_reason=fallback_reason,
+                  snapshot_resp=_snapshot_excerpt(collected))
 
     anthropic_resp = translate_openai_response_to_anthropic(collected)
     if "model" in raw_body:
@@ -3342,7 +3361,7 @@ async def openai_responses(
     if fallback_reason is None:
         _mark_model_available(body["model"], uid=uid)
     _u = collected.get("usage") or {}
-    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason)
+    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
 
     responses_obj = chat_response_to_responses(collected, model=model_name)
     return JSONResponse(content=responses_obj)
@@ -4367,6 +4386,27 @@ def preflight() -> bool:
     return ok
 
 
+def _snapshot_settings_from_args(args):
+    """快照开关解析（GUI 设置 → CLI → CONFIG 的契约函数）。
+
+    显式 CLI flag 优先；未传时回退环境变量（默认开/留 200，与 CONFIG 初始化一致）。
+    返回 (snapshots: bool, keep: int)。
+    """
+    if getattr(args, "snapshots", None) is not None:
+        snap = bool(args.snapshots)
+    else:
+        snap = _env_compat("SNAPSHOTS", "1").lower() in ("1", "true", "yes")
+    raw_keep = getattr(args, "snapshots_keep", None)
+    if isinstance(raw_keep, bool) or raw_keep is None:
+        keep = _env_int("SNAPSHOTS_KEEP", 200)
+    else:
+        try:
+            keep = max(10, int(raw_keep))
+        except (TypeError, ValueError):
+            keep = _env_int("SNAPSHOTS_KEEP", 200)
+    return snap, keep
+
+
 def main():
     ap = argparse.ArgumentParser(description="WorkBuddy2API — CodeBuddy/WorkBuddy 转 OpenAI + Anthropic 兼容端点（直连后端）")
     ap.add_argument("--host", default="127.0.0.1")
@@ -4393,6 +4433,12 @@ def main():
                     help="开启请求快照（调试 Tab 数据源）：每个聊天请求完成后追加一条 JSONL"
                          "（端点/模型/状态/耗时/请求体/响应摘要/错误），超 2*keep 行轮转保留 keep 条。"
                          "请求体含完整 prompt 明文（已脱敏 Token/Key）。不传则不记录。")
+    ap.add_argument("--snapshots", dest="snapshots", action="store_true", default=None,
+                    help="启用请求快照（默认启用；GUI 设置页开关透传此 flag，修改后重启内核生效）。")
+    ap.add_argument("--no-snapshots", dest="snapshots", action="store_false",
+                    help="禁用请求快照：不再落盘请求体。")
+    ap.add_argument("--snapshots-keep", type=int, default=None, metavar="N",
+                    help="快照保留条数（默认 200，GUI 设置页透传，修改后重启内核生效）。")
     ap.add_argument("--desensitize", action="store_true",
                     help="启用脱敏：对 system 消息里的合规模板敏感词（DoS/exploit/credential 等）"
                          "插入零宽空格，缓解被后端内容审核误拦。默认关闭。")
@@ -4461,6 +4507,8 @@ def main():
     CONFIG["log_payloads"] = args.log_payloads or _env_compat("LOG_PAYLOADS", "").lower() in ("1", "true", "yes")
     CONFIG["usage_log"] = args.usage_log if args.usage_log else (_env_compat("USAGE_LOG", "") or None)
     CONFIG["snapshots_log"] = args.snapshots_log if args.snapshots_log else (_env_compat("SNAPSHOTS_LOG", "") or None)
+    # 快照开关/保留条数：显式 CLI flag（GUI 设置页透传）优先，否则沿用环境变量默认值
+    CONFIG["snapshots"], CONFIG["snapshots_keep"] = _snapshot_settings_from_args(args)
     init_cred()
 
     if not args.skip_check:
