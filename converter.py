@@ -2606,6 +2606,29 @@ async def api_rate_limit(
     }
 
 
+@app.get("/api/snapshots")
+async def api_snapshots(limit: int = 100,
+                        authorization: Optional[str] = Header(default=None),
+                        x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """最近请求快照（最新在前，默认 100 条）。鉴权与 /api/rate_limit 同款。"""
+    _check_auth(authorization, x_api_key)
+    path = CONFIG.get("snapshots_log") or ""
+    out = []
+    try:
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in lines[-max(1, min(limit, 500)):]:
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except OSError:
+        pass
+    out.reverse()
+    return {"snapshots": out, "total": len(out)}
+
+
 @app.get("/v1/models")
 async def list_models(authorization: Optional[str] = Header(default=None),
                      x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
