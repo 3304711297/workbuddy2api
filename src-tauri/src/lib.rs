@@ -64,6 +64,12 @@ pub struct AppConfig {
     /// （高危：内核要求必须同时配置 api_key，否则拒绝启动）
     #[serde(default = "default_listen_host")]
     pub listen_host: String,
+    /// 请求快照开关（调试 Tab 数据源）：默认开启；关闭后内核不再落盘（设置页有关闭项）
+    #[serde(default = "default_snapshots")]
+    pub snapshots: bool,
+    /// 快照保留条数（默认 200，超 2*keep 轮转保留 keep 条）
+    #[serde(default = "default_snapshots_keep")]
+    pub snapshots_keep: u32,
 }
 
 fn default_listen_host() -> String {
@@ -95,6 +101,14 @@ fn default_model_list_mode() -> String {
     "all".to_string()
 }
 
+fn default_snapshots() -> bool {
+    true
+}
+
+fn default_snapshots_keep() -> u32 {
+    200
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -110,6 +124,8 @@ impl Default for AppConfig {
             log_level: default_log_level(),
             log_payloads: false, // 默认不落盘 Prompt 正文（隐私敏感）
             listen_host: default_listen_host(),
+            snapshots: default_snapshots(),
+            snapshots_keep: default_snapshots_keep(),
         }
     }
 }
