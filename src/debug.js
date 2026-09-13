@@ -75,7 +75,7 @@ export async function replaySnapshot(id) {
     return;
   }
   const ok = window.confirm(
-    `将把该请求原样再发一次（${s.endpoint || ''}），会真实消耗上游额度，继续吗？`
+    `将把该快照的请求（脱敏截断后的存档，非逐字节原样，${s.endpoint || ''}）再发一次，会真实消耗上游额度，继续吗？`
   );
   if (!ok) return;
   const result = document.getElementById('debug-replay-result');
