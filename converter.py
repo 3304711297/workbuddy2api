@@ -38,6 +38,7 @@ import time
 import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 import httpx
@@ -1791,7 +1792,15 @@ def _record_usage(model: str, ok: bool, t0: float, *,
              "error": str|null, "retry_count": int, "retry_reason": str|null}
     若发生降级（requested_model != model），附带 requested_model / actual_model / fallback_reason。
     未启用 --usage-log 时直接丢弃；写入任何异常一律静默吞掉，绝不影响请求响应。
+    快照腿独立于用量开关：只要入口设置了快照上下文即落快照。
     """
+    try:
+        _snap_ctx = _SNAP_CTX.get()
+    except Exception:
+        _snap_ctx = None
+    if _snap_ctx:
+        _record_snapshot(_snap_ctx[0], model, ok, t0,
+                         request_body=_snap_ctx[1], error=error)
     global _USAGE_RING_POS
     path = CONFIG.get("usage_log")
     if not path:
@@ -1831,6 +1840,18 @@ def _record_usage(model: str, ok: bool, t0: float, *,
 
 
 _SNAP_LOCK = threading.Lock()
+
+# 快照上下文（任务局部）：三聊天端点入口 set(端点, 原始请求体），
+# _record_usage 在所有完成路径统一透传落快照——错误路径无需逐个手工接线。
+_SNAP_CTX: ContextVar = ContextVar("wb2api_snap_ctx", default=None)
+
+
+def _snap_context(endpoint: str, request_body):
+    """设置本请求的快照上下文（任务局部，不跨请求泄漏）。"""
+    try:
+        _SNAP_CTX.set((endpoint, request_body))
+    except Exception:
+        pass
 
 
 def _record_snapshot(endpoint, model, ok, t0, *,
@@ -2683,6 +2704,7 @@ async def chat_completions(request: Request,
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
+    _snap_context("/v1/chat/completions", payload)
     messages = payload.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail={"error": {"message": "messages is required", "type": "invalid_request_error"}})
@@ -2923,6 +2945,7 @@ async def anthropic_messages(
             content={"type": "error", "error": {"type": "invalid_request_error", "message": f"bad json: {e}"}},
         )
 
+    _snap_context("/v1/messages", raw_body)
     if translate_anthropic_request is None or translate_openai_response_to_anthropic is None:
         return JSONResponse(
             status_code=500,
@@ -3153,6 +3176,7 @@ async def openai_responses(
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
+    _snap_context("/v1/responses", raw_body)
     if responses_request_to_chat is None or ResponsesStreamConverter is None:
         raise HTTPException(status_code=500, detail={"error": {"message": "responses_compat module not available", "type": "api_error"}})
 
