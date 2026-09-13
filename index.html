@@ -884,7 +884,7 @@ print(response.choices[0].message.content)</code></pre>
           <div class="section-title-row">
             <div>
               <h2>调试</h2>
-              <p class="muted">请求快照（最新在前）：点行看请求体/响应摘要/错误，一键重放复现问题</p>
+              <p class="muted">请求快照（最新在前）：点行看详情，基于快照重放复现问题（存档经脱敏截断，非逐字节原样）</p>
             </div>
             <div class="actions" style="display: flex; gap: 8px; align-items: center;">
               <span id="debug-total" class="muted mono" style="font-size: 12px;">—</span>
@@ -915,7 +915,7 @@ print(response.choices[0].message.content)</code></pre>
             <div class="card-header-flex">
               <h3 class="card-title mono" id="debug-detail-title" style="font-size: 13px;">快照详情</h3>
               <div class="actions" style="display: flex; gap: 8px;">
-                <button id="btn-debug-replay" class="btn btn-primary btn-sm">一键重放</button>
+                <button id="btn-debug-replay" class="btn btn-primary btn-sm">基于快照重放</button>
                 <button id="btn-debug-copy-curl" class="btn btn-secondary btn-sm">复制 curl</button>
               </div>
             </div>
