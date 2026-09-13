@@ -22,6 +22,7 @@ import converter  # noqa: E402
 def _clean_token_cache(monkeypatch):
     monkeypatch.setattr(converter, "_TURING_TOKEN_CACHE", None)
     monkeypatch.setattr(converter, "_TURING_TOKEN_AT", 0.0)
+    monkeypatch.setattr(converter, "_TURING_FAIL_AT", 0.0)
     yield
 
 
