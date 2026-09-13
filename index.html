@@ -121,6 +121,14 @@
           </svg>
           <span>用量统计</span>
         </button>
+
+        <button class="nav-item" data-tab="debug" title="调试">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>
+          </svg>
+          <span>调试</span>
+        </button>
       </nav>
 
       <!-- 明暗主题切换（选择持久化到 localStorage，由 main.js 接管逻辑） -->
@@ -665,6 +673,18 @@ print(response.choices[0].message.content)</code></pre>
                 仅建议在排查疑难问题且日志不外传时短时开启。该开关仅在日志级别为
                 <code class="mono">trace</code> 时实际生效（双闸门），排查完请及时关闭。
               </p>
+              <label class="switch-label" style="margin-top: 8px;">
+                <input id="chk-snapshots" type="checkbox" checked />
+                <span class="switch-slider"></span>
+                <span class="switch-text">记录请求快照（调试 Tab 数据源）</span>
+              </label>
+              <p class="muted field-hint">
+                开启后每次聊天请求的<b>完整请求体（含 Prompt 明文）</b>写入
+                <code class="mono">%LOCALAPPDATA%\workbuddy2api\usage\snapshots.jsonl</code>，
+                在「调试」页查看与一键重放。保留条数
+                <input id="input-snapshots-keep" type="number" class="input mono" style="width: 76px; font-size: 12px; padding: 4px 8px;" min="10" max="2000" step="10" value="200" /> 条
+                （超 2 倍后轮转保留）。<b>修改后需重启内核生效</b>。
+              </p>
             </div>
 
             <div class="divider"></div>
@@ -856,6 +876,51 @@ print(response.choices[0].message.content)</code></pre>
                 </tbody>
               </table>
             </div>
+          </div>
+        </section>
+
+        <!-- 9. 调试页面 (Debug)：请求快照查看、一键重放与 curl 导出 -->
+        <section id="panel-debug" class="panel-page">
+          <div class="section-title-row">
+            <div>
+              <h2>调试</h2>
+              <p class="muted">请求快照（最新在前）：点行看请求体/响应摘要/错误，一键重放复现问题</p>
+            </div>
+            <div class="actions" style="display: flex; gap: 8px; align-items: center;">
+              <span id="debug-total" class="muted mono" style="font-size: 12px;">—</span>
+              <button id="btn-refresh-debug" class="btn btn-secondary btn-sm">刷新</button>
+              <button id="btn-clear-debug" class="btn btn-secondary btn-sm">清空快照</button>
+            </div>
+          </div>
+
+          <div class="card" style="padding: 0; overflow-x: auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>端点</th>
+                  <th>模型</th>
+                  <th>状态</th>
+                  <th>耗时</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="debug-list-body">
+                <tr><td colspan="6" class="muted" style="text-align: center;">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card" id="debug-detail-card" style="margin-top: 16px; display: none;">
+            <div class="card-header-flex">
+              <h3 class="card-title mono" id="debug-detail-title" style="font-size: 13px;">快照详情</h3>
+              <div class="actions" style="display: flex; gap: 8px;">
+                <button id="btn-debug-replay" class="btn btn-primary btn-sm">一键重放</button>
+                <button id="btn-debug-copy-curl" class="btn btn-secondary btn-sm">复制 curl</button>
+              </div>
+            </div>
+            <pre id="debug-detail-body" class="code-block" style="min-height: 200px; max-height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px;"></pre>
+            <pre id="debug-replay-result" class="code-block" style="display: none; margin-top: 10px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px;"></pre>
           </div>
         </section>
 

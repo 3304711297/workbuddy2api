@@ -10,6 +10,7 @@ import { loadAccountsData } from './accounts.js';
 import { loadAgentsStatus } from './agents.js';
 import { loadModelsMatrix } from './models.js';
 import { loadLogs } from './logs.js';
+import { loadSnapshots } from './debug.js';
 import { loadUsageData, loadUsageEvents } from './usage.js';
 
 export function initTabs() {
@@ -27,6 +28,7 @@ export function initTabs() {
     settings: { title: '服务设置', desc: '代理端口、脱敏选项及凭据目录管理' },
     logs: { title: '实时运行日志', desc: '内嵌控制台查看本地反代服务的完整输出与 Debug 信息' },
     usage: { title: '用量统计', desc: '本地请求统计与 48 小时趋势（数据自本版本起记录）' },
+    debug: { title: '调试', desc: '请求快照查看、一键重放与 curl 导出' },
   };
 
   navItems.forEach(item => {
@@ -50,6 +52,7 @@ export function initTabs() {
       if (tab === 'models') loadModelsMatrix();
       if (tab === 'logs') loadLogs();
       if (tab === 'usage') { loadUsageData(); loadUsageEvents(1); }
+      if (tab === 'debug') loadSnapshots();
     });
   });
 

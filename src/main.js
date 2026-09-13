@@ -17,6 +17,7 @@ import { initAgentActions, loadAgentsStatus } from './agents.js';
 import { initOAuth } from './oauth.js';
 import { initModelsAndCopy, loadModelsMatrix } from './models.js';
 import { initLogs } from './logs.js';
+import { initDebug } from './debug.js';
 import { initUsage } from './usage.js';
 import { initUpdateCheck } from './update-check.js';
 import { initConfirmDialog } from './utils.js';
@@ -42,6 +43,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initModelsAndCopy();
   initSettings();
   initLogs();
+  initDebug();
   initUsage();
   initUpdateCheck();
   initConfirmDialog();

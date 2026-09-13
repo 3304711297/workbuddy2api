@@ -55,6 +55,7 @@
 - 🛡️ **安全脱敏、流量削峰与请求防护**：
   - **客户端鉴权密钥（可选）**：设置页可一键生成 / 复制 / 清空 32 位十六进制随机密钥（CSPRNG 生成），内核以 `--api-key` 生效，之后所有客户端须携带 `Authorization: Bearer <密钥>` 或 `x-api-key: <密钥>`，否则返回 `401 invalid api key`；密钥仅在启动时注入（改后需重启内核）。开启「局域网访问」（非回环监听）时**必须先设置密钥**，否则前端拒绝开启且内核亦拒绝启动（对标 `router-for-me/EasyCLIProxyAPI` 的 API 访问管理）；
   - **结构化日志与级别管理**：设置页可切换内核日志级别 `info`（默认，仅请求摘要与耗时）/ `debug`（附加错误响应详情）/ `trace`（完整请求体与响应流，自动脱敏 Token/Key），日志写入 `converter.log` 并在「实时日志」页与进程 stdout 合并展示（分区标注）；可选开启 `--log-payloads` 落盘完整 Prompt / 响应正文（**明文**，需 trace 级双闸门生效，默认关闭且 UI 明确警示隐私风险）（对标 `router-for-me/EasyCLIProxyAPI` 的日志管理）；
+- 🔍 **内置 API 调试台**：「调试」页保留最近 200 条请求快照（端点/模型/状态/耗时/请求体/响应摘要/错误），点行看详情、一键重放复现问题、一键复制 curl（含 `YOUR_KEY` 占位不泄露密钥）；快照默认开启、设置页可关，请求体明文落盘（Token/Key 已脱敏），保留条数 10–2000 可调（对标 `orangeboyChen/codebuddy2api` 的 API Test/Debug 快照）；
   - **局域网访问（可选）**：设置页可开启「允许局域网内其它设备访问」（`--host 0.0.0.0`），并自动探测本机局域网 IPv4 展示可复制地址（如 `http://192.168.x.x:8787/v1`），供手机 / 平板 / 其它电脑直连；出于安全默认关闭（仅 `127.0.0.1` 监听）。无鉴权密钥时前端**拒绝开启**且内核亦会 `exit 1`——双重守卫确保服务绝不无鉴权暴露（对标 `router-for-me/EasyCLIProxyAPI` 的网络设置，但刻意不提供 `--unsafe-expose` 放行开关）；
   - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
   - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
@@ -78,6 +79,7 @@
 | **用量统计与积分概览** | `GET /api/usage_summary` | 当前账号积分余额、今日用量（请求数/Token/429） | `Authorization: Bearer local` |
 | **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） + 多账号调度配置来源（`rotation.config_source`） | `Authorization: Bearer *** |
 | **11128 毒历史自查** | `POST /api/desensitize_check` | 干跑脱敏诊断：定位哪条 system/assistant 历史带客户端指纹（只报不改） | `Authorization: Bearer *** |
+| **请求快照查询** | `GET /api/snapshots` | 最近请求快照（最新在前，调试 Tab 数据源） | `Authorization: Bearer *** |
 
 ---
 
