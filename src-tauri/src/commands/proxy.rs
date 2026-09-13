@@ -149,6 +149,8 @@ pub fn proxy_start(
     let usage_dir = local_app_dir().join("usage");
     let _ = std::fs::create_dir_all(&usage_dir);
     cmd.arg("--usage-log").arg(usage_dir.join("usage.jsonl"));
+    // 请求快照（调试 Tab 数据源）：与用量文件同目录，converter 以 --snapshots-log 注入路径
+    cmd.arg("--snapshots-log").arg(usage_dir.join("snapshots.jsonl"));
 
     // 结构化日志：内核 _log() 在 log_path 为空时直接丢弃——不传 --log 则丢失
     // 请求摘要/耗时/错误详情等结构化行（日志页只能看到 uvicorn 原始 stdout）。
@@ -1048,6 +1050,43 @@ pub fn usage_events(
     Ok(query_usage_events(&records, &q))
 }
 
+// ---------------------------------------------------------------------------
+// 请求快照（snapshots_list / snapshots_clear）：调试 Tab 数据源
+// ---------------------------------------------------------------------------
+
+/// 快照文件路径：%LOCALAPPDATA%\workbuddy2api\usage\snapshots.jsonl
+///（proxy_start 以 --snapshots-log 传给 converter，与用量文件同目录）
+fn snapshots_log_path() -> PathBuf {
+    local_app_dir().join("usage").join("snapshots.jsonl")
+}
+
+/// 组装快照查询响应（纯函数，便于单测）：坏行跳过，最新在前，limit 上限 500。
+fn query_snapshots(text: &str, limit: usize) -> serde_json::Value {
+    let limit = limit.clamp(1, 500);
+    let valid: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    let total = valid.len();
+    let items: Vec<&serde_json::Value> = valid.iter().rev().take(limit).collect();
+    serde_json::json!({ "snapshots": items, "total": total })
+}
+
+#[tauri::command]
+pub fn snapshots_list(limit: Option<usize>) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(snapshots_log_path()).unwrap_or_default();
+    Ok(query_snapshots(&text, limit.unwrap_or(100)))
+}
+
+#[tauri::command]
+pub fn snapshots_clear() -> Result<String, String> {
+    let p = snapshots_log_path();
+    if p.exists() {
+        std::fs::write(&p, "").map_err(|e| e.to_string())?;
+    }
+    Ok("快照已清空".into())
+}
+
 #[cfg(test)]
 mod test_chat_probe_tests {
     use super::*;
@@ -1444,5 +1483,35 @@ mod usage_tests {
             let guard = handle.0.lock().unwrap();
             assert!(guard.is_none(), "释放后应为 None，重复 stop 不发生 panic");
         }
+    }
+}
+
+#[cfg(test)]
+mod test_snapshot_query_tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_list_newest_first_and_tolerates_bad_lines() {
+        let text = "{\"id\":\"a\",\"ts\":1}\nNOT_JSON\n{\"id\":\"b\",\"ts\":2}\n";
+        let v = query_snapshots(text, 10);
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["snapshots"][0]["id"], "b");
+        assert_eq!(v["snapshots"][1]["id"], "a");
+    }
+
+    #[test]
+    fn snapshots_list_respects_limit() {
+        let text = "{\"id\":\"a\"}\n{\"id\":\"b\"}\n{\"id\":\"c\"}\n";
+        let v = query_snapshots(text, 2);
+        assert_eq!(v["total"], 3);
+        assert_eq!(v["snapshots"].as_array().unwrap().len(), 2);
+        assert_eq!(v["snapshots"][0]["id"], "c");
+    }
+
+    #[test]
+    fn snapshots_list_empty_input() {
+        let v = query_snapshots("", 100);
+        assert_eq!(v["total"], 0);
+        assert_eq!(v["snapshots"].as_array().unwrap().len(), 0);
     }
 }
