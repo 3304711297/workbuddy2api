@@ -260,6 +260,14 @@ workbuddy2api.exe (GUI)
   `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
   `--log-payloads` 会把完整 Prompt/响应正文以**明文**落盘：默认关闭、UI 必须警示，且内核侧有「payload 开关 + trace 级」双闸门（`_log_payload`），前端不要试图绕过。
   日志文件写入前需保证目录存在；新增 `--log-level` 取值仅 info/debug/trace，非法值归一到 info。
+- **请求快照（AppConfig.snapshots / snapshots_keep，调试 Tab 数据源）**：
+  内核 `_record_snapshot` 经 `_SNAP_CTX`（ContextVar，任务局部）由三聊天端点入口透传，
+  `_record_usage` 在所有完成路径统一落盘——错误路径无需逐个手工接线，改完成点时别绕开 `_record_usage`。
+  快照腿独立于用量开关（`usage_log` 为空仍落快照）。文件 `%LOCALAPPDATA%/workbuddy2api/usage/snapshots.jsonl`
+  由 `proxy_start` 以 `--snapshots-log` 注入；超 `2*keep` 行轮转保留 `keep` 条（默认 200）。
+  快照默认开启（含完整 prompt 明文，Token/Key 已脱敏）：关了调试 Tab 即无新数据，别误报成采集 bug。
+  重放（`snapshot_replay`）只接受本机 `/v1/` 路径（防篡改快照打站外），调用方传 `port` + `api_key`（snake_case），
+  前端复制 curl 时密钥只放 `YOUR_KEY` 占位。
 - **局域网访问（AppConfig.listen_host + lan_ipv4 命令）**：
   `listen_host` 默认必须是 `127.0.0.1`（安全默认，任何情况下不得默认 `0.0.0.0`）。
   **语义准确性（2026-09-12 P2）**：开关实际下发 `0.0.0.0` = 绑定**所有网卡**

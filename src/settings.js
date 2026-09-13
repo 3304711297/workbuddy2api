@@ -115,6 +115,8 @@ export function initSettings() {
   let logLevelCache = 'info';
   let logPayloadsCache = false;
   let listenHostCache = '127.0.0.1';
+  let snapshotsCache = true;
+  let snapshotsKeepCache = 200;
   const buildSettingsPayload = (patch = {}) => {
     const currentClose = Array.from(radioCloseActions).find(r => r.checked)?.value || 'hide_to_tray';
     return {
@@ -131,6 +133,8 @@ export function initSettings() {
       log_level: logLevelCache,
       log_payloads: logPayloadsCache,
       listen_host: listenHostCache,
+      snapshots: snapshotsCache,
+      snapshots_keep: snapshotsKeepCache,
       // dirty 字段最后展开：显式声明的「本次修改」优先于磁盘回填与 cache
       ...patch
     };
@@ -149,6 +153,10 @@ export function initSettings() {
           if (!('log_level' in patch) && latest.log_level) logLevelCache = latest.log_level;
           if (!('log_payloads' in patch) && typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
           if (!('listen_host' in patch) && latest.listen_host) listenHostCache = latest.listen_host;
+          if (!('snapshots' in patch) && typeof latest.snapshots === 'boolean') snapshotsCache = latest.snapshots;
+          if (!('snapshots_keep' in patch) && Number.isInteger(latest.snapshots_keep) && latest.snapshots_keep > 0) {
+            snapshotsKeepCache = latest.snapshots_keep;
+          }
           // 密钥：本次未修改且输入框为空时才回退磁盘值（用户可能刚改完就点保存）
           const apiKeyEl = document.getElementById('input-api-key');
           if (!('api_key' in patch) && apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
@@ -308,6 +316,31 @@ export function initSettings() {
     }
   });
 
+  // —— 请求快照（调试 Tab 数据源） ——
+  const chkSnapshots = document.getElementById('chk-snapshots');
+  const inputSnapshotsKeep = document.getElementById('input-snapshots-keep');
+
+  chkSnapshots?.addEventListener('change', async (e) => {
+    snapshotsCache = !!e.target.checked;
+    if (await persistSettings({ snapshots: snapshotsCache })) {
+      showToast(
+        snapshotsCache
+          ? `已开启请求快照${state.running ? '（重启内核后生效）' : ''}：请求体将明文落盘，供调试 Tab 回放排查`
+          : '已关闭请求快照（调试 Tab 将无新数据）',
+        snapshotsCache ? 'info' : 'success'
+      );
+    }
+  });
+
+  inputSnapshotsKeep?.addEventListener('change', async (e) => {
+    const v = Math.max(10, Math.min(2000, parseInt(e.target.value, 10) || 200));
+    e.target.value = String(v);
+    snapshotsKeepCache = v;
+    if (await persistSettings({ snapshots_keep: snapshotsKeepCache })) {
+      showToast(`快照保留条数已设为 ${v}${state.running ? '（重启内核后生效）' : ''}`, 'success');
+    }
+  });
+
   // —— 局域网访问（对标 EasyCLIProxyAPI 的 get_lan_ipv4） ——
   const chkLanAccess = document.getElementById('chk-lan-access');
   const lanAddressRow = document.getElementById('lan-address');
@@ -396,6 +429,15 @@ export function initSettings() {
         if (chkLogPayloads) {
           logPayloadsCache = !!cfg.log_payloads;
           chkLogPayloads.checked = logPayloadsCache;
+        }
+        if (chkSnapshots) {
+          snapshotsCache = typeof cfg.snapshots === 'boolean' ? cfg.snapshots : true;
+          chkSnapshots.checked = snapshotsCache;
+        }
+        if (inputSnapshotsKeep) {
+          const keep = Number.isInteger(cfg.snapshots_keep) && cfg.snapshots_keep > 0 ? cfg.snapshots_keep : 200;
+          snapshotsKeepCache = keep;
+          inputSnapshotsKeep.value = String(keep);
         }
         // 监听地址回读：仅 0.0.0.0 视为开启局域网，其余归一回环
         const lanEnabled = cfg.listen_host === '0.0.0.0';
