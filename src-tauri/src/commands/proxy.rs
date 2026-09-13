@@ -1102,7 +1102,8 @@ pub fn snapshots_clear() -> Result<String, String> {
 }
 
 /// 从快照记录提取重放目标（纯函数，便于单测）：
-/// endpoint 必须为本机 /v1/ 路径（防快照文件被篡改后打到站外），req 必须为对象。
+/// endpoint 必须为本机 /v1/ 绝对路径（防快照文件被篡改后打到站外），req 必须为对象。
+/// 拒绝 .. / query / 反斜杠 / 双斜杠等非规范形态（/v1/../api 这类规范化后会逃出 /v1/）。
 fn extract_replay_target(rec: &serde_json::Value) -> Result<(String, serde_json::Value), String> {
     let ep = rec
         .get("endpoint")
@@ -1111,6 +1112,9 @@ fn extract_replay_target(rec: &serde_json::Value) -> Result<(String, serde_json:
         .to_string();
     if !ep.starts_with("/v1/") {
         return Err("快照缺少合法 endpoint，无法重放".into());
+    }
+    if ep.contains("..") || ep.contains('?') || ep.contains('#') || ep.contains('\\') || ep.contains("//") {
+        return Err("快照 endpoint 非规范路径，拒绝重放".into());
     }
     let body = rec
         .get("req")
@@ -1594,6 +1598,30 @@ mod test_snapshot_query_tests {
         let bad_ep: serde_json::Value = serde_json::from_str(
             r#"{"id":"z","endpoint":"http://evil/x","req":{"a":1}}"#).unwrap();
         assert!(extract_replay_target(&bad_ep).is_err());
+    }
+
+    #[test]
+    fn replay_rejects_traversal_and_non_absolute_paths() {
+        for ep in [
+            "/v1/../api/rate_limit",
+            "/v1/chat/../messages",
+            "v1/chat/completions",
+            "//evil/v1/chat/completions",
+            "/v1/chat/completions?x=1",
+        ] {
+            let v: serde_json::Value = serde_json::from_str(&format!(
+                "{{\"id\":\"t\",\"endpoint\":\"{ep}\",\"req\":{{\"a\":1}}}}"
+            ))
+            .unwrap();
+            assert!(extract_replay_target(&v).is_err(), "应拒绝: {ep}");
+        }
+        for ep in ["/v1/chat/completions", "/v1/messages", "/v1/responses"] {
+            let v: serde_json::Value = serde_json::from_str(&format!(
+                "{{\"id\":\"t\",\"endpoint\":\"{ep}\",\"req\":{{\"a\":1}}}}"
+            ))
+            .unwrap();
+            assert!(extract_replay_target(&v).is_ok(), "应放行: {ep}");
+        }
     }
 
     #[test]
