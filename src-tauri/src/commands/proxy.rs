@@ -1087,6 +1087,59 @@ pub fn snapshots_clear() -> Result<String, String> {
     Ok("快照已清空".into())
 }
 
+/// 从快照记录提取重放目标（纯函数，便于单测）：
+/// endpoint 必须为本机 /v1/ 路径（防快照文件被篡改后打到站外），req 必须为对象。
+fn extract_replay_target(rec: &serde_json::Value) -> Result<(String, serde_json::Value), String> {
+    let ep = rec
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !ep.starts_with("/v1/") {
+        return Err("快照缺少合法 endpoint，无法重放".into());
+    }
+    let body = rec
+        .get("req")
+        .cloned()
+        .filter(|v| v.is_object())
+        .ok_or_else(|| "快照缺少请求体，无法重放".to_string())?;
+    Ok((ep, body))
+}
+
+#[tauri::command]
+pub async fn snapshot_replay(
+    id: String,
+    port: u16,
+    api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(snapshots_log_path()).unwrap_or_default();
+    let rec: serde_json::Value = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .find(|v: &serde_json::Value| {
+            v.get("id").and_then(|x| x.as_str()) == Some(id.as_str())
+        })
+        .ok_or_else(|| "未找到该快照（可能已被轮转清理）".to_string())?;
+    let (ep, body) = extract_replay_target(&rec)?;
+    // 与 proxy_test_chat 同源：绕过环境代理打本机内核，120s 总超时
+    let url = format!("http://127.0.0.1:{port}{ep}");
+    let client = super::shared::local_client(120);
+    let mut req = client.post(&url).json(&body);
+    if let Some(k) = api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {k}"));
+    }
+    let start = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| format!("重放请求发送失败: {e}"))?;
+    let status = resp.status().as_u16();
+    let body_text = resp.text().await.unwrap_or_default();
+    let excerpt: String = body_text.chars().take(4000).collect();
+    Ok(serde_json::json!({
+        "status": status,
+        "excerpt": excerpt,
+        "latency_ms": start.elapsed().as_millis() as u64,
+    }))
+}
+
 #[cfg(test)]
 mod test_chat_probe_tests {
     use super::*;
@@ -1513,5 +1566,19 @@ mod test_snapshot_query_tests {
         let v = query_snapshots("", 100);
         assert_eq!(v["total"], 0);
         assert_eq!(v["snapshots"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn replay_request_extraction_needs_endpoint_and_req() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"id":"x","endpoint":"/v1/chat/completions","req":{"model":"m"}}"#).unwrap();
+        let (ep, body) = extract_replay_target(&v).unwrap();
+        assert_eq!(ep, "/v1/chat/completions");
+        assert_eq!(body["model"], "m");
+        let bad: serde_json::Value = serde_json::from_str(r#"{"id":"y"}"#).unwrap();
+        assert!(extract_replay_target(&bad).is_err());
+        let bad_ep: serde_json::Value = serde_json::from_str(
+            r#"{"id":"z","endpoint":"http://evil/x","req":{"a":1}}"#).unwrap();
+        assert!(extract_replay_target(&bad_ep).is_err());
     }
 }
