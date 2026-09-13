@@ -1810,7 +1810,8 @@ def _record_usage(model: str, ok: bool, t0: float, *,
                   ttft_ms=None, error=None,
                   retry_count: int = 0, retry_reason: str | None = None,
                   requested_model: str | None = None,
-                  fallback_reason: str | None = None):
+                  fallback_reason: str | None = None,
+                  snapshot_resp: str | None = None):
     """向 CONFIG['usage_log'] 追加一行用量统计（JSONL，append 模式，每行写完即落盘）。
 
     行格式：{"ts": <epoch毫秒>, "model": str, "ok": bool, "input_tokens": int|null,
@@ -1826,7 +1827,8 @@ def _record_usage(model: str, ok: bool, t0: float, *,
         _snap_ctx = None
     if _snap_ctx:
         _record_snapshot(_snap_ctx[0], model, ok, t0,
-                         request_body=_snap_ctx[1], error=error)
+                         request_body=_snap_ctx[1], error=error,
+                         response_excerpt=snapshot_resp)
     global _USAGE_RING_POS
     path = CONFIG.get("usage_log")
     if not path:
@@ -1878,6 +1880,21 @@ def _snap_context(endpoint: str, request_body):
         _SNAP_CTX.set((endpoint, request_body))
     except Exception:
         pass
+
+
+def _snapshot_excerpt(collected) -> str | None:
+    """从上游聚合响应提取调试摘要：content → reasoning_content → 裁断 dump。"""
+    try:
+        if isinstance(collected, dict):
+            choices = collected.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message") or {}
+                text = msg.get("content") or msg.get("reasoning_content") or ""
+                if text:
+                    return _truncate(str(text), 4000)
+        return _truncate(json.dumps(collected, ensure_ascii=False, default=str), 4000)
+    except Exception:
+        return None
 
 
 def _record_snapshot(endpoint, model, ok, t0, *,
@@ -2925,7 +2942,8 @@ async def chat_completions(request: Request,
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   requested_model=model_name,
-                  fallback_reason=fallback_reason)
+                  fallback_reason=fallback_reason,
+                  snapshot_resp=_snapshot_excerpt(collected))
     resp_headers = {}
     if actual_model != model_name:
         resp_headers["X-Actual-Model"] = actual_model
@@ -3164,7 +3182,8 @@ async def anthropic_messages(
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   requested_model=model_name,
-                  fallback_reason=fallback_reason)
+                  fallback_reason=fallback_reason,
+                  snapshot_resp=_snapshot_excerpt(collected))
 
     anthropic_resp = translate_openai_response_to_anthropic(collected)
     if "model" in raw_body:
@@ -3342,7 +3361,7 @@ async def openai_responses(
     if fallback_reason is None:
         _mark_model_available(body["model"], uid=uid)
     _u = collected.get("usage") or {}
-    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason)
+    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
 
     responses_obj = chat_response_to_responses(collected, model=model_name)
     return JSONResponse(content=responses_obj)
