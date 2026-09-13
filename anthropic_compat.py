@@ -137,6 +137,11 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                         if thinking:
                             thinking_parts.append(thinking)
                     elif btype == "tool_use":
+                        if not block.get("id"):
+                            raise ValueError(
+                                "tool_use block missing required 'id': "
+                                "inventing one would break tool_result correlation on retry"
+                            )
                         inp = block.get("input", {})
                         if isinstance(inp, (dict, list)):
                             arg_str = json.dumps(inp, ensure_ascii=False)
@@ -146,7 +151,7 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                             arg_str = json.dumps(inp, ensure_ascii=False)
 
                         tool_calls.append({
-                            "id": block.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                            "id": block.get("id"),
                             "type": "function",
                             "function": {
                                 "name": block.get("name", ""),

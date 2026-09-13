@@ -129,7 +129,12 @@ def _convert_input_items(items: list) -> list[dict]:
         if item_type == "function_call":
             if pending_assistant_content is None:
                 pending_assistant_content = ""
-            call_id = item.get("call_id") or item.get("id") or _rand_id("call_")
+            call_id = item.get("call_id") or item.get("id")
+            if not call_id:
+                raise ValueError(
+                    "function_call item missing required 'call_id': "
+                    "inventing one would break function_call_output correlation on retry"
+                )
             pending_tool_calls.append({
                 "id": call_id,
                 "type": "function",
