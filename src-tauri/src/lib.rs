@@ -544,6 +544,8 @@ pub fn run_app() {
             // 用量统计聚合与版本更新检查（前端 invoke）
             commands::usage_summary,
             commands::usage_events,
+            commands::snapshots_list,
+            commands::snapshots_clear,
             commands::lan_ipv4,
             commands::check_app_update
         ])
