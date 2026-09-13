@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import base64
 import datetime
+import hmac
 import ipaddress
 import json
 import os
@@ -1668,7 +1669,7 @@ def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
         token = authorization[7:].strip()
     if not token and x_api_key and isinstance(x_api_key, str):
         token = x_api_key
-    if token != key:
+    if not hmac.compare_digest(token, key):
         raise HTTPException(status_code=401, detail={"error": {"message": "invalid api key", "type": "auth_error"}})
 
 
@@ -2250,8 +2251,12 @@ def _rolling_usage(model: str) -> dict:
 
 
 @app.get("/api/rate_limit")
-async def api_rate_limit():
+async def api_rate_limit(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key"),
+):
     """各模型上游频率限制（6004）状态与滚动用量观测（只读，不消耗配额）。"""
+    _check_auth(authorization, x_api_key)
     models: dict[str, dict] = {}
     now_ms = time.time() * 1000
     with _RATE_LIMIT_LOCK:
