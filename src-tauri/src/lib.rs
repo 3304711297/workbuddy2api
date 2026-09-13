@@ -546,6 +546,7 @@ pub fn run_app() {
             commands::usage_events,
             commands::snapshots_list,
             commands::snapshots_clear,
+            commands::snapshot_replay,
             commands::lan_ipv4,
             commands::check_app_update
         ])
