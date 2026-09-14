@@ -843,3 +843,207 @@ class TestAnthropicStreamTranslator:
 
         # Calling finalize again should return empty list (idempotent)
         assert translator.finalize() == []
+
+    def test_interleaved_reasoning_and_tool_calls_stream(self):
+        """Verify that when reasoning_content arrives in same chunk as tool_calls,
+        it does NOT fragment thinking into multiple blocks and does NOT split tool_use into
+        multiple empty-named tool calls."""
+        translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")
+
+        raw_events = []
+        # 1. Thinking starts first
+        raw_events.extend(
+            translator.feed_chunk({
+                "choices": [{"delta": {"reasoning_content": "Let me look"}}]
+            })
+        )
+        # 2. Tool call begins
+        raw_events.extend(
+            translator.feed_chunk({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_bash_1",
+                                    "type": "function",
+                                    "function": {"name": "Bash", "arguments": ""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })
+        )
+        # 3. Next chunk has BOTH reasoning and tool_calls arguments
+        raw_events.extend(
+            translator.feed_chunk({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": " for Hermes",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "ls"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            })
+        )
+        # 4. Another chunk with arguments and reasoning
+        raw_events.extend(
+            translator.feed_chunk({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": ".",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": " -la"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            })
+        )
+        # 5. Finish
+        raw_events.extend(
+            translator.feed_chunk({
+                "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+            })
+        )
+        raw_events.extend(translator.feed_line("data: [DONE]"))
+
+        parsed = parse_sse_events(raw_events)
+
+        thinking_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "thinking"
+        ]
+        tool_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "tool_use"
+        ]
+
+        assert len(thinking_starts) == 1, f"Expected 1 thinking start, got {len(thinking_starts)}"
+        assert len(tool_starts) == 1, f"Expected 1 tool_use start, got {len(tool_starts)}"
+        assert tool_starts[0]["data"]["content_block"]["name"] == "Bash"
+        assert tool_starts[0]["data"]["content_block"]["id"] == "call_bash_1"
+
+        arg_deltas = [
+            p["data"]["delta"]["partial_json"]
+            for p in parsed
+            if p["event"] == "content_block_delta" and p["data"]["delta"].get("type") == "input_json_delta"
+        ]
+        assert "".join(arg_deltas) == "ls -la"
+
+    def test_alternating_reasoning_and_tool_args_stream(self):
+        """Verify that when reasoning and tool arguments alternate as separate chunks
+        (e.g. after _ReasoningCoalescer splits them), tool_use is NOT split and thinking
+        is NOT reopened."""
+        translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")
+
+        raw_events = []
+        # Chunk 1: initial reasoning
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"reasoning_content": "Let"}}]}) )
+        # Chunk 2: tool init
+        raw_events.extend(translator.feed_chunk({
+            "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "Bash", "arguments": ""}}]}}]
+        }))
+        # Chunk 3: late reasoning chunk
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"reasoning_content": " me"}}]}) )
+        # Chunk 4: tool args chunk
+        raw_events.extend(translator.feed_chunk({
+            "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "ls"}}]}}]
+        }))
+        # Chunk 5: late reasoning chunk
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"reasoning_content": " look"}}]}) )
+        # Chunk 6: tool args chunk
+        raw_events.extend(translator.feed_chunk({
+            "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": " -la"}}]}}]
+        }))
+        # Chunk 7: finish
+        raw_events.extend(translator.feed_chunk({
+            "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+        }))
+        raw_events.extend(translator.feed_line("data: [DONE]"))
+
+        parsed = parse_sse_events(raw_events)
+
+        thinking_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "thinking"
+        ]
+        tool_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "tool_use"
+        ]
+
+        assert len(thinking_starts) == 1, f"Expected 1 thinking start, got {len(thinking_starts)}"
+        assert len(tool_starts) == 1, f"Expected 1 tool_use start, got {len(tool_starts)}"
+        assert tool_starts[0]["data"]["content_block"]["name"] == "Bash"
+        assert tool_starts[0]["data"]["content_block"]["id"] == "call_1"
+
+        # Ensure no tool_use has empty name
+        for ts in tool_starts:
+            assert ts["data"]["content_block"]["name"] != "", "Ghost tool call with empty name found!"
+
+        arg_deltas = [
+            p["data"]["delta"]["partial_json"]
+            for p in parsed
+            if p["event"] == "content_block_delta" and p["data"]["delta"].get("type") == "input_json_delta"
+        ]
+        assert "".join(arg_deltas) == "ls -la"
+
+    def test_late_reasoning_does_not_fragment_text_stream(self):
+        """Verify that late reasoning arriving after text content has started
+        does not reopen thinking or split text blocks."""
+        translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")
+
+        raw_events = []
+        # 1. Initial reasoning
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"reasoning_content": "Thinking..."}}]}))
+        # 2. Text starts
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"content": "Hello"}}]}))
+        # 3. Late reasoning arriving with text
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"reasoning_content": " (late thoughts)", "content": " world"}}]}))
+        # 4. Another late reasoning chunk alone
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"reasoning_content": " (even later thoughts)"}}]}))
+        # 5. More text
+        raw_events.extend(translator.feed_chunk({"choices": [{"delta": {"content": "!"}}]}))
+        # 6. Stop
+        raw_events.extend(translator.feed_chunk({
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 15},
+        }))
+        raw_events.extend(translator.feed_line("data: [DONE]"))
+
+        parsed = parse_sse_events(raw_events)
+
+        thinking_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "thinking"
+        ]
+        text_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "text"
+        ]
+
+        assert len(thinking_starts) == 1, f"Expected 1 thinking start, got {len(thinking_starts)}"
+        assert len(text_starts) == 1, f"Expected 1 text start, got {len(text_starts)}"
+
+        text_deltas = [
+            p["data"]["delta"]["text"]
+            for p in parsed
+            if p["event"] == "content_block_delta" and p["data"]["delta"].get("type") == "text_delta"
+        ]
+        assert "".join(text_deltas) == "Hello world!"
+
