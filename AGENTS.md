@@ -156,6 +156,7 @@ workbuddy2api.exe (GUI)
   - **Responses SSE 必须带规范字段**：`sequence_number`（从 0 严格单调递增，由 `_fmt` 统一注入）、`response_id`、`item_id`。仅事件名正确 ≠ wire protocol 兼容，Codex CLI 等严格客户端依赖这些字段。
   - **`thinking` 必须在 `PASSTHROUGH_BODY_KEYS` 中**：否则客户端显式 `thinking:{"type":"disabled"}` 会在透传时被丢弃，`inject_thinking` 看不到关闭意图而反向注入 `enabled`，与 `reasoning_effort=disable` / `enable_thinking=false` 形成参数打架。`inject_thinking` 现对三种关闭信号（`thinking.type=disabled`、`reasoning_effort=disable`、`chat_template_kwargs.enable_thinking=False`）统一识别并保持关闭语义（移除 `reasoning_effort`、保留 `thinking.type=disabled`）。
   - **Anthropic thinking 块时序单向锁定与工具流防抖（`anthropic_stream.py`，2026-09-14 修复）**：Anthropic 规范要求 `thinking` 块必须且只能位于消息最开头（index 0），一旦正文（`text`）或工具调用（`tool_use`）启动，`_thinking_sealed` 永久置位，严禁关闭活跃内容块重新开启 `thinking`；上游（如 DeepSeek）在工具参数流中夹带的 reasoning 片段会被就地吸收，杜绝状态机 Ping-Pong 震荡（致使前端单词单卡片刷屏）与重复捏造 `name: ""` 幽灵工具调用（致使下次请求触发 11133 拒绝）。同时维护 `_known_tools` 缓存，实现工具元数据跨 chunk 安全继承。
+  - **Anthropic 流式 finish_reason 终结态收敛与伪 Null 过滤（`anthropic_stream.py` / `anthropic_compat.py`，2026-09-14 修复）**：上游（如腾讯 CodeBuddy DeepSeek）在流式中间分片中常带 `"finish_reason": ""`，或反代链路偶发 `"null"`/`"none"`/`"undefined"`/`"in_progress"` 等伪终结态。通过 `_is_terminal_finish_reason` 严格过滤非终结态，防止文本块逐 Token 异常断裂排版；同时 `_map_finish_reason` 在发生过工具调用时强收 `"tool_use"`，已知枚举精准对齐，未知有效终结枚举收敛至标准 `"end_turn"`，杜绝非法枚举打崩客户端或提前断连。
 
   **风控拦截机制（2026-09-10 实测，判断要不要扩脱敏范围时看这里）**：
 
