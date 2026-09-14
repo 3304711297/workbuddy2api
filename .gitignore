@@ -16,11 +16,28 @@ ENV/
 *.log
 .DS_Store
 Thumbs.db
+# 内核运行态数据（本地跑 --usage-log / --snapshots-log 会落在仓库根；默认写 %LOCALAPPDATA%，此处防误入）
+usage.jsonl
+snapshots.jsonl
+# SQLite 库与 WAL/SHM 边车文件（同名成对生成，只忽略 *.db 会漏掉 -wal / -shm）
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # 个人 / 敏感信息（绝不提交）
 *.token
 *.key
 secrets.*
+# 环境变量文件（常含 API Key / 端点覆盖），保留 .env.example 模板可提交
+.env
+.env.*
+!.env.example
+# 证书 / 密钥容器
+*.pem
+*.p12
 
 # 前端构建产物（Vite -> dist/，Tauri frontendDist 引用）
 dist/
@@ -35,3 +52,9 @@ target-*/
 
 # worktrees (superpowers workflow)
 .worktrees/
+
+# 编辑器目录 / 本地临时文件（如需共享编辑器配置，对被忽略目录内的目标文件显式反选）
+.idea/
+.vscode/
+*.bak
+*.tmp

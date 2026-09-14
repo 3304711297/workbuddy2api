@@ -39,9 +39,17 @@ def test_no_self_deadlock_on_empty_accounts(acc_dir, monkeypatch):
     monkeypatch.setattr(converter, "_read_all_accounts", lambda: ("", {}))
     cm = CredentialManager()
     done = {}
-    t = threading.Thread(
-        target=lambda: done.setdefault("ret", cm.get_headers_for_uid("u1")),
-        daemon=True)
+
+    def _worker():
+        # 空 accounts 下 get_headers_for_uid 抛「无可用凭据」是本用例的预期路径
+        # （本用例只断言不自我死锁）。此处就地捕获，避免污染全局
+        # threading.excepthook，导致 pytest 报 PytestUnhandledThreadExceptionWarning。
+        try:
+            done["ret"] = cm.get_headers_for_uid("u1")
+        except Exception as e:  # noqa: BLE001
+            done["err"] = e
+
+    t = threading.Thread(target=_worker, daemon=True)
     t.start()
     t.join(timeout=5)
     assert not t.is_alive(), "get_headers_for_uid self-deadlock"
