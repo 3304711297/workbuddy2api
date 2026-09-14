@@ -1047,3 +1047,43 @@ class TestAnthropicStreamTranslator:
         ]
         assert "".join(text_deltas) == "Hello world!"
 
+    def test_empty_string_finish_reason_does_not_fragment_text_blocks(self):
+        """Verify that upstream sending finish_reason="" on every streaming chunk
+        (Tencent CodeBuddy DeepSeek behavior) does NOT prematurely close and reopen text blocks."""
+        translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")
+
+        raw_events = []
+        chunks = [
+            {"choices": [{"delta": {"content": "你好"}, "finish_reason": ""}]},
+            {"choices": [{"delta": {"content": "！"}, "finish_reason": ""}]},
+            {"choices": [{"delta": {"content": "有什么"}, "finish_reason": ""}]},
+            {"choices": [{"delta": {"content": "可以"}, "finish_reason": ""}]},
+            {"choices": [{"delta": {"content": "帮你的吗？"}, "finish_reason": ""}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        for c in chunks:
+            raw_events.extend(translator.feed_chunk(c))
+        raw_events.extend(translator.feed_line("data: [DONE]"))
+
+        parsed = parse_sse_events(raw_events)
+
+        text_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "text"
+        ]
+        text_stops = [
+            p for p in parsed
+            if p["event"] == "content_block_stop"
+        ]
+
+        assert len(text_starts) == 1, f"Expected exactly 1 text block start, got {len(text_starts)}"
+        assert len(text_stops) == 1, f"Expected exactly 1 text block stop, got {len(text_stops)}"
+
+        text_deltas = [
+            p["data"]["delta"]["text"]
+            for p in parsed
+            if p["event"] == "content_block_delta" and p["data"]["delta"].get("type") == "text_delta"
+        ]
+        assert "".join(text_deltas) == "你好！有什么可以帮你的吗？"
+
+

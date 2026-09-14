@@ -297,7 +297,7 @@ class AnthropicStreamTranslator:
                     )
 
         # 4. Finish reason
-        if finish_reason is not None:
+        if finish_reason and str(finish_reason).strip():
             self._finish_reason = finish_reason
             events.extend(self._close_active_block())
 
