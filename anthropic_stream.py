@@ -22,6 +22,25 @@ def _format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+_NON_TERMINAL_FINISH_REASONS = frozenset({
+    "", "null", "none", "nil", "undefined", "false", "0", "in_progress", "generating"
+})
+
+
+def _is_terminal_finish_reason(reason: Any) -> bool:
+    """Determine whether a finish_reason indicates actual stream completion.
+
+    Filters out empty strings, whitespace, JSON-serialized null/none strings,
+    and transient progress indicators that must not cut content blocks prematurely.
+    """
+    if not reason:
+        return False
+    if not isinstance(reason, (str, bytes)):
+        return False
+    val = reason.decode("utf-8", "replace") if isinstance(reason, bytes) else str(reason)
+    return val.strip().lower() not in _NON_TERMINAL_FINISH_REASONS
+
+
 class AnthropicStreamTranslator:
     """State machine translator for converting OpenAI chunk streams to Anthropic SSE events.
 
@@ -88,16 +107,19 @@ class AnthropicStreamTranslator:
         )
 
     def _map_finish_reason(self, reason: Optional[str]) -> str:
-        if reason == "stop":
-            return "end_turn"
-        if reason in ("tool_calls", "function_call"):
-            return "tool_use"
-        if reason == "length":
-            return "max_tokens"
-        if reason == "content_filter":
-            return "stop_sequence"
         if self._had_tool_call:
             return "tool_use"
+        if not reason or not isinstance(reason, (str, bytes)):
+            return "end_turn"
+        r = (reason.decode("utf-8", "replace") if isinstance(reason, bytes) else str(reason)).strip().lower()
+        if r in ("stop", "eos", "done", "complete"):
+            return "end_turn"
+        if r in ("tool_calls", "function_call"):
+            return "tool_use"
+        if r in ("length", "max_tokens"):
+            return "max_tokens"
+        if r in ("content_filter", "sensitive", "safety"):
+            return "stop_sequence"
         return "end_turn"
 
     def _close_active_block(self) -> List[str]:
@@ -297,8 +319,8 @@ class AnthropicStreamTranslator:
                     )
 
         # 4. Finish reason
-        if finish_reason and str(finish_reason).strip():
-            self._finish_reason = finish_reason
+        if _is_terminal_finish_reason(finish_reason):
+            self._finish_reason = str(finish_reason).strip()
             events.extend(self._close_active_block())
 
             if not self._message_delta_emitted:

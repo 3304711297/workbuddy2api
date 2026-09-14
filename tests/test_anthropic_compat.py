@@ -480,10 +480,17 @@ class TestTranslateOpenAIResponseToAnthropic:
     def test_stop_reason_mapping(self):
         for oai_finish, ant_stop in [
             ("stop", "end_turn"),
+            ("eos", "end_turn"),
             ("length", "max_tokens"),
+            ("max_tokens", "max_tokens"),
             ("tool_calls", "tool_use"),
             ("function_call", "tool_use"),
             ("content_filter", "stop_sequence"),
+            ("sensitive", "stop_sequence"),
+            ("safety", "stop_sequence"),
+            ("null", "end_turn"),
+            (None, "end_turn"),
+            ("unexpected_vendor_enum", "end_turn"),
         ]:
             resp = {
                 "choices": [
@@ -1085,5 +1092,50 @@ class TestAnthropicStreamTranslator:
             if p["event"] == "content_block_delta" and p["data"]["delta"].get("type") == "text_delta"
         ]
         assert "".join(text_deltas) == "你好！有什么可以帮你的吗？"
+
+    def test_pseudo_null_finish_reasons_do_not_prematurely_close_stream(self):
+        """Verify that pseudo-null or non-terminal finish_reason strings ('null', 'none', 'in_progress', etc.)
+        do NOT prematurely close blocks or emit early message_delta."""
+        translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")
+
+        raw_events = []
+        chunks = [
+            {"choices": [{"delta": {"content": "Part 1 "}, "finish_reason": "null"}]},
+            {"choices": [{"delta": {"content": "Part 2 "}, "finish_reason": "none"}]},
+            {"choices": [{"delta": {"content": "Part 3 "}, "finish_reason": "in_progress"}]},
+            {"choices": [{"delta": {"content": "Part 4"}, "finish_reason": "undefined"}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        for c in chunks:
+            raw_events.extend(translator.feed_chunk(c))
+        raw_events.extend(translator.feed_line("data: [DONE]"))
+
+        parsed = parse_sse_events(raw_events)
+
+        text_starts = [
+            p for p in parsed
+            if p["event"] == "content_block_start" and p["data"]["content_block"]["type"] == "text"
+        ]
+        text_stops = [
+            p for p in parsed
+            if p["event"] == "content_block_stop"
+        ]
+        message_deltas = [
+            p for p in parsed
+            if p["event"] == "message_delta"
+        ]
+
+        assert len(text_starts) == 1, f"Expected 1 text start, got {len(text_starts)}"
+        assert len(text_stops) == 1, f"Expected 1 text stop, got {len(text_stops)}"
+        assert len(message_deltas) == 1, f"Expected 1 message_delta, got {len(message_deltas)}"
+
+        text_deltas = [
+            p["data"]["delta"]["text"]
+            for p in parsed
+            if p["event"] == "content_block_delta" and p["data"]["delta"].get("type") == "text_delta"
+        ]
+        assert "".join(text_deltas) == "Part 1 Part 2 Part 3 Part 4"
+        assert message_deltas[0]["data"]["delta"]["stop_reason"] == "end_turn"
+
 
 

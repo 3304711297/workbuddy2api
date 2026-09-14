@@ -443,16 +443,13 @@ def translate_openai_response_to_anthropic(openai_resp: dict) -> dict:
 
     # Map finish_reason
     has_tool_use = any(b.get("type") == "tool_use" for b in content_blocks)
-    if finish_reason == "stop":
-        stop_reason = "end_turn"
-    elif finish_reason in ("tool_calls", "function_call"):
+    fr = (str(finish_reason).strip().lower() if finish_reason and isinstance(finish_reason, (str, bytes)) else "")
+    if has_tool_use or fr in ("tool_calls", "function_call"):
         stop_reason = "tool_use"
-    elif finish_reason == "length":
+    elif fr in ("length", "max_tokens"):
         stop_reason = "max_tokens"
-    elif finish_reason == "content_filter":
+    elif fr in ("content_filter", "sensitive", "safety"):
         stop_reason = "stop_sequence"
-    elif has_tool_use:
-        stop_reason = "tool_use"
     else:
         stop_reason = "end_turn"
 
