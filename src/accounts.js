@@ -19,7 +19,7 @@ async function fetchRateLimit() {
 }
 
 // 把 /api/rate_limit 载荷渲染成内嵌 HTML；rl=null 或 models 为空时返回空串。
-function renderRateLimitCard(rl, activeModel) {
+function renderRateLimitCard(rl, activeModel, currentUid = null) {
   if (!rl || !rl.models) return '';
   const models = Object.entries(rl.models);
   if (models.length === 0) return '';
@@ -27,16 +27,37 @@ function renderRateLimitCard(rl, activeModel) {
   const rows = models.map(([model, e]) => {
     const limited = e.state === 'limited';
     const expired = e.state === 'expired';
-    const dot = limited
+
+    // 账号级归因：判断受限的是否为当前活跃账号
+    const isCurrentLimited = Boolean(
+      limited && (
+        e.isActiveAccountLimited === true ||
+        (currentUid && e.limitedUid === currentUid) ||
+        (!currentUid && !e.limitedUid) // 无账号标识时退化为全局受限
+      )
+    );
+    const isOtherLimited = Boolean(
+      limited && !isCurrentLimited && e.limitedUid && (!currentUid || e.limitedUid !== currentUid)
+    );
+
+    const dot = isCurrentLimited
       ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px;animation:pulse-dot 1.2s ease-in-out infinite;"></span>'
-      : expired
+      : isOtherLimited
         ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning, #f59e0b);margin-right:6px;"></span>'
-        : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
-    const status = limited
-      ? `<strong style="color:var(--danger);">已触发 · 冷却中</strong> <span class="mono">⏳ ${esc(fmtCooldown(e.remainingSec))}</span> <small class="muted mono">@${esc(e.resetLocal || '')}</small>`
-      : expired
-        ? `<strong style="color:var(--warning, #f59e0b);">已恢复</strong> <small class="muted mono">(冷却已于 ${esc(e.resetLocal || '')} 结束)</small>`
-        : `<strong style="color:var(--success);">正常</strong>`;
+        : expired
+          ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning, #f59e0b);margin-right:6px;"></span>'
+          : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
+
+    let status = `<strong style="color:var(--success);">正常</strong>`;
+    if (isCurrentLimited) {
+      status = `<strong style="color:var(--danger);">已触发 · 冷却中</strong> <span class="mono">⏳ ${esc(fmtCooldown(e.remainingSec))}</span> <small class="muted mono">@${esc(e.resetLocal || '')}</small>`;
+    } else if (isOtherLimited) {
+      const otherNick = e.limitedNickname ? ` (${esc(e.limitedNickname)})` : '';
+      status = `<strong style="color:var(--warning, #f59e0b);">已自动避让</strong> <small class="muted mono">备用账号${otherNick}冷却中 · 当前账号正常</small> <span class="mono">⏳ ${esc(fmtCooldown(e.remainingSec))}</span>`;
+    } else if (expired) {
+      status = `<strong style="color:var(--warning, #f59e0b);">已恢复</strong> <small class="muted mono">(冷却已于 ${esc(e.resetLocal || '')} 结束)</small>`;
+    }
+
     // 上次触发时间：后端 lastSeenLocal 已给字段，此前未消费——补上让历史轨迹可见
     const lastSeen = e.lastSeenLocal
       ? `<small class="muted mono" title="该模型最近一次触发限流的时间">上次 ${esc(e.lastSeenLocal)}</small>`
@@ -330,7 +351,7 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
   let quotaHtml = '';
   // 频率限制卡片：仅当反代端点返回了真实 6004 记录时渲染（老版内核/无记录 → 空）
   // 桌面端无「当前测试模型」全局态，rate_limit.models 里的 model 字段即最近被限模型，直接展示不加会话徽标
-  const rateLimitHtml = renderRateLimitCard(rateLimit, null);
+  const rateLimitHtml = renderRateLimitCard(rateLimit, null, acct.uid);
   if (usage) {
     const total = usage.total || 0;
     const remain = usage.remain || 0;
@@ -488,36 +509,68 @@ function renderAccountsGrid(list, rateLimit) {
     return;
   }
 
-  // 冷却模型列表（state==='limited' 且属该账号时视为冷却中）——按账号名匹配有限，
-  // 这里统一按「全局存在 6004 冷却记录」提示，避免多账号下错误归因
-  const limitedModels = rateLimit && rateLimit.models
-    ? Object.entries(rateLimit.models).filter(([, e]) => e.state === 'limited').map(([m]) => m)
-    : [];
-  const coolingTip = limitedModels.length > 0
-    ? `<div class="muted" style="font-size:10px; margin-top:4px;">⏳ 上游冷却模型: ${esc(limitedModels.slice(0, 3).join(', '))}${limitedModels.length > 3 ? ` 等 ${limitedModels.length} 个` : ''}</div>`
-    : '';
+  // 账号级冷却映射表：uid -> [coolingModelNames]
+  const accountCooldownMap = new Map();
+  if (rateLimit && Array.isArray(rateLimit.accountCooldowns)) {
+    for (const item of rateLimit.accountCooldowns) {
+      if (item && item.uid && item.remainingSec > 0) {
+        const arr = accountCooldownMap.get(item.uid) || [];
+        if (!arr.includes(item.model)) arr.push(item.model);
+        accountCooldownMap.set(item.uid, arr);
+      }
+    }
+  }
+  // 兼容老内核/回退：从 rateLimit.models 补充 limitedUid
+  if (rateLimit && rateLimit.models) {
+    for (const [m, e] of Object.entries(rateLimit.models)) {
+      if (e && e.state === 'limited' && e.limitedUid) {
+        const arr = accountCooldownMap.get(e.limitedUid) || [];
+        if (!arr.includes(m)) {
+          arr.push(m);
+          accountCooldownMap.set(e.limitedUid, arr);
+        }
+      }
+    }
+  }
 
   const multi = list.length >= 2;
 
-  grid.innerHTML = list.map(a => `
-    <div class="account-item-card ${a.is_active ? 'is-active' : ''}">
-      <div class="account-item-header">
-        <strong>${esc(a.nickname || '未命名')}</strong>
-        ${a.is_active
-          ? `<span class="badge badge-running">${multi ? '● 活跃中' : '使用中'}</span>`
-          : `<span class="badge badge-info">${a.token_expired ? '已过期' : '○ 待机就绪'}</span>`}
+  grid.innerHTML = list.map(a => {
+    const accCoolingModels = accountCooldownMap.get(a.uid) || [];
+    const isCooling = accCoolingModels.length > 0;
+    const coolingTip = isCooling
+      ? `<div style="font-size:10px; margin-top:4px; color:var(--danger, #ef4444);">⏳ 上游限流冷却中: ${esc(accCoolingModels.slice(0, 3).join(', '))}${accCoolingModels.length > 3 ? ` 等 ${accCoolingModels.length} 个` : ''}</div>`
+      : '';
+
+    let badgeHtml = '';
+    if (a.is_active) {
+      badgeHtml = isCooling
+        ? `<span class="badge" style="background:rgba(239,68,68,0.2);color:var(--danger);border:1px solid rgba(239,68,68,0.4);">● 活跃但受限</span>`
+        : `<span class="badge badge-running">${multi ? '● 活跃中' : '使用中'}</span>`;
+    } else {
+      badgeHtml = isCooling
+        ? `<span class="badge" style="background:rgba(245,158,11,0.2);color:var(--warning, #f59e0b);border:1px solid rgba(245,158,11,0.4);">⏳ 冷却避让中</span>`
+        : `<span class="badge badge-info">${a.token_expired ? '已过期' : '○ 待机就绪'}</span>`;
+    }
+
+    return `
+      <div class="account-item-card ${a.is_active ? 'is-active' : ''}">
+        <div class="account-item-header">
+          <strong>${esc(a.nickname || '未命名')}</strong>
+          ${badgeHtml}
+        </div>
+        <div class="mono muted" style="font-size: 11px;">${esc(a.uid)}</div>
+        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 4px;">
+          <span class="${a.token_expired ? 'text-danger' : 'text-success'}">${a.token_expired ? '凭据已过期' : '凭据有效'}</span>
+          <span style="display: flex; gap: 6px;">
+            ${!a.is_active ? `<button class="btn btn-secondary btn-sm" data-act="switch" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">设为活跃</button>` : ''}
+            ${!a.is_active ? `<button class="btn btn-danger btn-sm" data-act="delete" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">删除</button>` : ''}
+          </span>
+        </div>
+        ${coolingTip}
       </div>
-      <div class="mono muted" style="font-size: 11px;">${esc(a.uid)}</div>
-      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 4px;">
-        <span class="${a.token_expired ? 'text-danger' : 'text-success'}">${a.token_expired ? '凭据已过期' : '凭据有效'}</span>
-        <span style="display: flex; gap: 6px;">
-          ${!a.is_active ? `<button class="btn btn-secondary btn-sm" data-act="switch" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">设为活跃</button>` : ''}
-          ${!a.is_active ? `<button class="btn btn-danger btn-sm" data-act="delete" data-uid="${esc(a.uid)}" style="padding: 2px 6px;">删除</button>` : ''}
-        </span>
-      </div>
-      ${a.is_active ? coolingTip : ''}
-    </div>
-  `).join('');
+    `;
+  }).join('');
 }
 
 // 账号卡片按钮事件委托（data-act + data-uid，替代 inline onclick 的字符串拼接注入风险）

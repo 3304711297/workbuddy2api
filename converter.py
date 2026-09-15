@@ -2157,6 +2157,31 @@ def _is_account_cooldown(uid: str, model: str) -> bool:
         return True
 
 
+def _get_account_nickname(uid: str) -> str:
+    """根据 uid 查询对应账号的 nickname（若可查）。"""
+    if not uid:
+        return ""
+    cred = CONFIG.get("cred")
+    if not cred:
+        return ""
+    try:
+        if hasattr(cred, "list_all_accounts"):
+            for u, s in cred.list_all_accounts():
+                if u == uid and isinstance(s, dict):
+                    nick = (s.get("account") or {}).get("nickname")
+                    if nick:
+                        return str(nick)
+        if hasattr(cred, "get_active_session"):
+            s = cred.get_active_session()
+            if isinstance(s, dict) and (s.get("account") or {}).get("uid") == uid:
+                nick = (s.get("account") or {}).get("nickname")
+                if nick:
+                    return str(nick)
+    except Exception:
+        pass
+    return ""
+
+
 def _is_unauthorized_model_error(status_code: int, err_text: str) -> bool:
     if status_code != 400:
         return False
@@ -2241,6 +2266,14 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
                 oldest = min(_RATE_LIMIT_STATE,
                              key=lambda k: _RATE_LIMIT_STATE[k].get("lastSeenMs", 0))
                 _RATE_LIMIT_STATE.pop(oldest, None)
+        curr_uid = uid
+        if not curr_uid and CONFIG.get("cred"):
+            try:
+                curr_uid = getattr(CONFIG["cred"], "get_active_uid", lambda: "")()
+            except Exception:
+                pass
+        lim_nick = _get_account_nickname(curr_uid) if curr_uid else ""
+
         entry = {
             "code": 6004,
             "message": (err_text or "")[:300],
@@ -2248,15 +2281,11 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             "resetLocal": reset_local,
             "firstSeenMs": prev["firstSeenMs"] if prev and prev.get("resetAtMs") == reset_ms else now_ms,
             "lastSeenMs": now_ms,
+            "uid": curr_uid or "",
+            "nickname": lim_nick,
         }
         _RATE_LIMIT_STATE[model] = entry
 
-        curr_uid = uid
-        if not curr_uid and CONFIG.get("cred"):
-            try:
-                curr_uid = getattr(CONFIG["cred"], "get_active_uid", lambda: "")()
-            except Exception:
-                pass
         if curr_uid:
             if ((curr_uid, model) not in _ACCOUNT_COOLDOWNS
                     and len(_ACCOUNT_COOLDOWNS) >= _ACCOUNT_COOLDOWN_CAP):
@@ -2583,8 +2612,32 @@ async def api_rate_limit(
     now_ms = time.time() * 1000
     with _RATE_LIMIT_LOCK:
         snapshot = dict(_RATE_LIMIT_STATE)
+        cooldown_items = list(_ACCOUNT_COOLDOWNS.items())
+
+    curr_active_uid = ""
+    try:
+        if CONFIG.get("cred"):
+            curr_active_uid = getattr(CONFIG["cred"], "get_active_uid", lambda: "")() or ""
+            if not curr_active_uid and hasattr(CONFIG["cred"], "get_active_session"):
+                s = CONFIG["cred"].get_active_session()
+                curr_active_uid = (s.get("account") or {}).get("uid") or ""
+    except Exception:
+        pass
+
     for model, e in snapshot.items():
         remaining = max(0, int((e["resetAtMs"] - now_ms) / 1000))
+        lim_uid = e.get("uid") or ""
+        lim_nick = e.get("nickname") or ""
+        if not lim_nick and lim_uid:
+            lim_nick = _get_account_nickname(lim_uid)
+
+        is_active_limited = False
+        if remaining > 0:
+            if curr_active_uid:
+                is_active_limited = _is_account_cooldown(curr_active_uid, model) or (lim_uid == curr_active_uid)
+            else:
+                is_active_limited = True
+
         # 冷却已结束的条目仅为历史痕迹：state 由 ok 细化为 expired，
         # 使消费方能区分「当前正被限 / 历史曾限过（已恢复）／从未限过（无条目）」。
         # 注意：resetLocal/message 必须保留——前端用它展示「冷却已于 X 结束」。
@@ -2597,7 +2650,25 @@ async def api_rate_limit(
             "remainingSec": remaining,
             "message": e["message"],
             "lastSeenLocal": time.strftime("%m-%d %H:%M:%S", time.localtime(e["lastSeenMs"] / 1000)),
+            "limitedUid": lim_uid,
+            "limitedNickname": lim_nick,
+            "isActiveAccountLimited": is_active_limited,
         }
+
+    cooldown_accounts = []
+    for (u, m), ent in cooldown_items:
+        rem = max(0, int((ent.get("resetAtMs", 0) - now_ms) / 1000))
+        if rem > 0:
+            cooldown_accounts.append({
+                "uid": u,
+                "model": m,
+                "nickname": ent.get("nickname") or _get_account_nickname(u),
+                "resetAt": datetime.datetime.fromtimestamp(
+                    ent["resetAtMs"] / 1000, tz=datetime.timezone.utc
+                ).isoformat(),
+                "resetLocal": ent.get("resetLocal", ""),
+                "remainingSec": rem,
+            })
     # 活跃凭据对应的账号昵称（辅助定位多账号场景）
     nickname = ""
     try:
@@ -2650,6 +2721,7 @@ async def api_rate_limit(
         }
     return {
         "models": models,
+        "accountCooldowns": cooldown_accounts,
         "rollingUsage": {m: _rolling_usage(m) for m in snapshot or {}},
         "nightFree": is_night_free,
         "nightWindow": {

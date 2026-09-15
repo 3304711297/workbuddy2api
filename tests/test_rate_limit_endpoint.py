@@ -170,3 +170,64 @@ def test_rate_limit_night_free_and_today_usage(rl_client, tmp_path, monkeypatch)
     assert ru["err429_today"] >= 1
     assert "nightFree" in ru
 
+
+def test_rate_limit_multi_account_attribution_and_cooldown(rl_client, monkeypatch):
+    """验证多账号场景下的限流归因：
+    当账号 A (晚街) 触发 6004 限流避让，切换为账号 B (活跃号) 时：
+    /api/rate_limit 必须精确指出 limitedUid 为账号 A，
+    且当前活跃账号 B 的 isActiveAccountLimited 为 False。
+    """
+    class _FakeMultiCred:
+        def __init__(self):
+            self.active_uid = "u-active"
+            self.accounts = {
+                "u-wanjie": {"account": {"uid": "u-wanjie", "nickname": "晚街"}},
+                "u-active": {"account": {"uid": "u-active", "nickname": "17325834246"}},
+            }
+
+        def get_active_uid(self):
+            return self.active_uid
+
+        def get_active_session(self):
+            return self.accounts[self.active_uid]
+
+        def list_all_accounts(self):
+            return list(self.accounts.items())
+
+        def get_headers(self):
+            return {"Authorization": "Bearer fake", "X-User-Id": self.active_uid}
+
+    fake_cred = _FakeMultiCred()
+    monkeypatch.setitem(converter.CONFIG, "cred", fake_cred)
+    converter._ACCOUNT_COOLDOWNS.clear()
+    converter._RATE_LIMIT_STATE.clear()
+
+    # 模拟账号 u-wanjie 在 deepseek-v4.1-flash 上触发 6004
+    converter._record_rate_limit(
+        "deepseek-v4.1-flash",
+        SAMPLE_6004,
+        uid="u-wanjie",
+        status_code=429,
+    )
+
+    res = rl_client.get("/api/rate_limit")
+    assert res.status_code == 200
+    data = res.json()
+    model_entry = data["models"]["deepseek-v4.1-flash"]
+
+    # 必须保留向后兼容字段
+    assert model_entry["state"] == "limited"
+    assert model_entry["remainingSec"] > 0
+
+    # 必须具备账号级归因
+    assert model_entry["limitedUid"] == "u-wanjie"
+    assert model_entry["limitedNickname"] == "晚街"
+    # 当前活跃账号是 u-active，并没有被限流
+    assert model_entry["isActiveAccountLimited"] is False
+    assert data["rotation"]["active_uid"] == "u-active"
+
+    # 当活跃账号切回 u-wanjie 时，isActiveAccountLimited 必须变为 True
+    fake_cred.active_uid = "u-wanjie"
+    res2 = rl_client.get("/api/rate_limit")
+    data2 = res2.json()
+    assert data2["models"]["deepseek-v4.1-flash"]["isActiveAccountLimited"] is True
