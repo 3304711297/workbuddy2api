@@ -231,3 +231,73 @@ def test_rate_limit_multi_account_attribution_and_cooldown(rl_client, monkeypatc
     res2 = rl_client.get("/api/rate_limit")
     data2 = res2.json()
     assert data2["models"]["deepseek-v4.1-flash"]["isActiveAccountLimited"] is True
+
+
+def test_rate_limit_models_view_aligns_with_active_account_cooldown(rl_client, monkeypatch):
+    """验证同模型双账号受限时，models[model] 优先与当前活跃账号的真实 cooldown 时间戳对齐：
+    A 账号限流重置于 20:00:00
+    B 账号限流重置于 20:30:00
+    - 当前活跃为 A 时，models[model] 的 resetLocal 必须为 20:00:00，limitedUid 为 A；
+    - 当前活跃为 B 时，models[model] 的 resetLocal 必须为 20:30:00，limitedUid 为 B；
+    - 当前活跃为健康号 C 时，isActiveAccountLimited 为 False，且展示最近一次被限备用号。
+    """
+    class _FakeThreeCred:
+        def __init__(self):
+            self.active_uid = "u-wanjie"
+            self.accounts = {
+                "u-wanjie": {"account": {"uid": "u-wanjie", "nickname": "晚街"}},
+                "u-active": {"account": {"uid": "u-active", "nickname": "17325834246"}},
+                "u-third": {"account": {"uid": "u-third", "nickname": "备用三号"}},
+            }
+
+        def get_active_uid(self):
+            return self.active_uid
+
+        def get_active_session(self):
+            return self.accounts[self.active_uid]
+
+        def list_all_accounts(self):
+            return list(self.accounts.items())
+
+        def get_headers(self):
+            return {"Authorization": "Bearer fake", "X-User-Id": self.active_uid}
+
+    fake_cred = _FakeThreeCred()
+    monkeypatch.setitem(converter.CONFIG, "cred", fake_cred)
+    converter._ACCOUNT_COOLDOWNS.clear()
+    converter._RATE_LIMIT_STATE.clear()
+
+    raw_a = '{"code":6004,"msg":"将在 2099-01-01 20:00:00 UTC+8 重置"}'
+    raw_b = '{"code":6004,"msg":"将在 2099-01-01 20:30:00 UTC+8 重置"}'
+
+    # A 账号先触发
+    converter._record_rate_limit("deepseek-v4.1-flash", raw_a, uid="u-wanjie", status_code=429)
+    # B 账号后触发，覆盖 _RATE_LIMIT_STATE
+    converter._record_rate_limit("deepseek-v4.1-flash", raw_b, uid="u-active", status_code=429)
+
+    # 1. 活跃号为 A 时，必须优先对齐 A 账号的时间（20:00:00），而不是被 B 覆盖的 20:30:00
+    fake_cred.active_uid = "u-wanjie"
+    res_a = rl_client.get("/api/rate_limit")
+    data_a = res_a.json()
+    model_a = data_a["models"]["deepseek-v4.1-flash"]
+    assert model_a["limitedUid"] == "u-wanjie"
+    assert model_a["limitedNickname"] == "晚街"
+    assert model_a["resetLocal"] == "20:00:00"
+    assert model_a["isActiveAccountLimited"] is True
+
+    # 2. 活跃号为 B 时，必须对齐 B 账号的时间（20:30:00）
+    fake_cred.active_uid = "u-active"
+    res_b = rl_client.get("/api/rate_limit")
+    data_b = res_b.json()
+    model_b = data_b["models"]["deepseek-v4.1-flash"]
+    assert model_b["limitedUid"] == "u-active"
+    assert model_b["limitedNickname"] == "17325834246"
+    assert model_b["resetLocal"] == "20:30:00"
+    assert model_b["isActiveAccountLimited"] is True
+
+    # 3. 活跃号为健康号 C 时，不误报当前号限流，展示最新避让号
+    fake_cred.active_uid = "u-third"
+    res_c = rl_client.get("/api/rate_limit")
+    data_c = res_c.json()
+    model_c = data_c["models"]["deepseek-v4.1-flash"]
+    assert model_c["isActiveAccountLimited"] is False

@@ -2624,19 +2624,38 @@ async def api_rate_limit(
     except Exception:
         pass
 
-    for model, e in snapshot.items():
+    # 活跃账号真源对齐：若当前活跃账号在某模型上确实处于冷却中，优先以当前账号自己的条目为准
+    active_cooldowns_map: dict[str, dict] = {}
+    if curr_active_uid:
+        for (u, m), ent in cooldown_items:
+            if u == curr_active_uid and ent.get("resetAtMs", 0) > now_ms:
+                active_cooldowns_map[m] = ent
+
+    # 汇总待报告模型集合（保留 snapshot 顺序，追加仅在 active_cooldowns_map 中的模型）
+    all_models = list(snapshot.keys())
+    for m in active_cooldowns_map:
+        if m not in snapshot:
+            all_models.append(m)
+
+    for model in all_models:
+        if model in active_cooldowns_map:
+            e = active_cooldowns_map[model]
+            is_active_limited = True
+        else:
+            e = snapshot.get(model)
+            if not e:
+                continue
+            rem_tmp = max(0, int((e["resetAtMs"] - now_ms) / 1000))
+            if rem_tmp > 0:
+                is_active_limited = (e.get("uid") == curr_active_uid) if curr_active_uid else True
+            else:
+                is_active_limited = False
+
         remaining = max(0, int((e["resetAtMs"] - now_ms) / 1000))
         lim_uid = e.get("uid") or ""
         lim_nick = e.get("nickname") or ""
         if not lim_nick and lim_uid:
             lim_nick = _get_account_nickname(lim_uid)
-
-        is_active_limited = False
-        if remaining > 0:
-            if curr_active_uid:
-                is_active_limited = _is_account_cooldown(curr_active_uid, model) or (lim_uid == curr_active_uid)
-            else:
-                is_active_limited = True
 
         # 冷却已结束的条目仅为历史痕迹：state 由 ok 细化为 expired，
         # 使消费方能区分「当前正被限 / 历史曾限过（已恢复）／从未限过（无条目）」。
