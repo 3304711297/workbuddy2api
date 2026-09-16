@@ -134,9 +134,12 @@ workbuddy2api.exe (GUI)
   ⚠️ **`is_our_proxy_url(url, our_port)` 必须比对端口**：本机常有多个回环 `/v1` 服务
   （实测踩到 CPA 网关 `18080`），仅凭「回环 + 路径含 `/v1`」会把别人的服务认成自己。
   端口取自 `crate::load_app_config()`（可配置），**不得写死 8787**。
+  若 `our_port` 为 `None`，严格直接判定非本工具（`return false`），**禁止**退化为
+  宽泛的「回环 + /v1 即算」弱化 fallback。`agent_detect` 必须确保以
+  `load_app_config().port` 为兜底解析出端口后以 `Some(port)` 传入。
   返回给前端的字段是 **`hermes_proxy_base_url`**（serde snake_case）——
   前端 `src/agents.js` 读它时**不能**写成 camelCase，否则静默 `undefined`（本轮踩过）。
-  契约锁定：`tests/test_hermes_detection_contract.test.js` + `agents.rs` 内 9 条 Rust 单测。
+  契约锁定：`tests/test_hermes_detection_contract.test.js` + `agents.rs` 内 10 条 Rust 单测。
 
 - **`model_list_mode` 开关的作用域（别把它当成万能的）**：
   本开关**只改变内核向客户端暴露的清单**（`/v1/models`），**管不到客户端自己写死的模型表**。

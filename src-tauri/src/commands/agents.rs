@@ -129,6 +129,7 @@ fn map_value<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
 ///   - 必须校验端口：本机常有多个回环 `/v1` 服务（如其它网关跑在 18080），
 ///     仅凭「回环 + /v1」会把它们误认成本工具（实测踩到过）。
 ///   - 端口取自本工具配置而非写死 8787——端口可配置，写死会漏判。
+///   - 未提供端口（our_port 为 None）时严格拒绝，不得退化为宽泛的「回环 + /v1 即算」。
 ///   - 不按 provider 名字匹配：用户可任意命名，且「名字像但地址指向外网」不该算接入。
 fn is_our_proxy_url(raw: &str, our_port: Option<u16>) -> bool {
     let url = raw.trim();
@@ -155,14 +156,10 @@ fn is_our_proxy_url(raw: &str, our_port: Option<u16>) -> bool {
     if !is_loopback_host {
         return false;
     }
-    // 端口比对：未写端口时按 http 默认 80 计。
+    // 端口比对：调用方未提供端口时无法确认是否为本工具反代，严格模式下直接判否，
+    // 不再退化为宽松的「回环 + /v1 即算」（避免把 18080 等其它回环服务误认为本工具）。
     let Some(our_port) = our_port else {
-        // 调用方未提供端口（理论上不会）→ 退化为「回环 + /v1 即算」，
-        // 保持旧行为而不是全部判否，避免 UI 彻底失去判断力。
-        return rest
-            .splitn(2, '/')
-            .nth(1)
-            .is_some_and(|p| p.split('/').any(|seg| seg == "v1"));
+        return false;
     };
     if port.unwrap_or(80) != our_port {
         return false;
@@ -348,10 +345,10 @@ fn hermes_is_configured(snapshot: &HermesEndpointSnapshot) -> bool {
 pub fn agent_detect(port: Option<u16>) -> Result<AgentStatus, String> {
     let hermes_p = resolve_hermes_config();
     let hermes_installed = hermes_p.exists();
-    // 端口必须来自本工具配置：本机可能有多个回环 /v1 服务（如另一网关跑在 18080），
-    // 仅凭「回环 + /v1」会把它们误认成本工具。
-    let our_port = port.or_else(|| Some(crate::load_app_config().port));
-    let hermes_snapshot = read_hermes_endpoint(&hermes_p, our_port);
+    // 端口必须来自调用参数或本工具配置：本机可能有多个回环 /v1 服务（如另一网关跑在 18080），
+    // 必须确保拿到具体端口传给 read_hermes_endpoint，不能为 None。
+    let our_port = port.unwrap_or_else(|| crate::load_app_config().port);
+    let hermes_snapshot = read_hermes_endpoint(&hermes_p, Some(our_port));
     let hermes_configured = hermes_installed && hermes_is_configured(&hermes_snapshot);
     let hermes_proxy_url = hermes_snapshot.proxy_base_url.clone();
 
@@ -372,7 +369,7 @@ pub fn agent_detect(port: Option<u16>) -> Result<AgentStatus, String> {
         hermes_proxy_base_url: hermes_proxy_url,
         zcode_installed,
         zcode_provider_registered,
-        zcode_service_online: loopback_port_open(port.unwrap_or(8787)),
+        zcode_service_online: loopback_port_open(our_port),
         zcode_cli_path: zcode_c.to_string_lossy().to_string(),
         zcode_v2_path: zcode_v.to_string_lossy().to_string(),
     })
@@ -638,5 +635,25 @@ mod tests {
             hermes_is_configured(&snapshot),
             "providers 里存在本工具反代时，「已接入配置」徽章必须点亮"
         );
+    }
+
+    #[test]
+    fn proxy_detection_rejects_when_our_port_is_none() {
+        // 安全边界测试：当未提供端口（our_port == None）时，不能弱化退化为「回环 + /v1 即算」，
+        // 否则会把 18080 等外部网关误认成本工具反代。必须严格判否。
+        let value: Value = serde_yaml::from_str(
+            "providers:\n  cpa:\n    base_url: http://127.0.0.1:18080/v1\n  wb:\n    base_url: http://127.0.0.1:8787/v1\n",
+        )
+        .unwrap();
+        let root = value.as_mapping().unwrap();
+        let snapshot = read_hermes_endpoint_from_mapping(root, None);
+        assert!(
+            !snapshot.proxy_registered,
+            "缺少端口参数时不得退化为宽松匹配，必须判为未接入"
+        );
+        assert_eq!(snapshot.proxy_base_url, "");
+        assert!(!is_our_proxy_url("http://127.0.0.1:8787/v1", None));
+        assert!(!is_our_proxy_url("http://127.0.0.1:18080/v1", None));
+        assert!(!is_our_proxy_url("http://localhost:8787/v1", None));
     }
 }

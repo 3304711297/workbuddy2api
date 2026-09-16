@@ -48,6 +48,23 @@ test('接入判据包含端口比对，避免把别的回环服务认作本工�
   );
 });
 
+test('未提供端口时严格拒绝，不得退化为宽松「回环 + /v1 即算」', () => {
+  // 安全边界：our_port 为 None 时必须直接 return false，杜绝退化为宽泛匹配
+  assert.ok(
+    /let Some\(our_port\) = our_port else \{\s*return false;\s*\};/.test(agentsRs),
+    'our_port 为 None 时必须直接 return false'
+  );
+  // agent_detect 必须保证解析配置端口并以 Some(our_port) 传入
+  assert.ok(
+    /port\.unwrap_or_else\(\|\s*\|\s*crate::load_app_config\(\)\.port\)/.test(agentsRs),
+    'agent_detect 必须从 load_app_config().port 解析默认端口'
+  );
+  assert.ok(
+    /read_hermes_endpoint\(&hermes_p,\s*Some\(our_port\)\)/.test(agentsRs),
+    'agent_detect 传给 read_hermes_endpoint 的端口必须明确为 Some(our_port)'
+  );
+});
+
 test('「已接入」判定在 proxy_registered 为真时成立（顶层 base_url 为空也要点亮）', () => {
   // 直接回归线上场景：顶层 model.base_url 为空、反代在 providers 里 → 必须算已接入。
   const fn = agentsRs.slice(agentsRs.indexOf('fn hermes_is_configured'));
