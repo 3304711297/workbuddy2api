@@ -523,17 +523,28 @@ enum ForwardFailure {
     Other(u16),
 }
 
-fn classify_status(code: u16) -> ForwardFailure {
-    match code {
+/// 是否为失败响应。**2xx 一律是成功** —— 调用方用 `if let Some(msg) = forward_failure_message(..)`
+/// 判定失败，故这里必须把成功挡在外面，否则 HTTP 200 会被当成错误抛给前端
+/// （曾致签到完全不可用：toast「签到请求失败: 内核返回 HTTP 200」）。
+fn is_failure_status(code: u16) -> bool {
+    !(200..300).contains(&code)
+}
+
+/// 失败分级：仅对失败响应返回 `Some`，成功响应返回 `None`。
+fn classify_status(code: u16) -> Option<ForwardFailure> {
+    if !is_failure_status(code) {
+        return None;
+    }
+    Some(match code {
         401 | 403 => ForwardFailure::Unauthorized,
         404 => ForwardFailure::NotFound,
         other => ForwardFailure::Other(other),
-    }
+    })
 }
 
-/// 非 2xx 时给用户的可操作提示（分级 → 文案）。
-fn forward_failure_message(f: &ForwardFailure) -> Option<String> {
-    match f {
+/// 状态码 → 给用户的可操作提示。**成功状态返回 `None`**（表示「无需报错」）。
+fn forward_failure_message(code: u16) -> Option<String> {
+    match classify_status(code)? {
         ForwardFailure::Unauthorized => Some(
             "客户端密钥校验失败（HTTP 401）：请在「服务设置」核对该密钥，或清空后重试"
                 .to_string(),
@@ -557,10 +568,10 @@ pub async fn proxy_rate_limit(port: u16) -> Result<Option<serde_json::Value>, St
             Ok(Some(v))
         }
         // 404 = 老版内核（无此端点）→ 按「数据不可用」优雅降级。
-        Ok(r) if matches!(classify_status(r.status().as_u16()), ForwardFailure::NotFound) => Ok(None),
+        Ok(r) if classify_status(r.status().as_u16()) == Some(ForwardFailure::NotFound) => Ok(None),
         // ⚠️ 401 不能并进上面的降级：密钥不符时静默隐藏整张限流卡，用户只看到功能消失、
         // 无从得知该去核对密钥（旧实现即如此，等于惩罚配置了鉴权的用户）。
-        Ok(r) => Err(forward_failure_message(&classify_status(r.status().as_u16()))
+        Ok(r) => Err(forward_failure_message(r.status().as_u16())
             .unwrap_or_else(|| format!("内核返回 HTTP {}", r.status().as_u16()))),
         Err(_) => Ok(None), // 连接层失败：内核未运行 → 按「不可用」降级
     }
@@ -573,8 +584,8 @@ pub async fn proxy_checkin_claim(port: u16) -> Result<serde_json::Value, String>
     let url = format!("http://127.0.0.1:{port}/api/checkin/claim");
     let req = authorize(super::shared::local_client(20).post(&url), configured_api_key().as_deref());
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    // 密钥不符时给出可操作提示，而不是把 401 当业务失败塞进 ok:false
-    if let Some(msg) = forward_failure_message(&classify_status(resp.status().as_u16())) {
+    // 仅失败响应才报错；成功（2xx）直接解析 JSON（曾因把 200 也判为失败导致签到不可用）
+    if let Some(msg) = forward_failure_message(resp.status().as_u16()) {
         return Err(msg);
     }
     resp.json().await.map_err(|e| e.to_string())
@@ -587,7 +598,7 @@ pub async fn proxy_checkin_status(port: u16) -> Result<serde_json::Value, String
     let url = format!("http://127.0.0.1:{port}/api/checkin/status");
     let req = authorize(super::shared::local_client(20).get(&url), configured_api_key().as_deref());
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    if let Some(msg) = forward_failure_message(&classify_status(resp.status().as_u16())) {
+    if let Some(msg) = forward_failure_message(resp.status().as_u16()) {
         return Err(msg);
     }
     resp.json().await.map_err(|e| e.to_string())
@@ -694,7 +705,7 @@ pub async fn proxy_test_chat(
         let snippet: String = body_text.chars().take(300).collect();
         // 401/403 额外点明「核对密钥」，这是用户唯一能采取的动作
         let hint = match classify_status(status.as_u16()) {
-            ForwardFailure::Unauthorized => {
+            Some(ForwardFailure::Unauthorized) => {
                 "\n提示：客户端密钥校验失败，请在「服务设置」核对密钥（或清空后重启内核）"
             }
             _ => "",
@@ -1305,6 +1316,39 @@ mod test_chat_probe_tests {
     }
 
     #[test]
+    fn success_status_is_never_classified_as_failure() {
+        // 回归：曾把「任何 HTTP 码」都塞进 ForwardFailure（一个纯失败枚举），调用方再
+        // `if let Some(msg) = forward_failure_message(...) { return Err(msg) }` —— 于是
+        // HTTP 200 也被判成失败，签到直接不可用（前端 toast「签到请求失败: 内核返回 HTTP 200」）。
+        // 2xx 一律不得产生失败分级/失败文案。
+        for code in [200u16, 201, 202, 204, 299] {
+            assert!(
+                !is_failure_status(code),
+                "HTTP {code} 是成功状态，不得被判为失败"
+            );
+            assert_eq!(
+                forward_failure_message(code),
+                None,
+                "HTTP {code} 不得产生失败文案（会当成 Err 抛给前端）"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_statuses_still_classified_and_actionable() {
+        // 反向保障：真正的失败仍要能被识别，且 401 给出可操作提示
+        for code in [400u16, 401, 403, 404, 500, 502, 503] {
+            assert!(is_failure_status(code), "HTTP {code} 应被判为失败");
+        }
+        // 401 的文案必须点明「密钥」与去哪个界面处理，否则用户无从下手
+        let m401 = forward_failure_message(401).expect("401 应给出可操作提示");
+        assert!(m401.contains("密钥"), "401 文案应提到密钥：{m401}");
+        assert!(m401.contains("服务设置"), "401 文案应指明去「服务设置」：{m401}");
+        let m500 = forward_failure_message(500).expect("500 应有提示");
+        assert!(m500.contains("500"), "500 文案应含状态码：{m500}");
+    }
+
+    #[test]
     fn api_key_resolution_matches_documented_precedence() {
         // 密钥优先级（AGENTS.md 明示且有既有测试锁定）：GUI 显式配置 > 继承环境变量 > 无鉴权。
         // 内核真源是 WORKBUDDY2API_KEY（`--api-key` 的默认值取自 _env_compat("KEY")），
@@ -1330,10 +1374,12 @@ mod test_chat_probe_tests {
     fn forward_failure_distinguishes_auth_from_missing_endpoint() {
         // 401 与 404 语义不同：前者要提示用户核对密钥，后者是「老版内核无此端点」优雅降级。
         // 旧实现把两者一起吞成 Ok(None)，用户只看到功能消失而无法判断该做什么。
-        assert_eq!(classify_status(401), ForwardFailure::Unauthorized);
-        assert_eq!(classify_status(403), ForwardFailure::Unauthorized);
-        assert_eq!(classify_status(404), ForwardFailure::NotFound);
-        assert_eq!(classify_status(500), ForwardFailure::Other(500));
+        assert_eq!(classify_status(401), Some(ForwardFailure::Unauthorized));
+        assert_eq!(classify_status(403), Some(ForwardFailure::Unauthorized));
+        assert_eq!(classify_status(404), Some(ForwardFailure::NotFound));
+        assert_eq!(classify_status(500), Some(ForwardFailure::Other(500)));
+        // 成功状态不得产生失败分级（否则会被当成 Err 抛给前端）
+        assert_eq!(classify_status(200), None);
     }
 
     #[test]
