@@ -197,7 +197,7 @@
                 </div>
                 <div class="metric-item">
                   <span class="metric-label">运行架构</span>
-                  <span id="dash-mode" class="metric-value">Direct Proxy</span>
+                  <span id="dash-mode" class="metric-value">检测中…</span>
                 </div>
                 <div class="metric-item">
                   <span class="metric-label">脱敏状态</span>
@@ -218,14 +218,14 @@
                 <span id="dash-protocol-badge" class="badge badge-info">协议检测中</span>
               </div>
               <div class="copy-input-group">
-                <label class="field-label">Base URL</label>
+                <label class="field-label" for="endpoint-url">Base URL</label>
                 <div class="input-with-btn">
                   <input id="endpoint-url" class="input mono" type="text" readonly value="http://127.0.0.1:8787/v1" />
                   <button class="btn btn-sm btn-copy" data-copy="endpoint-url">复制</button>
                 </div>
               </div>
               <div class="copy-input-group" style="margin-top: 10px;">
-                <label class="field-label">API Key (本地固定)</label>
+                <label class="field-label" for="endpoint-key">API Key (本地固定)</label>
                 <div class="input-with-btn">
                   <input id="endpoint-key" class="input mono" type="text" readonly value="local" />
                   <button class="btn btn-sm btn-copy" data-copy="endpoint-key">复制</button>
@@ -275,7 +275,7 @@
               <p class="muted">管理多账号凭据切换，实时查看各账号的剩余积分与资源包</p>
             </div>
             <div class="actions">
-              <button id="btn-refresh-all-usage" class="btn btn-secondary btn-sm">刷新全部数据</button>
+              <button id="btn-refresh-all-usage" class="btn btn-secondary btn-sm" title="重新拉取账号列表、积分与用量统计">刷新全部数据</button>
               <button class="btn btn-primary btn-sm" id="btn-goto-oauth">添加新账号</button>
             </div>
           </div>
@@ -297,7 +297,7 @@
             </div>
             <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 12px;">
               <div style="display: flex; align-items: center; gap: 8px;">
-                <label class="field-label" style="margin: 0; white-space: nowrap;">调度策略：</label>
+                <label class="field-label" for="select-rotate-mode" style="margin: 0; white-space: nowrap;">调度策略：</label>
                 <select id="select-rotate-mode" class="input mono" style="min-width: 180px;">
                   <option value="off">关闭 (单账号模式)</option>
                   <option value="failover">限流自动避让 (推荐)</option>
@@ -305,7 +305,7 @@
                 </select>
               </div>
               <div id="wrap-rotate-count" style="display: none; align-items: center; gap: 8px;">
-                <label class="field-label" style="margin: 0; white-space: nowrap;">每</label>
+                <label class="field-label" for="input-rotate-count" style="margin: 0; white-space: nowrap;">每</label>
                 <input id="input-rotate-count" type="number" class="input mono" min="1" max="100" value="1" style="width: 60px; text-align: center;" />
                 <span class="muted" style="font-size: 12px;">次请求轮换</span>
               </div>
@@ -384,7 +384,7 @@
                 <span class="badge badge-success">原生协议就绪</span>
               </div>
               <p class="agent-desc">内核已内置 Anthropic Messages API（<code>POST /v1/messages</code>），无需第三方中转工具，直接设置环境变量即可直连。</p>
-              <div class="agent-path-text">兼容端点: <span class="mono">http://127.0.0.1:8787/v1</span></div>
+              <div class="agent-path-text">兼容端点: <span class="mono endpoint-inline">http://127.0.0.1:8787/v1</span></div>
               <div id="claude-guide" hidden></div>
               <div class="divider"></div>
               <div class="agent-actions">
@@ -403,7 +403,7 @@
                 <span class="badge badge-success">原生协议就绪</span>
               </div>
               <p class="agent-desc">内核已内置 OpenAI Responses API（<code>POST /v1/responses</code>），SSE 事件完整携带 <code>sequence_number</code> / <code>response_id</code> / <code>item_id</code> 规范字段，可原生直连 Codex CLI。</p>
-              <div class="agent-path-text">兼容端点: <span class="mono">http://127.0.0.1:8787/v1</span></div>
+              <div class="agent-path-text">兼容端点: <span class="mono endpoint-inline">http://127.0.0.1:8787/v1</span></div>
               <div id="codex-guide" hidden></div>
               <div class="divider"></div>
               <div class="agent-actions">
@@ -521,7 +521,7 @@ print(response.choices[0].message.content)</code></pre>
             <div id="oauth-process-area" class="oauth-process-area hidden">
               <div class="divider"></div>
               <div class="oauth-url-container">
-                <label class="field-label">授权链接（如果浏览器未自动唤起，请手动点击或复制）：</label>
+                <label class="field-label" for="oauth-link-input">授权链接（如果浏览器未自动唤起，请手动点击或复制）：</label>
                 <div class="input-with-btn">
                   <input id="oauth-link-input" class="input mono" type="text" readonly value="" />
                   <button id="btn-open-browser" class="btn btn-primary">在浏览器打开</button>
@@ -547,7 +547,7 @@ print(response.choices[0].message.content)</code></pre>
             <h2 class="card-title">代理与环境设置</h2>
             
             <div class="form-group">
-              <label class="field-label">监听端口</label>
+              <label class="field-label" for="input-port">监听端口</label>
               <div class="input-with-btn" style="max-width: 320px;">
                 <input id="input-port" class="input mono" type="number" min="1024" max="65535" value="8787" />
                 <button id="btn-save-port" class="btn btn-secondary">保存端口</button>
@@ -580,7 +580,7 @@ print(response.choices[0].message.content)</code></pre>
             <div class="divider"></div>
 
             <div class="form-group">
-              <label class="field-label">模型清单模式（/v1/models）</label>
+              <label class="field-label" for="select-model-list-mode">模型清单模式（/v1/models）</label>
               <select id="select-model-list-mode" class="input" style="max-width: 320px;">
                 <option value="all">全部展示（需授权模型带 🔒 标记）</option>
                 <option value="available">仅展示可用模型（剔除需授权项）</option>
@@ -604,8 +604,8 @@ print(response.choices[0].message.content)</code></pre>
 
             <!-- 关闭窗口行为设置 -->
             <div class="form-group">
-              <label class="field-label">关闭主窗口时的行为</label>
-              <div class="radio-group" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
+              <span class="field-label" id="close-action-label">关闭主窗口时的行为</span>
+              <div class="radio-group" role="radiogroup" aria-labelledby="close-action-label" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
                 <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                   <input type="radio" name="close-action" value="hide_to_tray" checked />
                   <span><strong>最小化到系统托盘</strong>（不停用服务，后台继续静默提供 API）</span>
@@ -621,7 +621,7 @@ print(response.choices[0].message.content)</code></pre>
             <div class="divider"></div>
 
             <div class="form-group">
-              <label class="field-label">凭据存储目录</label>
+              <label class="field-label" for="data-dir-path">凭据存储目录</label>
               <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\workbuddy2api\accounts.json" />
               <p class="muted field-hint">所有登录账号的 Token 统一保存在此文件中，与 WorkBuddy 桌面端完全解耦。</p>
             </div>
@@ -630,7 +630,7 @@ print(response.choices[0].message.content)</code></pre>
 
             <!-- 客户端鉴权密钥（对标 EasyCLIProxyAPI 的 ApiAccessPage） -->
             <div class="form-group" id="api-key-field">
-              <label class="field-label">客户端鉴权密钥（可选）</label>
+              <label class="field-label" for="input-api-key">客户端鉴权密钥（可选）</label>
               <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
                 <input id="input-api-key" class="input mono" type="text" placeholder="留空 = 不鉴权（仅建议回环监听时）"
                        style="flex: 1; min-width: 260px;" autocomplete="off" spellcheck="false" />
@@ -653,7 +653,7 @@ print(response.choices[0].message.content)</code></pre>
 
             <!-- 结构化日志级别（对标 EasyCLIProxyAPI 的日志管理） -->
             <div class="form-group" id="log-level-field">
-              <label class="field-label">内核结构化日志级别</label>
+              <label class="field-label" for="select-log-level">内核结构化日志级别</label>
               <select id="select-log-level" class="input" style="max-width: 420px;">
                 <option value="info">info —— 仅记录请求摘要与耗时（默认，不含正文）</option>
                 <option value="debug">debug —— 附加错误响应详情</option>
@@ -716,7 +716,7 @@ print(response.choices[0].message.content)</code></pre>
 
             <!-- 高级运行时开关（不在 AppConfig 中，需环境变量 + 重启内核） -->
             <div class="form-group" id="runtime-advanced-hint">
-              <label class="field-label">高级运行时开关（环境变量配置）</label>
+              <span class="field-label">高级运行时开关（环境变量配置）</span>
               <p class="muted field-hint" style="margin-top: 4px;">
                 以下开关<b>不写入 settings.json</b>，需设置环境变量后<b>重启内核</b>才生效（当前运行中的内核不会热加载）：
               </p>
@@ -747,7 +747,7 @@ print(response.choices[0].message.content)</code></pre>
           <div class="card log-console" style="padding: 0; overflow: hidden;">
             <div class="log-console-header">
               <span class="mono log-console-path">proxy_stdout.log</span>
-              <span id="log-auto-scroll" class="log-console-hint">自动同步中 (每 2 秒)</span>
+              <button id="log-auto-scroll" class="log-console-hint log-auto-scroll-btn" type="button" aria-pressed="true" title="点击暂停/恢复自动滚动（向上翻看日志时会自动暂停）">自动同步中 (每 2 秒)</button>
             </div>
             <pre id="log-viewer" class="code-block" style="border: none; border-radius: 0; min-height: 420px; max-height: 520px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; padding: 16px; line-height: 1.5; font-size: 12px; color: #a6adbb;"></pre>
           </div>

@@ -2,7 +2,7 @@
  * 更新检查（check_app_update 契约：失败不打断，update_available=false + error）
  */
 
-import { showToast, copyToClipboard, invokeTauri } from './utils.js';
+import { showToast, copyToClipboard, invokeTauri, openExternal } from './utils.js';
 
 let updateInfo = null; // { current, latest, update_available, release_url, error }
 
@@ -31,17 +31,35 @@ async function checkAppUpdate(silent = true) {
     }
     return info;
   } catch (e) {
+    // 静默检查（silent=true）抛错时同样要落失败态：否则 entry.title 停在初始「检查更新」，
+    // 用户无法区分「从未检查」与「检查失败（可点击重试）」。title 与点击重试链路共用，
+    // entry 仍是 div[role=button][tabindex=0]，keydown 处理不受影响。
+    updateInfo = null;
+    if (dot) dot.hidden = true;
+    if (text) text.textContent = '检查更新';
+    entry.title = `检查失败：${e?.message || e}（点击重试）`;
     if (!silent) showToast(`检查更新失败: ${e.message || e}`, 'error');
     return null;
   }
 }
 
+// 统一走 utils.openExternal（含协议白名单等应用层校验），不再自行调用 shell.open，
+// 避免绕过校验且与其它入口行为不一致。
+// 契约：openExternal 是 async，成功返回 true、明确失败返回 false（旧实现返回 undefined）；
+// 无论返回什么都不得抛错、不得打断用户操作。
 async function openReleasePage(url) {
+  if (!url) return;
   try {
-    await window.__TAURI__?.shell?.open(url);
-    showToast('已在浏览器打开发布页', 'success');
+    const ok = await openExternal(url);
+    if (ok === false) {
+      // 明确失败（协议非法 / 系统拒绝打开）：降级为复制链接，保证用户仍能拿到发布页
+      await copyToClipboard(url);
+      showToast('已复制发布页链接', 'info');
+    } else {
+      showToast('已在浏览器打开发布页', 'success');
+    }
   } catch {
-    // shell 打开失败（权限/环境）：降级为复制链接
+    // 容错兜底：openExternal 设计上不抛错，万一抛出也降级为复制链接
     await copyToClipboard(url);
     showToast('已复制发布页链接', 'info');
   }

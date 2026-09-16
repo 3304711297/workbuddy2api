@@ -272,6 +272,9 @@ function renderUsage(data) {
     return `<line x1="0" y1="${y}" x2="${W}" y2="${y}" class="usage-grid-line"/>`;
   }).join('');
 
+  // X 轴标签清空提到分支之前：空数据分支也必须清（否则「暂无数据」下方仍残留上次的
+  // MM-DD HH:00 时间标签，与空态自相矛盾）
+  if (axis) axis.textContent = '';
   if (!hourly.length || overall.requests === 0) {
     svg.innerHTML = `${grid}<text x="${W / 2}" y="${H / 2}" text-anchor="middle" class="usage-empty-text">暂无数据，统计从本版本起开始记录</text>`;
   } else {
@@ -285,12 +288,11 @@ function renderUsage(data) {
       ${grid}
       <line x1="0" y1="${BASE}" x2="${W}" y2="${BASE}" class="usage-base-line"/>
       ${bars}`;
-    axis.textContent = '';
     const span = document.createElement('span');
     span.textContent = fmtUsageHour(hourly[0].ts);
     const spanEnd = document.createElement('span');
     spanEnd.textContent = fmtUsageHour(hourly[hourly.length - 1].ts);
-    axis.append(span, spanEnd);
+    axis?.append(span, spanEnd);
   }
 }
 

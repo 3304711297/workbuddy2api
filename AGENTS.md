@@ -18,9 +18,9 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-python -m pytest tests/ -q          # Python：205 passed 为当前基线
-npm test                            # 前端：32 passed（node --test）
-cd src-tauri && cargo test          # Rust：24 passed
+python -m pytest tests/ -q          # Python：372 passed 为当前基线
+npm test                            # 前端：140 passed（node --test）
+cd src-tauri && cargo test          # Rust：43 passed
 ```
 
 **改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust

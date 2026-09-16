@@ -9,9 +9,8 @@ export const state = {
   port: 8787,
   desensitize: true,
   running: false,
-  healthTimer: null,
+  healthTimer: null, // 健康轮询句柄（main.js 持有，窗口隐藏时停表）
   oauthTimer: null,
-  activeAccount: null,
   accountsList: [],
   models: [
     { id: 'glm-5.3-flash', target: 'glm-5.3-flash', ctx: '1,048,576 (1M)', tags: ['主力', '超长上下文', '快速'] },

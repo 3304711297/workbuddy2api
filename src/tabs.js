@@ -13,6 +13,9 @@ import { loadLogs } from './logs.js';
 import { loadSnapshots } from './debug.js';
 import { loadUsageData, loadUsageEvents } from './usage.js';
 
+// 上次停留的 Tab 记忆键：sessionStorage 随窗口会话生效，关掉应用即复位（避免下次开在陌生页面）
+const TAB_STORAGE_KEY = 'workbuddy2api.tab';
+
 export function initTabs() {
   const navItems = document.querySelectorAll('.nav-item');
   const panels = document.querySelectorAll('.panel-page');
@@ -36,6 +39,8 @@ export function initTabs() {
       const tab = item.dataset.tab;
       if (!tab) return;
       state.currentTab = tab;
+      // 记住当前 Tab：刷新（F5 / 开发热重载）后能回到原页面，而不是固定弹回看板
+      try { sessionStorage.setItem(TAB_STORAGE_KEY, tab); } catch (e) { /* 存储不可用时忽略 */ }
 
       navItems.forEach(n => n.classList.toggle('active', n === item));
       panels.forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
@@ -60,4 +65,12 @@ export function initTabs() {
   document.getElementById('btn-goto-oauth')?.addEventListener('click', () => {
     document.querySelector('.nav-item[data-tab="oauth"]')?.click();
   });
+
+  // 恢复上次停留的 Tab：走一次真实 click，标题/描述、面板显隐与专属数据加载全部复用同一路径。
+  // 只认 meta 里已登记的 Tab（存储值可能是旧版本残留），且不重放默认页以免启动期重复请求。
+  let savedTab = null;
+  try { savedTab = sessionStorage.getItem(TAB_STORAGE_KEY); } catch (e) { /* 忽略 */ }
+  if (savedTab && savedTab !== 'dashboard' && meta[savedTab]) {
+    document.querySelector(`.nav-item[data-tab="${savedTab}"]`)?.click();
+  }
 }

@@ -3,10 +3,12 @@
  */
 
 import { state } from './state.js';
-import { showToast, invokeTauri, esc } from './utils.js';
+import { showToast, showConfirm, invokeTauri, esc } from './utils.js';
 
 let snapshots = [];
 let selectedId = null;
+// 请求序号防竞态：清空快照后立即刷新，但清空前已在途的旧调用晚到会把已删除的行重新渲染出来
+let _snapshotsRequestSeq = 0;
 
 function fmtTime(ts) {
   try {
@@ -22,8 +24,10 @@ export async function loadSnapshots() {
   const body = document.getElementById('debug-list-body');
   const totalEl = document.getElementById('debug-total');
   if (!body) return;
+  const seq = ++_snapshotsRequestSeq;
   try {
     const data = await invokeTauri('snapshots_list', { limit: 100 });
+    if (seq !== _snapshotsRequestSeq) return; // 已有更新的请求发出，丢弃本次陈旧结果
     snapshots = data.snapshots || [];
     if (totalEl) totalEl.textContent = `共 ${data.total ?? snapshots.length} 条`;
     if (!snapshots.length) {
@@ -32,16 +36,20 @@ export async function loadSnapshots() {
     }
     body.innerHTML = snapshots.map((s) => {
       const ok = s.ok !== false;
+      // 数值归一化后再插值：latency_ms 来自内核 JSON，非数值（服务被冒充/脏数据）不得进 innerHTML
+      const latency = Number(s.latency_ms);
+      const latencyText = s.latency_ms == null || Number.isNaN(latency) ? '—' : String(latency);
       return `<tr data-snap-id="${esc(s.id || '')}" style="cursor: pointer;">`
         + `<td class="mono">${esc(fmtTime(s.ts))}</td>`
         + `<td class="mono">${esc(s.endpoint || '')}</td>`
         + `<td class="mono">${esc(s.model || '')}</td>`
         + `<td>${ok ? '<span style="color: #4ade80;">成功</span>' : '<span style="color: #f87171;">失败</span>'}</td>`
-        + `<td class="mono">${s.latency_ms ?? '—'} ms</td>`
+        + `<td class="mono">${latencyText} ms</td>`
         + `<td><button class="btn btn-secondary btn-sm" data-act="detail">详情</button></td>`
         + '</tr>';
     }).join('');
   } catch (e) {
+    if (seq !== _snapshotsRequestSeq) return;
     body.innerHTML = `<tr><td colspan="6" class="muted" style="text-align: center;">加载失败: ${esc(e.message || e)}</td></tr>`;
   }
 }
@@ -74,9 +82,12 @@ export async function replaySnapshot(id) {
     showToast('请先选择一条快照', 'error');
     return;
   }
-  const ok = window.confirm(
-    `将把该快照的请求（脱敏截断后的存档，非逐字节原样，${s.endpoint || ''}）再发一次，会真实消耗上游额度，继续吗？`
-  );
+  // 统一走自建确认弹窗：原生 confirm 阻塞 webview 事件循环且与全局弹窗外观不一致
+  const ok = await showConfirm({
+    title: '重放请求',
+    message: `将把该快照的请求（脱敏截断后的存档，非逐字节原样，${s.endpoint || ''}）再发一次，会真实消耗上游额度，继续吗？`,
+    confirmText: '重放'
+  });
   if (!ok) return;
   const result = document.getElementById('debug-replay-result');
   try {
@@ -125,7 +136,14 @@ export async function copyCurl(id) {
 }
 
 export async function clearSnapshots() {
-  if (!window.confirm('清空全部请求快照吗？此操作不可恢复。')) return;
+  // 与重放确认统一走自建弹窗（danger 语义 + 可样式化，且不阻塞 webview 事件循环）
+  const ok = await showConfirm({
+    title: '清空快照',
+    message: '清空全部请求快照吗？此操作不可恢复。',
+    confirmText: '清空',
+    danger: true
+  });
+  if (!ok) return;
   try {
     await invokeTauri('snapshots_clear');
     document.getElementById('debug-detail-card').style.display = 'none';

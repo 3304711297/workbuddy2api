@@ -49,6 +49,11 @@
   --bg-switch: #2b3240;                        /* 开关滑轨底 */
   --success-bright: #34d399;                   /* 深底上的亮成功色（toast/免费徽章等） */
   --danger-bright: #f87171;                    /* 深底上的亮危险色（badge/toast/错误详情） */
+  /* 实时日志控制台「已暂停」提示色。该控制台刻意固定黑底终端风格、不随明暗主题切换
+     （见 .log-console 注释），故此处只定义深色主题一份、**不在浅色主题中覆盖**：
+     浅色主题的 --warning(#b45309) 在该固定黑底上仅 3.53:1，达不到小字号 4.5:1 要求；
+     本值在黑底上为 8.26:1，两种主题下一致。 */
+  --log-warn: #f59e0b;
   --link: #60a5fa;                             /* 模型名强调色 */
   --shadow-toast: 0 4px 16px rgba(0, 0, 0, 0.4);
   --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.5);
@@ -256,7 +261,6 @@ body {
 }
 .dot-running { background: var(--success); box-shadow: 0 0 8px rgba(16, 185, 129, 0.6); }
 .dot-stopped { background: var(--danger); }
-.dot-starting { background: var(--warning); }
 
 /* 导航菜单 */
 .nav-menu {
@@ -435,6 +439,9 @@ body {
 }
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
+/* 键盘焦点指示：上方 `outline: none` 压掉了默认环，这里补 :focus-visible 替代。
+   用 :focus-visible 而非 :focus —— 鼠标点击不显示焦点环，键盘 Tab 才显示。 */
+.btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 .btn-icon { width: 14px; height: 14px; }
 .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 5px; }
@@ -499,6 +506,8 @@ body {
 .badge-stopped { background: var(--danger-subtle); color: var(--danger-bright); }
 .badge-running { background: var(--success-subtle); color: var(--success); }
 .badge-info { background: var(--primary-subtle); color: var(--primary); }
+.badge-success { background: var(--success-subtle); color: var(--success); }
+.badge-warn { background: var(--warning-subtle); color: var(--warning); }
 /* 失败结果徽章（用量明细用） */
 .badge-danger { background: var(--danger-subtle); color: var(--danger); }
 
@@ -829,8 +838,26 @@ body {
   align-items: center;
   gap: 12px;
   cursor: pointer;
+  /* 定位上下文：让下方向量隐藏的 input 绝对定位于本标签内，
+     不参与任何祖先滚动容器的溢出计算（布局与改动前一致） */
+  position: relative;
 }
-.switch-label input { display: none; }
+.switch-label input {
+  /* 视觉隐藏但保持可聚焦 + 进无障碍树：`display: none` 会让键盘与读屏用户完全无法操作开关。
+     用 1px + opacity:0 而非 display/visibility，键盘 Tab 仍可到达；input 自身不可见时不画
+     多余的默认焦点环，焦点指示改画在可见的 .switch-slider 上。
+     ⚠️ 必须与 .switch-slider 保持相邻兄弟关系，下方 :checked + .switch-slider 选择器依赖它。 */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 键盘焦点指示（改画到可见滑块上，input 自身透明） */
+.switch-label input:focus-visible + .switch-slider {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 .switch-slider {
   width: 38px;
   height: 20px;
@@ -1000,6 +1027,10 @@ body {
   right: 0;
   z-index: 1000;
   min-width: 140px;
+  /* 标签多时菜单不无限拉长：超过上限改为内部滚动，保证始终整块可点可达
+     （JS 在打开时会把 position 改为 fixed 并按触发按钮坐标定位，见 models.js positionTagDropdown） */
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
   background: var(--bg-card, #1c2128);
   border: 1px solid var(--border-light, #30363d);
   border-radius: 6px;
@@ -1028,6 +1059,12 @@ body {
   color: var(--primary, #4a8cff);
   font-weight: 600;
   background: rgba(74, 140, 255, 0.12);
+}
+/* S7：下拉项与行内标签现可 Tab 到达，必须有可见焦点指示 */
+.tag-filter-item:focus-visible,
+.clickable-tag:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 .tag-filter-item .count-badge {
   font-size: 10px;
@@ -1132,7 +1169,29 @@ body {
   align-items: center;
 }
 .log-console-path { font-size: 12px; color: #9aa5b5; }
+/* 自动滚动开关：结构上是 <button>（可 Tab 到达、aria-pressed 报状态），但外观必须与该行
+   原来的提示文字完全一致，故做按钮复位。
+   ⚠️ 顺序敏感：本条必须位于 .log-console-hint 之前——两者同为单类选择器（0-1-0），
+   靠源码顺序决胜，让随后的 .log-console-hint 覆盖回 11px / #64748b；若放在其后，
+   `font: inherit` 会把字号顶回继承值、`color: inherit` 会把颜色顶成正文色。 */
+.log-auto-scroll-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+}
+.log-auto-scroll-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 .log-console-hint { font-size: 11px; color: #64748b; }
+/* 暂停态：灰 → 琥珀，一眼可辨（aria-pressed 由 JS 切换）。
+   此处刻意用组件级的固定琥珀而非 var(--warning)：本控制台是「固定黑底终端风格，不随明暗主题切换」
+   （见上方 .log-console 注释），而浅色主题的 --warning(#b45309) 在该固定黑底上仅 3.5:1、
+   低于小字号 4.5:1 要求；--log-warn 在两种主题下都是 8.3:1。 */
+.log-auto-scroll-btn[aria-pressed="false"] { color: var(--log-warn); }
 /* log-viewer 复用 .code-block（浅色下会变浅底），此处用 id 优先级压回黑底终端风格 */
 #log-viewer { background: #0b0d11; }
 

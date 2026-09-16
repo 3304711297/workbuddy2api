@@ -457,19 +457,94 @@ pub async fn proxy_health(port: u16) -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// 本机内核转发的鉴权与失败分级（2026-09-16 审计修复）
+//
+// proxy_rate_limit / proxy_checkin_claim / proxy_checkin_status / proxy_test_chat
+// 都向 127.0.0.1:{port} 转发，而内核 _check_auth 在 api_key 非空时对所有端点强制
+// 校验。这四个命令此前一律不带 Authorization，导致用户一旦配置客户端密钥（或开启
+// 局域网访问——该开关强制要求先有密钥），连通性测试 401、限流卡片静默消失、签到
+// 全失效：等于惩罚做了安全配置的用户。以下两个纯函数被四处共用。
+// ---------------------------------------------------------------------------
+
+/// 归一化客户端密钥：去首尾空白；空串视为「未配置」（与内核 `_check_auth` 的
+/// 「key 为空则直接放行」语义一致，故此时不发送 Authorization 头）。
+fn api_key_of(raw: &str) -> Option<String> {
+    let k = raw.trim();
+    if k.is_empty() {
+        None
+    } else {
+        Some(k.to_string())
+    }
+}
+
+/// 从磁盘配置读取客户端密钥（每次现读，与 proxy_start 同源）。
+fn configured_api_key() -> Option<String> {
+    api_key_of(&crate::load_app_config().api_key)
+}
+
+/// 按配置给转发请求附加 `Authorization: Bearer <key>`（未配置时原样返回）。
+fn authorize(req: reqwest::RequestBuilder, key: Option<&str>) -> reqwest::RequestBuilder {
+    match key {
+        Some(k) => req.header("Authorization", format!("Bearer {k}")),
+        None => req,
+    }
+}
+
+/// HTTP 失败响应的分级：区分「要用户动作」（密钥不符）与「可优雅降级」（老版内核
+/// 无该端点）——旧实现把 401 与 404 一起吞成 Ok(None)，用户只看到功能消失，
+/// 无从判断该核对密钥还是该升级内核。连接层失败（内核未运行）不经此枚举，
+/// 由调用方直接按「不可用」降级。
+#[derive(Debug, PartialEq, Eq)]
+enum ForwardFailure {
+    /// HTTP 401/403：客户端密钥不匹配
+    Unauthorized,
+    /// HTTP 404：老版内核无此端点
+    NotFound,
+    /// 其它非 2xx
+    Other(u16),
+}
+
+fn classify_status(code: u16) -> ForwardFailure {
+    match code {
+        401 | 403 => ForwardFailure::Unauthorized,
+        404 => ForwardFailure::NotFound,
+        other => ForwardFailure::Other(other),
+    }
+}
+
+/// 非 2xx 时给用户的可操作提示（分级 → 文案）。
+fn forward_failure_message(f: &ForwardFailure) -> Option<String> {
+    match f {
+        ForwardFailure::Unauthorized => Some(
+            "客户端密钥校验失败（HTTP 401）：请在「服务设置」核对该密钥，或清空后重试"
+                .to_string(),
+        ),
+        ForwardFailure::Other(code) => Some(format!("内核返回 HTTP {code}")),
+        // 404 属老版内核无该端点：由调用方按「不可用」降级（安静返回 Ok(None)）
+        ForwardFailure::NotFound => None,
+    }
+}
+
 /// 拉取反代自曝的上游频率限制状态（GET /api/rate_limit，code 6004 冷却与滚动用量）。
 /// 老版内核无该端点时返回 Ok(null)，由前端按「数据不可用」优雅降级。
 #[tauri::command]
 pub async fn proxy_rate_limit(port: u16) -> Result<Option<serde_json::Value>, String> {
     let url = format!("http://127.0.0.1:{port}/api/rate_limit");
-    let resp = super::shared::local_client(8).get(&url).send().await;
+    let req = authorize(super::shared::local_client(8).get(&url), configured_api_key().as_deref());
+    let resp = req.send().await;
     match resp {
         Ok(r) if r.status() == reqwest::StatusCode::OK => {
             let v: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
             Ok(Some(v))
         }
-        // 404 = 老版内核（无此端点）；连接失败 = 内核未运行。两者都属「不可用」而非错误。
-        Ok(_) | Err(_) => Ok(None),
+        // 404 = 老版内核（无此端点）→ 按「数据不可用」优雅降级。
+        Ok(r) if matches!(classify_status(r.status().as_u16()), ForwardFailure::NotFound) => Ok(None),
+        // ⚠️ 401 不能并进上面的降级：密钥不符时静默隐藏整张限流卡，用户只看到功能消失、
+        // 无从得知该去核对密钥（旧实现即如此，等于惩罚配置了鉴权的用户）。
+        Ok(r) => Err(forward_failure_message(&classify_status(r.status().as_u16()))
+            .unwrap_or_else(|| format!("内核返回 HTTP {}", r.status().as_u16()))),
+        Err(_) => Ok(None), // 连接层失败：内核未运行 → 按「不可用」降级
     }
 }
 
@@ -478,11 +553,12 @@ pub async fn proxy_rate_limit(port: u16) -> Result<Option<serde_json::Value>, St
 #[tauri::command]
 pub async fn proxy_checkin_claim(port: u16) -> Result<serde_json::Value, String> {
     let url = format!("http://127.0.0.1:{port}/api/checkin/claim");
-    let resp = super::shared::local_client(20)
-        .post(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let req = authorize(super::shared::local_client(20).post(&url), configured_api_key().as_deref());
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    // 密钥不符时给出可操作提示，而不是把 401 当业务失败塞进 ok:false
+    if let Some(msg) = forward_failure_message(&classify_status(resp.status().as_u16())) {
+        return Err(msg);
+    }
     resp.json().await.map_err(|e| e.to_string())
 }
 
@@ -491,11 +567,11 @@ pub async fn proxy_checkin_claim(port: u16) -> Result<serde_json::Value, String>
 #[tauri::command]
 pub async fn proxy_checkin_status(port: u16) -> Result<serde_json::Value, String> {
     let url = format!("http://127.0.0.1:{port}/api/checkin/status");
-    let resp = super::shared::local_client(20)
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let req = authorize(super::shared::local_client(20).get(&url), configured_api_key().as_deref());
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    if let Some(msg) = forward_failure_message(&classify_status(resp.status().as_u16())) {
+        return Err(msg);
+    }
     resp.json().await.map_err(|e| e.to_string())
 }
 
@@ -577,7 +653,8 @@ pub async fn proxy_test_chat(
 
     let payload = test_chat_payload(&target_model, proto);
 
-    let resp = match client.post(&url).json(&payload).send().await {
+    let req = authorize(client.post(&url).json(&payload), configured_api_key().as_deref());
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return Ok(TestChatResult {
@@ -597,13 +674,20 @@ pub async fn proxy_test_chat(
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
         let snippet: String = body_text.chars().take(300).collect();
+        // 401/403 额外点明「核对密钥」，这是用户唯一能采取的动作
+        let hint = match classify_status(status.as_u16()) {
+            ForwardFailure::Unauthorized => {
+                "\n提示：客户端密钥校验失败，请在「服务设置」核对密钥（或清空后重启内核）"
+            }
+            _ => "",
+        };
         return Ok(TestChatResult {
             success: false,
             model: target_model,
             response: String::new(),
             latency_ms: start.elapsed().as_millis() as u64,
             ttft_ms: None,
-            error: Some(format!("HTTP {status}: {snippet}")),
+            error: Some(format!("HTTP {status}: {snippet}{hint}")),
             protocol: proto.to_string(),
         });
     }
@@ -1188,6 +1272,28 @@ mod test_chat_probe_tests {
         assert_eq!(test_chat_proto(Some("messages")), "messages");
         assert_eq!(test_chat_proto(Some("responses")), "responses");
         assert_eq!(test_chat_proto(Some("bogus")), "chat");
+    }
+
+    #[test]
+    fn forwarded_requests_carry_authorization_when_key_configured() {
+        // 回归（2026-09-16 审计）：proxy_rate_limit / proxy_checkin_* / proxy_test_chat
+        // 向本机内核转发时不带 Authorization，而内核 _check_auth 在密钥非空时强制校验
+        // → 用户配置客户端密钥（或开启局域网）后连通性测试 401、限流卡片静默消失。
+        // 密钥归一化：去空白；空串/纯空白 = 未配置（此时不发 Authorization，回环默认放行）。
+        assert_eq!(api_key_of("  abc123  ").as_deref(), Some("abc123"));
+        assert_eq!(api_key_of(""), None);
+        assert_eq!(api_key_of("   "), None);
+        assert_eq!(api_key_of("\t\n"), None);
+    }
+
+    #[test]
+    fn forward_failure_distinguishes_auth_from_missing_endpoint() {
+        // 401 与 404 语义不同：前者要提示用户核对密钥，后者是「老版内核无此端点」优雅降级。
+        // 旧实现把两者一起吞成 Ok(None)，用户只看到功能消失而无法判断该做什么。
+        assert_eq!(classify_status(401), ForwardFailure::Unauthorized);
+        assert_eq!(classify_status(403), ForwardFailure::Unauthorized);
+        assert_eq!(classify_status(404), ForwardFailure::NotFound);
+        assert_eq!(classify_status(500), ForwardFailure::Other(500));
     }
 
     #[test]

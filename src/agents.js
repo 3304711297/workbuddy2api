@@ -14,33 +14,38 @@ export async function loadAgentsStatus() {
   try {
     const res = await invokeTauri('agent_detect', { port: state.port });
 
-    // Hermes 状态
-    hPath.textContent = res.hermes_config_path || '未找到';
-    if (!res.hermes_installed) {
-      hBadge.className = 'badge badge-stopped';
-      hBadge.textContent = '未安装';
-    } else if (res.hermes_configured) {
-      hBadge.className = 'badge badge-valid';
-      hBadge.textContent = '已接入配置';
-    } else {
-      hBadge.className = 'badge badge-info';
-      hBadge.textContent = '未配置';
+    // Hermes 状态（DOM 节点缺失时不得硬崩：直接对 getElementById 结果解引用，
+    // 一旦 id 被改名/删除，`hPath.textContent` 会抛 TypeError 打断整个面板刷新）
+    if (hPath) hPath.textContent = res.hermes_config_path || '未找到';
+    if (hBadge) {
+      if (!res.hermes_installed) {
+        hBadge.className = 'badge badge-stopped';
+        hBadge.textContent = '未安装';
+      } else if (res.hermes_configured) {
+        hBadge.className = 'badge badge-valid';
+        hBadge.textContent = '已接入配置';
+      } else {
+        hBadge.className = 'badge badge-info';
+        hBadge.textContent = '未配置';
+      }
     }
 
     // ZCode 状态：徽章反映服务真实可达性（Desktop 只认 UI 内添加，文件写入不生效）
-    zPath.textContent = res.zcode_cli_path || '未找到';
-    if (!res.zcode_installed) {
-      zBadge.className = 'badge badge-stopped';
-      zBadge.textContent = '未安装';
-    } else if (res.zcode_service_online) {
-      zBadge.className = 'badge badge-valid';
-      zBadge.textContent = '服务在线 · 可接入';
-    } else if (res.zcode_provider_registered) {
-      zBadge.className = 'badge badge-info';
-      zBadge.textContent = '服务离线（文件残留）';
-    } else {
-      zBadge.className = 'badge badge-info';
-      zBadge.textContent = '服务离线';
+    if (zPath) zPath.textContent = res.zcode_cli_path || '未找到';
+    if (zBadge) {
+      if (!res.zcode_installed) {
+        zBadge.className = 'badge badge-stopped';
+        zBadge.textContent = '未安装';
+      } else if (res.zcode_service_online) {
+        zBadge.className = 'badge badge-valid';
+        zBadge.textContent = '服务在线 · 可接入';
+      } else if (res.zcode_provider_registered) {
+        zBadge.className = 'badge badge-info';
+        zBadge.textContent = '服务离线（文件残留）';
+      } else {
+        zBadge.className = 'badge badge-info';
+        zBadge.textContent = '服务离线';
+      }
     }
   } catch (e) {
     console.error('Agent 检测失败:', e);

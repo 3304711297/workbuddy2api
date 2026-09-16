@@ -46,17 +46,33 @@ export async function copyToClipboard(text) {
 }
 
 // 安全打开外部浏览器
+// 返回值：true=已发起打开；false=被拒绝（URL 非法/协议不在白名单）
 export async function openExternal(url) {
-  if (!url) return;
+  if (!url) return false;
+  // 协议白名单：auth_url 来自腾讯上游（半可信），若不加校验，上游可下发任意站点，
+  // 而应用正要引导用户「去授权登录」——这是现成的钓鱼原语；同时挡掉 file:/javascript: 等本地方案
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    showToast('链接格式无效，已阻止打开', 'error');
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    showToast(`已阻止打开非 http(s) 链接（${parsed.protocol}），请勿信任该来源`, 'error');
+    return false;
+  }
   try {
     if (window.__TAURI__?.shell?.open) {
       await window.__TAURI__.shell.open(url);
-      return;
+      return true;
     }
   } catch (e) {
     console.warn('Tauri shell.open failed:', e);
   }
-  window.open(url, '_blank');
+  // noopener/noreferrer：外站页面不得通过 window.opener 反向操纵本应用窗口
+  window.open(url, '_blank', 'noopener,noreferrer');
+  return true;
 }
 
 // 统一 Tauri Invoke 调用包装
@@ -64,7 +80,8 @@ export async function invokeTauri(cmd, args = {}) {
   if (window.__TAURI__?.core?.invoke) {
     return await window.__TAURI__.core.invoke(cmd, args);
   }
-  console.warn(`[Mock Invoke] ${cmd}`, args);
+  // 仅打印命令名：args 可能携带 api_key 等明文密钥，降级/dev 环境下不得落进控制台
+  console.warn(`[Mock Invoke] ${cmd}`);
   throw new Error('未运行在 Tauri 运行时环境中');
 }
 

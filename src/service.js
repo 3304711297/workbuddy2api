@@ -5,6 +5,15 @@
 import { state } from './state.js';
 import { showToast, invokeTauri } from './utils.js';
 
+// 反代运行架构标签（直连上游、无中转网关）。
+// index.html 的 #dash-mode 是静态占位，服务停止时也不会变，故改由状态驱动写入活值。
+const RUNTIME_MODE_LABEL = 'Direct Proxy';
+
+// 健康检查请求序号：/health 上游超时可达 10s，轮询/焦点/事件三路并发时，
+// 早发出、晚返回的陈旧响应会把状态覆盖回「运行中」，故只认最新一次的结果。
+// （沿用 usage.js 的 _usageRequestSeq 防竞态模式）
+let _healthSeq = 0;
+
 export function initServiceControls() {
   const btnStart = document.getElementById('btn-start');
   const btnStop = document.getElementById('btn-stop');
@@ -13,6 +22,8 @@ export function initServiceControls() {
   btnStart?.addEventListener('click', async () => {
     try {
       btnStart.disabled = true;
+      // 作废点击前已在途的健康检查：其结果反映的是变更前状态，晚返回会把状态写旧
+      _healthSeq++;
       showToast('正在启动反代服务...', 'info');
       await invokeTauri('proxy_start', { port: state.port, desensitize: state.desensitize });
       showToast('反代服务已拉起', 'success');
@@ -20,7 +31,8 @@ export function initServiceControls() {
     } catch (e) {
       showToast(`启动失败: ${e.message || e}`, 'error');
     } finally {
-      btnStart.disabled = false;
+      // 按钮态一律以服务实况为准：失败时保持可重试，成功时交给 updateServiceStatus 收口
+      btnStart.disabled = state.running;
     }
   });
 
@@ -29,17 +41,22 @@ export function initServiceControls() {
       btnStop.disabled = true;
       await invokeTauri('proxy_stop');
       showToast('服务已停止', 'info');
+      // 作废在途的健康检查：否则停止前发出、停止后才返回的响应会把看板改回「运行中」
+      _healthSeq++;
       updateServiceStatus(false);
     } catch (e) {
       showToast(`停止失败: ${e.message || e}`, 'error');
     } finally {
-      btnStop.disabled = false;
+      // 同上：停止成功后按钮必须保持禁用，否则停止态下仍可再次点击
+      btnStop.disabled = !state.running;
     }
   });
 
   btnRestart?.addEventListener('click', async () => {
     try {
       btnRestart.disabled = true;
+      // 重启期间服务会短暂停摆，在途检查的结果一律不可信（同上）
+      _healthSeq++;
       showToast('正在重启服务...', 'info');
       await invokeTauri('proxy_restart', { port: state.port, desensitize: state.desensitize });
       showToast('服务已重启完成', 'success');
@@ -47,17 +64,23 @@ export function initServiceControls() {
     } catch (e) {
       showToast(`重启失败: ${e.message || e}`, 'error');
     } finally {
-      btnRestart.disabled = false;
+      // 同上：以服务实况为准，避免停止态下重新点亮「重启」
+      btnRestart.disabled = !state.running;
     }
   });
 }
 
 export async function checkHealth() {
+  // 入口取号；早发出、晚返回的陈旧响应（点「停止服务」前已在途）直接丢弃，
+  // 避免看板从「已停止」回跳「运行中」（上游超时可达 10s，重排必然发生）
+  const seq = ++_healthSeq;
   try {
     const data = await invokeTauri('proxy_health', { port: state.port });
-    updateServiceStatus(true, data);
+    if (seq !== _healthSeq) return; // 已有更新的检查发出，丢弃本次陈旧结果
+    updateServiceStatus(true, data, seq);
   } catch (e) {
-    updateServiceStatus(false);
+    if (seq !== _healthSeq) return;
+    updateServiceStatus(false, null, seq);
   }
 }
 
@@ -72,27 +95,35 @@ async function getActiveAccountNickname() {
   }
 }
 
-function updateServiceStatus(isRunning, data = null) {
+function updateServiceStatus(isRunning, data = null, seq = _healthSeq) {
   state.running = isRunning;
   const sideDot = document.getElementById('side-dot');
   const sideText = document.getElementById('side-status-text');
   const dashBadge = document.getElementById('dash-status-badge');
   const dashTime = document.getElementById('dash-health-time');
   const dashActive = document.getElementById('dash-active-account');
+  const dashMode = document.getElementById('dash-mode');
   const sideUser = document.getElementById('side-active-user');
   const btnStart = document.getElementById('btn-start');
   const btnStop = document.getElementById('btn-stop');
+  const btnRestart = document.getElementById('btn-restart');
 
+  // 三个按钮同源门控：服务未运行时「停止」「重启」都无对象可作用，禁用而非空点
   if (btnStart) btnStart.disabled = isRunning;
   if (btnStop) btnStop.disabled = !isRunning;
+  if (btnRestart) btnRestart.disabled = !isRunning;
 
   if (isRunning) {
     sideDot.className = 'dot dot-running';
     sideText.textContent = '服务运行中';
     dashBadge.className = 'badge badge-running';
     dashBadge.textContent = '运行中';
+    if (dashMode) dashMode.textContent = RUNTIME_MODE_LABEL;
 
+    // 昵称是异步取的：期间可能已停止服务或有更新检查发出，
+    // 此时不能再回写账号名（否则覆盖掉 else 分支写入的「—」/「未在线」）
     getActiveAccountNickname().then((nick) => {
+      if (seq !== _healthSeq || !state.running) return;
       dashActive.textContent = nick;
       sideUser.textContent = nick;
     });
@@ -102,6 +133,7 @@ function updateServiceStatus(isRunning, data = null) {
     sideText.textContent = '服务已停止';
     dashBadge.className = 'badge badge-stopped';
     dashBadge.textContent = '已停止';
+    if (dashMode) dashMode.textContent = '—';
     dashActive.textContent = '—';
     sideUser.textContent = '未在线';
     dashTime.textContent = '服务离线';

@@ -5,7 +5,7 @@
  */
 
 import { state } from './state.js';
-import { esc, showToast, invokeTauri } from './utils.js';
+import { esc, showToast, invokeTauri, copyToClipboard } from './utils.js';
 
 let rawModelsList = [];
 let currentModelsList = [];
@@ -13,9 +13,14 @@ let sortField = null; // 'id' | 'credits' | null
 let sortOrder = null; // 'asc' | 'desc' | null
 let selectedTagFilter = 'ALL';
 
+/**
+ * 拉取全量模型矩阵并渲染。
+ * @returns {Promise<boolean>} true = 云端同步成功；false = 已降级为本地内置数据
+ * （调用方据此提示，禁止在 await 之前无条件弹「同步成功」）
+ */
 export async function loadModelsMatrix() {
   const tbody = document.getElementById('models-table-body');
-  if (!tbody) return;
+  if (!tbody) return false;
   tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; padding: 24px;"><span class="spinner"></span> 正在同步全量模型与计费倍率数据...</td></tr>`;
 
   try {
@@ -27,9 +32,11 @@ export async function loadModelsMatrix() {
     });
     updateTagFilterDropdown();
     applyAndRender();
+    return true;
   } catch (e) {
     console.warn('获取全量模型列表失败，降级展示基础模型:', e);
     renderFallbackModels();
+    return false;
   }
 }
 
@@ -124,8 +131,10 @@ function updateTagFilterDropdown() {
     return a.localeCompare(b);
   });
 
+  // S7：下拉项补 role/tabindex/aria-label，键盘用户可 Tab 到达并用 Enter/Space 选择
   let itemsHtml = `
-    <div class="tag-filter-item ${selectedTagFilter === 'ALL' ? 'active' : ''}" data-filter-tag="ALL">
+    <div class="tag-filter-item ${selectedTagFilter === 'ALL' ? 'active' : ''}" data-filter-tag="ALL"
+      role="button" tabindex="0" aria-label="显示全部标签，共 ${rawModelsList.length} 个模型">
       <span>全部标签</span>
       <span class="count-badge">${rawModelsList.length}</span>
     </div>
@@ -133,7 +142,8 @@ function updateTagFilterDropdown() {
 
   for (const tag of sortedTags) {
     itemsHtml += `
-      <div class="tag-filter-item ${selectedTagFilter === tag ? 'active' : ''}" data-filter-tag="${esc(tag)}">
+      <div class="tag-filter-item ${selectedTagFilter === tag ? 'active' : ''}" data-filter-tag="${esc(tag)}"
+        role="button" tabindex="0" aria-label="按标签筛选：${esc(tag)}，共 ${tagCounts[tag]} 个模型">
         <span>${esc(tag)}</span>
         <span class="count-badge">${tagCounts[tag]}</span>
       </div>
@@ -246,10 +256,10 @@ function renderModelsTable(list) {
     // 标签：支持点击快速按标签筛选；不可用模型附「需授权」徽章
     const tagsHtml = [
       ...(m.availability === 'unavailable'
-        ? ['<span class="badge badge-warn clickable-tag" data-filter-tag="需授权" title="点击筛选全部需授权模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">🔒 需授权套餐</span>']
+        ? ['<span class="badge badge-warn clickable-tag" data-filter-tag="需授权" role="button" tabindex="0" aria-label="筛选全部需授权套餐模型" title="点击筛选全部需授权模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">🔒 需授权套餐</span>']
         : []),
       ...(m.tags || []).map(t =>
-        `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`
+        `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`
       ),
     ].join('');
 
@@ -271,10 +281,20 @@ function renderModelsTable(list) {
 }
 
 // 降级展示：models_fetch_all 拉取失败时使用本地内置模型数据（与主表格保持同 4 列结构）
+// S5：降级数据必须视觉可辨识——置顶横幅 + 每行「本地内置模型」标注，
+// 避免用户把内置占位数据（倍率列全为 —）误当云端同步回来的真实倍率矩阵。
 function renderFallbackModels() {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
-  tbody.innerHTML = state.models.map(m => `
+  const banner = `
+    <tr>
+      <td colspan="4" style="background: var(--warning-subtle); border-bottom: 1px solid var(--border); padding: 10px 16px;">
+        <span class="badge badge-warn" style="margin-right: 8px;">⚠ 云端同步失败</span>
+        <span class="muted" style="font-size: 12px;">当前展示的是本地内置模型（${state.models.length} 条），倍率与上下文上限可能与云端不一致。请先启动服务，再点「从云端同步模型列表」重试。</span>
+      </td>
+    </tr>
+  `;
+  tbody.innerHTML = banner + state.models.map(m => `
     <tr>
       <td>
         <strong class="mono" style="color: var(--link); font-size: 13px;">${esc(m.id)}</strong>
@@ -372,10 +392,47 @@ function closeModelEdit() {
   if (overlay) overlay.hidden = true;
 }
 
+// S6：标签筛选下拉改为视口级定位。
+// 触发按钮所在的 <th> 位于 `overflow-x: auto` 的卡片容器内，窗口拖窄时（窗口 minWidth 820）
+// 绝对定位的下拉会被该容器裁剪 —— 实测 800px 宽时仅 47.5% 可见、8 个菜单项 0 个可点。
+// position: fixed 使下拉脱离该裁剪容器，坐标按触发按钮实时计算（滚动/缩放时重算）。
+function positionTagDropdown(trigger) {
+  const dropdown = document.getElementById('tag-filter-dropdown');
+  if (!dropdown || dropdown.hidden || !trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  const vh = window.innerHeight;
+  const vw = window.innerWidth;
+  // 触发按钮已滚出视口：直接收起，避免菜单跟着跑到屏幕外变成「看不见也点不着」
+  if (rect.bottom < 8 || rect.top > vh - 8) {
+    dropdown.hidden = true;
+    return;
+  }
+  // 先切到 fixed 再量尺寸，否则量到的是被裁剪容器约束下的值
+  dropdown.style.position = 'fixed';
+  dropdown.style.right = 'auto';
+  dropdown.style.marginTop = '0';
+  const menuWidth = dropdown.offsetWidth || 160;
+  const menuHeight = dropdown.offsetHeight || 240;
+  // 水平：右对齐触发按钮，并夹紧在视口内
+  const left = Math.max(8, Math.min(rect.right - menuWidth, vw - menuWidth - 8));
+  // 垂直：默认挂在按钮下方；下方空间不足则翻到按钮上方；最后夹紧进视口，
+  // 避免触发按钮贴近视口边缘时菜单被裁掉一半（窄窗 + 长标签列表更容易触发）。
+  const below = rect.bottom + 4;
+  const above = rect.top - menuHeight - 4;
+  let top = below + menuHeight > vh - 8 && above >= 8 ? above : below;
+  top = Math.max(8, Math.min(top, vh - menuHeight - 8));
+  dropdown.style.top = `${Math.round(top)}px`;
+  dropdown.style.left = `${Math.round(left)}px`;
+}
+
 export function initModelsAndCopy() {
-  document.getElementById('btn-refresh-models')?.addEventListener('click', () => {
-    loadModelsMatrix();
-    showToast('已从云端同步模型列表', 'info');
+  // S5：等真实结果再提示——云端失败时降级为本地内置数据，不能再弹「同步成功」
+  document.getElementById('btn-refresh-models')?.addEventListener('click', async () => {
+    const ok = await loadModelsMatrix();
+    showToast(
+      ok ? '已从云端同步模型列表' : '云端同步失败，已展示本地内置模型',
+      ok ? 'success' : 'error'
+    );
   });
 
   // 模型参数编辑弹窗
@@ -413,8 +470,13 @@ export function initModelsAndCopy() {
     }
     if (tagDropdown) {
       tagDropdown.hidden = !tagDropdown.hidden;
+      if (!tagDropdown.hidden) positionTagDropdown(e.currentTarget);
     }
   });
+
+  // 下拉打开期间：窗口缩放 / 内容区滚动时重算 fixed 坐标（否则菜单会与触发按钮脱位）
+  window.addEventListener('resize', () => positionTagDropdown(btnTagFilter));
+  document.querySelector('.content-body')?.addEventListener('scroll', () => positionTagDropdown(btnTagFilter));
 
   // 标签筛选菜单点击选项
   tagDropdown?.addEventListener('click', (e) => {
@@ -423,6 +485,16 @@ export function initModelsAndCopy() {
     if (item) {
       setTagFilter(item.dataset.filterTag);
     }
+  });
+
+  // S7：下拉项键盘操作（Enter/Space 等同点击；Space 需 preventDefault 防页面滚动）
+  tagDropdown?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const item = e.target.closest('[data-filter-tag]');
+    if (!item) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setTagFilter(item.dataset.filterTag);
   });
 
   // 点击外部自动收起标签筛选下拉菜单
@@ -434,7 +506,8 @@ export function initModelsAndCopy() {
   });
 
   // 模型表格事件委托：行内编辑按钮与标签快速筛选
-  document.getElementById('models-table-body')?.addEventListener('click', (e) => {
+  const modelsTbody = document.getElementById('models-table-body');
+  modelsTbody?.addEventListener('click', (e) => {
     const tagEl = e.target.closest('.clickable-tag[data-filter-tag]');
     if (tagEl) {
       setTagFilter(tagEl.dataset.filterTag);
@@ -444,16 +517,27 @@ export function initModelsAndCopy() {
     if (btn) window.openModelEdit(btn.dataset.editModel);
   });
 
-  // 复制按钮事件代理
+  // S7：行内标签徽章键盘操作（Enter/Space 等同点击；Space 需 preventDefault 防页面滚动）
+  modelsTbody?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const tagEl = e.target.closest('.clickable-tag[data-filter-tag]');
+    if (!tagEl) return;
+    e.preventDefault();
+    setTagFilter(tagEl.dataset.filterTag);
+  });
+
+  // 复制按钮事件代理（S4：必须 await 真实结果再提示——剪贴板写入被拒时不得报「已复制」）
   document.querySelectorAll('[data-copy]').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const targetId = btn.dataset.copy;
       const el = document.getElementById(targetId);
       const text = el?.value || el?.textContent || '';
-      if (text) {
-        navigator.clipboard.writeText(text);
-        showToast('已复制到剪贴板', 'success');
+      if (!text) {
+        showToast('没有可复制的内容', 'error');
+        return;
       }
+      const ok = await copyToClipboard(text);
+      showToast(ok ? '已复制到剪贴板' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
     });
   });
 }

@@ -7,6 +7,8 @@
 import { state } from './state.js';
 import { esc, showToast, showConfirm, invokeTauri } from './utils.js';
 import { checkHealth } from './service.js';
+// 「刷新全部数据」需同时刷新用量统计（该按钮此前无任何监听器，纯装饰）
+import { loadUsageData, loadUsageEvents } from './usage.js';
 
 // 频率限制状态数据获取：优先 Tauri command（绕过 CSP connect-src 限制），
 // 老版构建无该 command 或内核无该端点时返回 null（前端降级隐藏该卡片）。
@@ -69,11 +71,14 @@ function renderRateLimitCard(rl, activeModel, currentUid = null) {
   const ru = rl.rollingUsage || {};
   const usageRows = Object.entries(ru).map(([model, u]) => {
     const hasToday = u.reqsToday !== undefined;
-    const reqs = hasToday ? u.reqsToday : (u.reqs5h ?? 0);
-    const tokens = hasToday ? (u.tokensToday || 0) : (u.tokens5h || 0);
-    const err429 = hasToday ? u.err429_today : u.err429_5h;
+    // 数值一律先 Number 归一化再插值：/api/rate_limit 来自可配置端口的本地 HTTP 端点，
+    // 端口被其它本地服务占用/冒充时返回的 JSON 会直接进 innerHTML，非数值必须挡在模板字符串之外
+    const reqs = Number(hasToday ? u.reqsToday : (u.reqs5h ?? 0)) || 0;
+    const tokens = Number(hasToday ? (u.tokensToday || 0) : (u.tokens5h || 0)) || 0;
+    const err429 = Number(hasToday ? u.err429_today : u.err429_5h) || 0;
+    const reqs5h = Number(u.reqs5h) || 0;
     const label = hasToday ? '今日' : '近5h';
-    const subNote = hasToday && u.reqs5h !== undefined ? ` <small class="muted mono">(近5h ${u.reqs5h}次)</small>` : '';
+    const subNote = hasToday && u.reqs5h !== undefined ? ` <small class="muted mono">(近5h ${reqs5h}次)</small>` : '';
     return `<div class="pkg-item"><span class="mono muted">${esc(model)} · ${label}</span><span><strong>${reqs}</strong> 次 / <strong>${(tokens / 1e6).toFixed(2)}M</strong> tokens${err429 ? ` <small style="color:var(--danger);">429×${err429}</small>` : ''}${subNote}</span></div>`;
   }).join('');
 
@@ -139,9 +144,15 @@ function fmtCooldown(sec) {
   return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(sec % 60).padStart(2, '0')}s`;
 }
 
+// 请求序号防竞态：单次加载可能耗时数十秒（usage_query 走 30s 超时），期间用户可能已点击
+// 「设为活跃」触发新的加载——旧响应晚到会用切换前的快照渲染，把原账号重新标为「当前活跃」，
+// 让用户误以为切换失败而重复操作。
+let _accountsRequestSeq = 0;
+
 export async function loadAccountsData() {
   const container = document.getElementById('active-account-container');
   const listEl = document.getElementById('accounts-list');
+  const seq = ++_accountsRequestSeq;
   container.innerHTML = `<div class="card" style="padding: 24px; text-align: center;"><span class="spinner"></span> 正在同步账号与资产数据...</div>`;
 
   try {
@@ -151,18 +162,53 @@ export async function loadAccountsData() {
       fetchRateLimit()
     ]);
 
-    const acctList = accounts.status === 'fulfilled' ? accounts.value : [];
+    if (seq !== _accountsRequestSeq) return; // 防竞态①：已有更新的加载发出，丢弃本次陈旧快照
+
+    // 读凭据失败（IPC 拒绝，如凭据文件损坏）≠「尚未登录任何账号」：必须走可区分的错误态，
+    // 否则会被误导去重新授权（凭据其实还在）。
+    if (accounts.status !== 'fulfilled') {
+      renderAccountsReadError(accounts.reason, rateLimit.status === 'fulfilled' ? rateLimit.value : null);
+      return;
+    }
+
+    const acctList = Array.isArray(accounts.value) ? accounts.value : [];
     const usageData = usage.status === 'fulfilled' ? usage.value : null;
     const rateLimitData = rateLimit.status === 'fulfilled' ? rateLimit.value : null;
     state.accountsList = acctList;
 
+    if (seq !== _accountsRequestSeq) return; // 防竞态②：渲染前再确认，避免陈旧结果覆写新 UI
     renderActiveAccountAndUsage(acctList.find(a => a.is_active) || acctList[0], usageData, rateLimitData);
     renderAccountsGrid(acctList, rateLimitData);
     renderProtocolBadge(rateLimitData);
     await syncRotationPolicyCard(acctList.length, rateLimitData);
   } catch (e) {
+    if (seq !== _accountsRequestSeq) return;
     container.innerHTML = `<div class="card" style="color: var(--danger);">加载失败: ${esc(e.message || e)}</div>`;
   }
+}
+
+// 账号列表读取失败态：与「当前尚未登录任何账号」的空态必须视觉可区分——
+// 读失败时给出错误详情与重试入口，绝不引导用户重新授权（凭据文件可能完好）。
+function renderAccountsReadError(reason, rateLimit = null) {
+  const container = document.getElementById('active-account-container');
+  const grid = document.getElementById('accounts-list');
+  if (container) {
+    container.innerHTML = `
+      <div class="card" style="text-align: center; padding: 36px 20px; border: 1px solid var(--danger);">
+        <p style="color: var(--danger); font-size: 15px; margin-bottom: 8px;">账号列表读取失败</p>
+        <p class="muted" style="font-size: 12px; margin-bottom: 10px;">本地凭据读取异常，请重试；若持续失败请检查凭据文件是否损坏。</p>
+        <p class="mono muted" style="font-size: 11px; margin-bottom: 14px;">${esc(reason?.message || reason || '未知错误')}</p>
+        <button id="btn-accounts-retry-load" class="btn btn-primary">重试</button>
+      </div>
+    `;
+    // CSP（script-src 'self'）下内联 onclick 会被阻断，必须用监听器绑定
+    container.querySelector('#btn-accounts-retry-load')?.addEventListener('click', () => loadAccountsData());
+  }
+  // 账号网格同步给出错误说明，避免与「暂无更多已保存账号」的空态混淆
+  if (grid) {
+    grid.innerHTML = `<p class="muted" style="color: var(--danger);">账号列表读取失败，本轮未渲染账号</p>`;
+  }
+  renderProtocolBadge(rateLimit);
 }
 
 // 看板端点卡协议徽章：依据内核自曝的 server.protocols 动态渲染。
@@ -189,7 +235,8 @@ function renderProtocolBadge(rateLimit) {
 // 读取后端持久化的轮换配置并同步到策略卡（仅用于初始化/保存后回读）
 // ⚠️ 此函数会把磁盘值**强制回写**到下拉框，因此绝不能在 change 事件里调用——
 // 否则用户刚选中的值会在读盘后被立刻改回旧值（表现为「闪一下就跳回原样」）。
-async function syncRotationPolicyCard(accountCount, rateLimit = null) {
+// rateLimit 不传（undefined）表示本次不含内核数据，仅刷新 UI——活跃账号徽章按原值保留。
+async function syncRotationPolicyCard(accountCount, rateLimit) {
   const select = document.getElementById('select-rotate-mode');
   const countInput = document.getElementById('input-rotate-count');
   if (!select) return;
@@ -213,12 +260,12 @@ async function syncRotationPolicyCard(accountCount, rateLimit = null) {
 
 // 纯 UI 渲染：依据**当前控件值**刷新徽章与提示文案，不接触磁盘、不改动控件值。
 // change 事件、切换账号后刷新都必须走这里。
-function renderRotationPolicyUI(accountCount, rateLimit = null) {
+// rateLimit 三态：对象 = 有内核数据；null = 内核不可用（服务已停止）；不传 = 本次无内核数据（纯 UI 重渲染）。
+function renderRotationPolicyUI(accountCount, rateLimit) {
   const badge = document.getElementById('rotation-status-badge');
   const select = document.getElementById('select-rotate-mode');
   const wrapCount = document.getElementById('wrap-rotate-count');
   const hint = document.getElementById('rotation-policy-hint');
-  const activeUid = rateLimit?.rotation?.active_uid; // 内核运行态真源（非磁盘配置）
   if (!select) return;
 
   const isMulti = accountCount >= 2;
@@ -255,7 +302,9 @@ function renderRotationPolicyUI(accountCount, rateLimit = null) {
   }
 
   // 活跃账号可观测：内核自曝 rotation.active_uid（多账号场景下确认当前实际在用哪个号）
-  renderActiveUid(activeUid);
+  // 三态：rateLimit === null → 内核不可用，清空徽章；undefined → 本次无内核数据，保留原值
+  if (rateLimit === undefined) return;
+  renderActiveUid(rateLimit ? rateLimit.rotation?.active_uid : null);
 }
 
 // 渲染当前活跃账号 UID（消费 /api/rate_limit 的 rotation.active_uid）
@@ -263,7 +312,9 @@ var _lastActiveUid = null;
 function renderActiveUid(uid) {
   const el = document.getElementById('rotation-active-uid');
   if (!el) return;
-  if (uid && uid !== _lastActiveUid) _lastActiveUid = uid;
+  // 内核不可用（rateLimit 为 null）或未上报 active_uid 时必须清空缓存并隐藏徽章，
+  // 否则服务停止后徽章会一直显示上一次的活跃账号，与「服务已停止」长期不一致。
+  _lastActiveUid = uid ? String(uid) : null;
   const show = _lastActiveUid;
   if (!show) {
     el.style.display = 'none';
@@ -426,14 +477,22 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
 
   // 事件绑定一律限定在 container 内部实际插入的按钮（避免误绑 usage 模块同名 ID，
   // 且 container.innerHTML 重建后旧监听自然失效，不会随重复加载累积）
-  container.querySelector('#btn-refresh-token')?.addEventListener('click', async () => {
+  container.querySelector('#btn-refresh-token')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    // 唯一凭据刷新入口：请求期间必须禁用，否则连点会重复打腾讯后端并重复整页重建
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = '刷新中...';
     try {
       showToast('正在向腾讯后端刷新 Token...', 'info');
       const res = await invokeTauri('accounts_refresh_token', { uid: acct.uid });
       showToast(res, 'success');
       loadAccountsData();
-    } catch (e) {
-      showToast(`Token 刷新失败: ${e.message || e}`, 'error');
+    } catch (err) {
+      showToast(`Token 刷新失败: ${err.message || err}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '刷新 Token';
     }
   });
 
@@ -579,6 +638,25 @@ function renderAccountsGrid(list, rateLimit) {
 
 // 账号卡片按钮事件委托（data-act + data-uid，替代 inline onclick 的字符串拼接注入风险）
 export function initAccountsDelegation() {
+  // 账号页标题栏「刷新全部数据」：此前零绑定（点之无任何反应）。
+  // 语义即「账号 + 用量一并刷新」，与卡片内的「刷新积分」区分开。
+  document.getElementById('btn-refresh-all-usage')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = '刷新中...';
+    try {
+      await Promise.all([loadAccountsData(), loadUsageData(), loadUsageEvents(1)]);
+      showToast('账号与用量数据已刷新', 'success');
+    } catch (err) {
+      showToast(`刷新失败: ${err?.message || err}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  });
+
   const grid = document.getElementById('accounts-list');
   if (!grid) return;
   grid.addEventListener('click', (e) => {

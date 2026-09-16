@@ -67,7 +67,8 @@ export function initSettings() {
   const chkDesensitize = document.getElementById('chk-desensitize');
   const chkDebugConsole = document.getElementById('chk-debug-console');
   const chkAutoStart = document.getElementById('chk-auto-start');
-  const btnOpenLiveConsole = document.getElementById('btn-open-live-console');
+  // 注：#btn-open-live-console（原「一键跳转实时日志」按钮）已从 index.html 移除，
+  // 此处原先的 getElementById 死引用一并删除；若日后补回该按钮，再在此绑定 addEventListener
   const radioCloseActions = document.querySelectorAll('input[name="close-action"]');
   const selectModelListMode = document.getElementById('select-model-list-mode');
 
@@ -76,6 +77,26 @@ export function initSettings() {
   let desensitizeTouched = false;
   // 最近一次持久化到后端的端口值（用于保存时判断端口是否变化）
   let savedPort = state.port;
+
+  // 硬编码示例联动：index.html 把 127.0.0.1:8787 写死在模板文本里——接入示例代码块
+  // （#code-claude / #code-python，也是「复制」按钮的复制源）与 Agent 卡片里的
+  // 「兼容端点」文案。改端口后用户复制到的命令仍连旧端口，连不上。
+  // 采用「host:port 整体替换」而非「写死 8787 → 新端口」：幂等（重复调用结果一致）、
+  // 不依赖调用顺序（首屏回读配置时同样走 applyPortToUi），且旧值不是 8787 时也能纠正。
+  // 元素缺失（index.html 结构变动）时直接跳过，绝不因可选元素抛错。
+  const PORT_TEXT_RE = /127\.0\.0\.1:\d{2,5}/g;
+  const applyPortToStaticExamples = (val) => {
+    const targets = [
+      document.getElementById('code-claude'),
+      document.getElementById('code-python'),
+      ...document.querySelectorAll('.agent-path-text .mono'),
+    ];
+    for (const el of targets) {
+      // 只改含「127.0.0.1:端口」字样的元素（如「路径: —」等其它 .mono 保持原样）
+      if (!el || !String(el.textContent || '').includes('127.0.0.1:')) continue;
+      el.textContent = String(el.textContent).replace(PORT_TEXT_RE, `127.0.0.1:${val}`);
+    }
+  };
 
   // 端口 → 内存 state 与看板/侧边栏/端点联动展示
   const applyPortToUi = (val) => {
@@ -86,6 +107,8 @@ export function initSettings() {
     if (sideBadge) sideBadge.textContent = `:${val}`;
     const endpoint = document.getElementById('endpoint-url');
     if (endpoint) endpoint.value = `http://127.0.0.1:${val}/v1`;
+    // 硬编码示例（接入代码块 / 兼容端点文案）同步改写，避免复制到旧端口
+    applyPortToStaticExamples(val);
   };
 
   // 脱敏开关 → 内存 state 与看板联动展示
@@ -163,7 +186,14 @@ export function initSettings() {
             apiKeyCache = latest.api_key;
           }
         }
-      } catch { /* 读取失败则沿用上次已知值 */ }
+      } catch (readErr) {
+        // 读盘失败必须中止本次保存：dirty-merge 依赖磁盘真源回填「本次未修改」的字段，
+        // 读不到就只剩内存 cache —— 其中 api_key 等字段可能是陈旧值，带着它写盘等于把
+        // 旧密钥落回磁盘（用户以为改了，实际没改）。宁可让用户重试，也不静默写旧数据。
+        console.warn('读取磁盘设置失败，已中止本次保存:', readErr);
+        showToast('读取磁盘设置失败，本次保存已中止（未写入任何改动），请稍后重试', 'error');
+        return false;
+      }
       await invokeTauri('save_app_settings', { settings: buildSettingsPayload(patch) });
       return true;
     } catch (err) {
@@ -450,8 +480,15 @@ export function initSettings() {
           setTimeout(async () => {
             if (state.running) return;
             try {
-              await invokeTauri('proxy_start', { port: state.port, desensitize: state.desensitize });
-              showToast(`已按设置自动拉起反代服务（:${state.port}）`, 'success');
+              const res = await invokeTauri('proxy_start', { port: state.port, desensitize: state.desensitize });
+              // 竞态：首跳 checkHealth 可能晚于本 800ms 窗口，state.running 尚未回填时后端
+              // 走幂等分支返回 already-running(port N)（proxy.rs）。此时本次调用实际没做任何
+              // 事，必须换文案，不能谎报「已自动拉起」。
+              if (String(res ?? '').includes('already-running')) {
+                showToast(`反代服务已在运行（:${state.port}），未重复拉起`, 'info');
+              } else {
+                showToast(`已按设置自动拉起反代服务（:${state.port}）`, 'success');
+              }
               setTimeout(checkHealth, 600);
             } catch (e) {
               console.warn('自动拉起反代失败:', e);
