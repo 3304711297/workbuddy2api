@@ -1514,3 +1514,42 @@ body {
 .update-close:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .update-actions button[hidden] { display: none; }
 
+/* 更新阶段步骤条：done=已完成（实心勾）/ active=进行中（高亮）/ 其余=待办（灰） */
+.update-steps {
+  width: 100%;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+  text-align: left;
+}
+.update-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.update-steps li::before {
+  content: '○';
+  font-size: 12px;
+  line-height: 1;
+  flex: none;
+  color: var(--border-light);
+}
+.update-steps li.is-done { color: var(--text-secondary); }
+.update-steps li.is-done::before { content: '✓'; color: var(--success); }
+.update-steps li.is-active { color: var(--text-primary); font-weight: 600; }
+.update-steps li.is-active::before { content: '◐'; color: var(--primary); }
+.update-steps li.is-failed { color: var(--danger); font-weight: 600; }
+.update-steps li.is-failed::before { content: '✕'; color: var(--danger); }
+
+.update-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 0;
+}
+.update-hint[hidden] { display: none; }
+

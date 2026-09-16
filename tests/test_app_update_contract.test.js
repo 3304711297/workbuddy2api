@@ -140,6 +140,128 @@ test('交接脚本必须等 GUI 退出并能在失败后回滚', () => {
   assert.ok(/Start-WorkBuddy/.test(handoff), '脚本未在完成后拉起应用');
 });
 
+// ---------------------------------------------------------------------------
+// 启动确认 + 阶段进度 + 失败分级（借鉴 EasyCLIProxyAPI）
+// ---------------------------------------------------------------------------
+
+test('脚本必须做启动确认，失败则回滚（防止把用户留在崩溃版本上）', () => {
+  // 参照 EasyCLIProxyAPI 的 ack 等待：拉起新版后必须验证它真的可用，
+  // 否则新版启动即崩时用户会被反复拉回同一个坏版本。
+  assert.ok(/function Wait-WorkBuddyHealthy/.test(handoff), '缺少启动确认函数');
+  assert.ok(
+    /Wait-WorkBuddyHealthy\s+-Process/.test(handoff),
+    '拉起新版后未调用启动确认'
+  );
+  // 确认必须同时覆盖「进程存活」与「服务可用」两个层面
+  assert.ok(/HasExited/.test(handoff), '启动确认未检查进程是否立即退出');
+  assert.ok(
+    /PROXY_HEALTH_URL|v1\/models/.test(handoff),
+    '启动确认未做 8787 反代探活（GUI 活着但内核没起来不算成功）'
+  );
+  // 确认失败必须走回滚，而不是照常 exit 0
+  assert.ok(
+    /startup-unhealthy/.test(handoff),
+    '启动确认失败未归类为 startup-unhealthy（会被当成功处理）'
+  );
+  assert.ok(
+    /回滚后.*重建|重新构建回滚后的版本/.test(handoff),
+    '回滚后未重建：源码回旧版但 exe 仍是坏的新版'
+  );
+});
+
+test('脚本必须写阶段状态文件供 GUI 轮询（不留黑屏）', () => {
+  assert.ok(/function Write-State/.test(handoff), '缺少阶段状态写入函数');
+  assert.ok(/StatePath/.test(handoff), '脚本未接收状态文件路径参数');
+  // 状态文件必须原子替换，否则 GUI 会读到半截 JSON
+  assert.ok(/Move-Item/.test(handoff), '状态文件未做原子替换（GUI 可能读到半截 JSON）');
+
+  // 阶段名必须与前端 UPDATE_PHASES 及 index.html 步骤条三处完全一致
+  const phases = [
+    'preparing', 'fetching', 'merging', 'deps',
+    'frontend', 'building', 'verifying', 'restarting',
+  ];
+  for (const p of phases) {
+    assert.ok(new RegExp(`-Phase '${p}'`).test(handoff), `脚本未上报 ${p} 阶段`);
+    assert.ok(
+      new RegExp(`'${p}'`).test(updateJs),
+      `前端 UPDATE_PHASES 缺少 ${p}（步骤条会错位）`
+    );
+    assert.ok(
+      html.includes(`data-step="${p}"`),
+      `index.html 步骤条缺少 ${p}`
+    );
+  }
+});
+
+test('失败分类必须在脚本、Rust 契约与前端提示三处对齐', () => {
+  // 脚本抛出的 kind
+  const kinds = [
+    'fetch-failed', 'diverged', 'stash-failed', 'deps-failed',
+    'frontend-build-failed', 'rust-build-failed', 'artifact-suspicious',
+    'startup-unhealthy', 'gui-exit-timeout',
+  ];
+  for (const k of kinds) {
+    assert.ok(
+      new RegExp(`'${k}'`).test(handoff),
+      `脚本未产出失败分类 ${k}`
+    );
+    assert.ok(
+      new RegExp(`['"]?${k}['"]?\\s*:`).test(updateJs),
+      `前端 FAILURE_HINTS 缺少 ${k}（用户只能看到笼统的「更新失败」）`
+    );
+  }
+  // 分级必须落到状态文件字段上
+  assert.ok(/failureKind/.test(handoff), '脚本未把失败分类写进状态文件');
+  assert.ok(/failure_kind/.test(updateRs), 'Rust 未解析 failureKind → failure_kind');
+  assert.ok(/state\.failure_kind/.test(updateJs), '前端未消费 failure_kind 字段');
+});
+
+test('app_update_state 命令已注册且容忍文件缺失/半截 JSON', () => {
+  assert.ok(
+    /commands::app_update_state/.test(libRs),
+    'lib.rs 未注册 app_update_state：进度轮询会报 command not found'
+  );
+  // 三条容错路径都必须返回 None 而不是 Err：
+  //   ① 文件缺失（从未更新过）② JSON 半截（脚本正在写）③ BOM 前缀（PS 5.1 写入）
+  const idx = updateRs.indexOf('pub fn app_update_state');
+  assert.ok(idx > -1, '未找到 app_update_state');
+  // 取足够长的窗口覆盖到解析分支（含 BOM 剥离与注释）
+  const body = updateRs.slice(idx, idx + 1600);
+
+  assert.ok(
+    /fs::read_to_string\(&path\)\s*else\s*\{[\s\S]{0,120}?return Ok\(None\)/.test(body),
+    '文件缺失时未返回 Ok(None)（会让前端弹错误）'
+  );
+  assert.ok(
+    /serde_json::from_str[\s\S]{0,200}?else\s*\{[\s\S]{0,200}?return Ok\(None\)/.test(body),
+    'JSON 解析失败（脚本正在写入 / BOM 前缀）未降级为 None'
+  );
+  // BOM 必须被剥离：否则 serde_json 直接失败，整条进度显示静默失效
+  assert.ok(
+    /trim_start_matches\('\\u\{feff\}'\)/.test(body),
+    '未剥离 UTF-8 BOM：PS 5.1 写入的状态文件会让进度显示整体失效'
+  );
+});
+
+test('apply_app_update 发起前必须清理上一次的状态残留', () => {
+  // 否则前端可能把上次的 done/failed 当成本次进度，误判更新已完成
+  const idx = updateRs.indexOf('pub fn apply_app_update');
+  const body = updateRs.slice(idx, idx + 1200);
+  assert.ok(
+    /remove_file\(&state_path\)/.test(body),
+    '未清理旧状态文件：上一次的 done/failed 会被当成本次进度'
+  );
+});
+
+test('前端必须支持接续进行中的更新（重开应用后继续显示进度）', () => {
+  assert.ok(/resumeInFlightUpdate/.test(updateJs), '缺少接续逻辑：重开应用后进度丢失，用户会重复点击');
+  assert.ok(/rolling-back/.test(updateJs), '进行中阶段白名单缺少 rolling-back');
+  // 轮询必须能停止，否则离开视图后仍在后台打 IPC
+  assert.ok(/function stopUpdatePolling/.test(updateJs), '缺少停止轮询的函数');
+  assert.ok(/clearInterval/.test(updateJs), '未真正清除定时器');
+});
+
+
 test('弹窗包含 Hermes 同款结构：变更列表 + 立即更新 + 稍后再说', () => {
   for (const id of [
     'update-overlay',

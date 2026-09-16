@@ -37,6 +37,8 @@ function showView(name) {
   // 「正在更新」视图不允许关闭：更新已在路上，留着关闭入口只会让用户以为能取消
   const close = el('update-close');
   if (close) close.hidden = name === 'applying';
+  // 离开 applying 视图时必须停掉轮询，否则后台一直打 IPC
+  if (name !== 'applying') stopUpdatePolling();
 }
 
 function renderStatus({ title, body, detail = '', action = null, icon = 'i' }) {
@@ -240,18 +242,140 @@ async function runCheck({ silent = true, force = false } = {}) {
 // 应用更新
 // ---------------------------------------------------------------------------
 
+// 阶段顺序须与 index.html 的 #update-steps 及脚本 Write-State 的 phase 取值一致
+const UPDATE_PHASES = [
+  'preparing', 'fetching', 'merging', 'deps',
+  'frontend', 'building', 'verifying', 'restarting',
+];
+
+// 失败分类 → 用户能据以行动的一句话（与脚本 Throw-Failure 的 kind 对应）
+const FAILURE_HINTS = {
+  'not-a-git-checkout': '当前安装目录不是 git 检出，无法自动更新。',
+  'gui-exit-timeout': '应用未能在预期时间内退出，更新已中止。',
+  'fetch-failed': '网络或代理不可用，无法获取远端提交。可检查代理后重试。',
+  diverged: '本地存在未推送的提交，与远端分叉。请先手动处理分叉再更新。',
+  'stash-failed': '工作区改动未能安全保存，为避免丢失已中止更新。',
+  'deps-failed': '依赖安装失败，通常是网络问题。可检查代理后重试。',
+  'frontend-build-failed': '前端构建失败，代码可能存在问题。',
+  'rust-build-failed': 'Rust 编译失败，代码可能存在问题。',
+  'artifact-missing': '构建未产出可执行文件，已拒绝使用。',
+  'artifact-suspicious': '构建产物异常（疑似未内嵌前端），已拒绝使用。',
+  'startup-unhealthy': '新版本启动后服务不可用，已回滚到更新前的版本。',
+  unknown: '请查看更新日志了解详情。',
+};
+
+let updatePollTimer = null;
+
+/** 渲染阶段步骤条：已完成打勾、进行中高亮、失败标红。 */
+function renderSteps(phase, failed = false) {
+  const list = el('update-steps');
+  if (!list) return;
+  const idx = UPDATE_PHASES.indexOf(phase);
+  for (const li of list.querySelectorAll('li')) {
+    li.classList.remove('is-done', 'is-active', 'is-failed');
+    const step = li.dataset.step;
+    const stepIdx = UPDATE_PHASES.indexOf(step);
+    if (failed) {
+      // 失败时：失败点标红，之前的算完成，之后的保持待办
+      if (stepIdx === idx) li.classList.add('is-failed');
+      else if (idx >= 0 && stepIdx < idx) li.classList.add('is-done');
+      continue;
+    }
+    if (stepIdx < idx) li.classList.add('is-done');
+    else if (stepIdx === idx) li.classList.add('is-active');
+  }
+  // done 时全部打勾
+  if (phase === 'done') {
+    for (const li of list.querySelectorAll('li')) {
+      li.classList.remove('is-active', 'is-failed');
+      li.classList.add('is-done');
+    }
+  }
+}
+
+function setApplyingText(message) {
+  const msgEl = el('update-applying-message');
+  if (msgEl && message) msgEl.textContent = message;
+}
+
+/** 轮询脚本写入的阶段状态，把进度画到弹窗上。 */
+function startUpdatePolling() {
+  stopUpdatePolling();
+  let seenAlive = false;
+
+  updatePollTimer = setInterval(async () => {
+    let state = null;
+    try {
+      state = await invokeTauri('app_update_state');
+    } catch {
+      // GUI 即将退出时 IPC 可能已经断开，属正常，继续等
+      return;
+    }
+    if (!state || !state.phase) {
+      // 状态文件尚未出现（脚本刚启动）；此前若已见过状态又消失，说明脚本重启了
+      if (seenAlive) startUpdatePolling();
+      return;
+    }
+    seenAlive = true;
+
+    const phase = state.phase;
+    setApplyingText(state.message || '正在更新…');
+
+    if (phase === 'failed') {
+      stopUpdatePolling();
+      const hint = FAILURE_HINTS[state.failure_kind] || FAILURE_HINTS.unknown;
+      renderSteps(state.failure_kind === 'startup-unhealthy' ? 'restarting' : phase, true);
+      const titleEl = el('update-applying-title');
+      if (titleEl) titleEl.textContent = '更新失败';
+      const iconEl = el('update-applying-view')?.querySelector('.update-status-icon');
+      if (iconEl) iconEl.classList.remove('spin');
+      const logEl = el('update-applying-log');
+      if (logEl) logEl.textContent = [state.detail, hint].filter(Boolean).join('\n');
+      // 失败后允许关闭，并提示可重试
+      const close = el('update-close');
+      if (close) close.hidden = false;
+      const hintEl = el('update-applying-hint');
+      if (hintEl) hintEl.textContent = '可关闭本窗口后重新检查更新。';
+      return;
+    }
+
+    renderSteps(phase, false);
+
+    if (phase === 'done') {
+      // 脚本会拉起新 GUI；本进程仍在时如实告知，用户可自行关闭
+      stopUpdatePolling();
+      const titleEl = el('update-applying-title');
+      if (titleEl) titleEl.textContent = '更新完成';
+      const iconEl = el('update-applying-view')?.querySelector('.update-status-icon');
+      if (iconEl) iconEl.classList.remove('spin');
+    }
+  }, 1000);
+}
+
+function stopUpdatePolling() {
+  if (updatePollTimer) {
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+  }
+}
+
 async function applyUpdate() {
   showView('applying');
+  renderSteps('preparing', false);
   const logEl = el('update-applying-log');
   if (logEl) logEl.textContent = '';
+  const hintEl = el('update-applying-hint');
+  if (hintEl) hintEl.textContent = '更新期间请勿手动启动应用；更新完成后会自动重新打开。';
 
   try {
     // 该命令启动分离的更新进程后会让 GUI 退出，因此 await 很可能拿不到返回值 ——
-    // 那是预期行为，不是失败，别据此报错。
+    // 那是预期行为，不是失败。启动轮询以显示脚本写入的真实进度。
     const msg = await invokeTauri('apply_app_update');
     if (logEl && msg) logEl.textContent = msg;
+    startUpdatePolling();
   } catch (e) {
     // 启动更新失败才是真失败：退回状态视图并给出可操作提示
+    stopUpdatePolling();
     const detail = e?.message || String(e);
     renderStatus({
       title: '更新启动失败',
@@ -320,4 +444,26 @@ export function initUpdateCheck() {
   // 启动后延迟静默检查一次（避开启动初期的健康检查高峰）；
   // 24h TTL 缓存由 Rust 侧持有，重复启动不会反复打 GitHub API。
   setTimeout(() => runCheck({ silent: true }), 1500);
+
+  // 接续未完成的更新：若上次更新仍在进行（GUI 曾崩溃重启 / 用户重开应用），
+  // 直接把弹窗切到进度视图继续显示，否则用户会以为更新丢了而重复点击。
+  setTimeout(() => resumeInFlightUpdate(), 800);
+}
+
+async function resumeInFlightUpdate() {
+  let state = null;
+  try {
+    state = await invokeTauri('app_update_state');
+  } catch {
+    return;
+  }
+  if (!state?.phase) return;
+  if (!['preparing', 'fetching', 'merging', 'deps', 'frontend', 'building', 'verifying', 'restarting', 'rolling-back'].includes(state.phase)) {
+    return;
+  }
+  openOverlay();
+  showView('applying');
+  renderSteps(state.phase, false);
+  setApplyingText(state.message || '正在更新…');
+  startUpdatePolling();
 }

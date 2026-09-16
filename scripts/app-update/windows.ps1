@@ -1,19 +1,24 @@
 <#
 .SYNOPSIS
-    WorkBuddy2API 应用内自动更新编排脚本（交接式）。
+    WorkBuddy2API 应用内自动更新编排脚本（交接式 + 启动确认）。
 
 .DESCRIPTION
-    由 GUI 内的「立即更新」按钮以分离进程方式拉起。职责与 Hermes Desktop 的
-    scripts/desktop-update/windows.ps1 同构：
+    由 GUI 的「立即更新」按钮以分离进程方式拉起，或由用户手动执行以排障。
+    检测机制对齐 Hermes Desktop，交接与启动确认参考 EasyCLIProxyAPI。
 
-      1. 等待发起更新的 GUI 进程退出（它必须先死，才能动工作树与重建 exe）；
-      2. git fetch + 以 --ff-only 快进到远端分支（本地领先/分叉则中止，绝不覆盖用户提交）；
-      3. 工作树有未提交改动时先 git stash 保存，重建成功后再尝试恢复；
-      4. npm ci（依赖锁变化时）+ npm run build 重建前端；
-      5. cargo tauri build --no-bundle 重建 exe —— ⚠️ 必须走 tauri CLI，
-         裸 cargo build --release 会因缺少 custom-protocol feature 静默产出无前端的空壳；
-      6. 校验产物（尺寸显著大于空壳基准 + 前端资源名已内嵌）；
-      7. 拉起新 exe；失败则回滚到更新前 commit 并重新拉起旧版。
+    完整流程：
+      1.  等待发起更新的 GUI 进程退出（它必须先死，才能动工作树与重建 exe）；
+      2.  git stash 保存未提交改动（有的话）；
+      3.  git fetch + git merge --ff-only 快进（本地领先/分叉则中止，绝不覆盖用户提交）；
+      4.  package-lock.json 变化时才 npm ci，然后 npm run build 重建前端；
+      5.  cargo tauri build --no-bundle 重建 exe —— ⚠️ 必须走 tauri CLI，
+          裸 cargo build --release 会因缺少 custom-protocol feature 静默产出无前端的空壳；
+      6.  校验产物（尺寸显著大于空壳基准 + 前端资源名已内嵌）；
+      7.  拉起新 exe 并**等待启动确认**（进程存活 + 8787 反代探活）；
+          确认失败 → 回滚到更新前 commit → 重新构建并拉起旧版，避免把用户留在崩溃版本上。
+      8.  恢复 stash。
+
+    全程把阶段与进度写入 $StatePath（JSON），GUI 侧轮询显示，用户不会看到黑屏。
 
     ⚠️ 关于 8787 反代：converter.py 是 GUI 的子进程，GUI 退出时它随之结束。
     这是本机 Hermes 会话链路所依赖的服务，因此更新必然中断当前会话——
@@ -26,63 +31,144 @@
     要更新到的远端分支，默认 main。
 
 .PARAMETER GuiPid
-    发起本次更新的 GUI 进程 PID；脚本会等它退出。
+    发起本次更新的 GUI 进程 PID；脚本会等它退出。手动排障时可传 0 跳过等待。
 
 .PARAMETER LogPath
     日志文件路径。
+
+.PARAMETER StatePath
+    阶段/进度状态文件（JSON）。GUI 轮询它显示实时进度。
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InstallRoot,
     [string]$Branch = 'main',
     [Parameter(Mandatory = $true)][int]$GuiPid,
-    [string]$LogPath
+    [string]$LogPath,
+    [string]$StatePath
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 无日志路径时落到 %LOCALAPPDATA%\workbuddy2api\update\app-update.log
-if ([string]::IsNullOrWhiteSpace($LogPath)) {
-    $LogPath = Join-Path $env:LOCALAPPDATA 'workbuddy2api\update\app-update.log'
-}
+$updateDir = Join-Path $env:LOCALAPPDATA 'workbuddy2api\update'
+if ([string]::IsNullOrWhiteSpace($LogPath)) { $LogPath = Join-Path $updateDir 'app-update.log' }
+if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDir 'app-update-state.json' }
 
 $logDir = Split-Path -Parent $LogPath
-if ($logDir -and -not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-}
+if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    $line = "[$stamp] [$Level] $Message"
-    try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch { }
+    try {
+        # 同样避开 `Add-Content -Encoding UTF8`：5.1 下新建文件会写入 BOM，
+        # 让日志首行多出不可见字符（用记事本打开才看得出来）。
+        $line = "[$stamp] [$Level] $Message`r`n"
+        [System.IO.File]::AppendAllText($LogPath, $line, (New-Object System.Text.UTF8Encoding $false))
+    } catch { }
 }
 
-# 所有原生命令的输出都并入日志（成功也记），便于事后定位
+# 阶段名与前端 i18n 一一对应；detail 是给人看的一句话
+function Write-State {
+    param(
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [string]$Message = '',
+        [string]$FailureKind = '',
+        [string]$Detail = ''
+    )
+    $payload = [ordered]@{
+        phase       = $Phase
+        message     = $Message
+        failureKind = $FailureKind
+        detail      = $Detail
+        updatedAt   = [int64]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds
+        pid         = $PID
+    }
+    try {
+        # 原子替换：GUI 可能正在读，不能让它读到半截 JSON
+        $tmp = "$StatePath.tmp"
+        # ⚠️ 必须用 .NET 的无 BOM UTF-8 编码：Windows PowerShell 5.1 的
+        # `Set-Content -Encoding UTF8` 会写入 BOM（EF BB BF），而 Rust 侧
+        # serde_json 解析带 BOM 的 JSON 会失败 → 进度显示整体静默失效。
+        $json = $payload | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding $false))
+        Move-Item -LiteralPath $tmp -Destination $StatePath -Force
+    } catch {
+        Write-Log "写入状态文件失败：$_" 'WARN'
+    }
+    Write-Log "[$Phase] $Message"
+}
+
+# 失败分类：让用户看到「哪一步、为什么」，而不是笼统的「更新失败」
+$script:FailureKind = 'unknown'
+function Throw-Failure {
+    param([string]$Kind, [string]$Message)
+    $script:FailureKind = $Kind
+    throw $Message
+}
+
 function Invoke-Logged {
     param([string]$FilePath, [string[]]$Arguments, [string]$What)
     Write-Log "执行：$FilePath $($Arguments -join ' ')"
     $out = & $FilePath @Arguments 2>&1
     $code = $LASTEXITCODE
     foreach ($line in $out) { Write-Log "  $line" }
-    if ($code -ne 0) {
-        Write-Log "$What 失败（退出码 $code）" 'ERROR'
-    }
+    if ($code -ne 0) { Write-Log "$What 失败（退出码 $code）" 'ERROR' }
     return $code
 }
 
 $exePath = Join-Path $InstallRoot 'src-tauri\target\release\workbuddy2api.exe'
 # 裸 cargo build --release 的空壳基准尺寸：产物明显小于它即说明前端没进包
 $SHELL_BASELINE_BYTES = 15572992
+# 反代探活地址：GUI 起来后会拉起 converter.py，8787 通即证明整条链路活着
+$PROXY_HEALTH_URL = 'http://127.0.0.1:8787/v1/models'
 
 function Start-WorkBuddy {
     param([string]$Reason)
-    if (Test-Path $exePath) {
-        Write-Log "拉起应用（$Reason）：$exePath"
-        Start-Process -FilePath $exePath -WorkingDirectory $InstallRoot | Out-Null
-    } else {
+    if (-not (Test-Path $exePath)) {
         Write-Log "产物不存在，无法拉起：$exePath" 'ERROR'
+        return $null
     }
+    Write-Log "拉起应用（$Reason）：$exePath"
+    try {
+        return Start-Process -FilePath $exePath -WorkingDirectory $InstallRoot -PassThru
+    } catch {
+        Write-Log "拉起应用失败：$_" 'ERROR'
+        return $null
+    }
+}
+
+<#
+    启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待）：
+    拉起后必须确认「进程活着」且「8787 反代可用」。仅确认进程存在是不够的——
+    本项目 GUI 启动后要拉起 Python 内核，内核起不来时 GUI 进程仍在但不提供服务，
+    用户看到的仍是坏掉的应用。
+
+    注意：8787 可能是**上一次**遗留进程占用，所以先要求它先消失再出现（可选），
+    但为兼容「旧内核未及时退出」的情况，这里只做「最终可用」判定而非严格时序判定，
+    避免误判成失败而触发不必要的回滚。
+#>
+function Wait-WorkBuddyHealthy {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [int]$TimeoutSeconds = 90
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($Process -and $Process.HasExited) {
+            return @{ ok = $false; reason = "新版应用启动后立即退出（退出码 $($Process.ExitCode)）" }
+        }
+        try {
+            $resp = Invoke-WebRequest -Uri $PROXY_HEALTH_URL -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+            if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
+                return @{ ok = $true; reason = "反代已在 $PROXY_HEALTH_URL 响应（HTTP $($resp.StatusCode)）" }
+            }
+        } catch {
+            # 还没起来，继续等
+        }
+        Start-Sleep -Milliseconds 1000
+    }
+    return @{ ok = $false; reason = "$TimeoutSeconds 秒内未能确认服务可用（$PROXY_HEALTH_URL 无响应）" }
 }
 
 function Show-FailureMessage {
@@ -95,27 +181,29 @@ function Show-FailureMessage {
     }
 }
 
+Write-State -Phase 'preparing' -Message '正在准备更新'
 Write-Log '============================================================'
 Write-Log "更新开始：branch=$Branch root=$InstallRoot guiPid=$GuiPid"
 
 # ── 1. 等 GUI 退出 ──────────────────────────────────────────────────────────
 # 必须先等它消失：GUI 是 converter.py 的父进程且持有 exe 文件锁，
 # 未退出就重建会因文件占用失败，且工作树仍在被读取。
-$deadline = (Get-Date).AddMinutes(3)
-while ((Get-Date) -lt $deadline) {
-    $proc = Get-Process -Id $GuiPid -ErrorAction SilentlyContinue
-    if (-not $proc) { break }
-    Start-Sleep -Milliseconds 500
+if ($GuiPid -gt 0) {
+    $deadline = (Get-Date).AddMinutes(3)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue) {
+        Write-State -Phase 'failed' -Message '等待应用退出超时' -FailureKind 'gui-exit-timeout' `
+            -Detail "PID $GuiPid 仍在运行。请手动退出应用后重试。"
+        Show-FailureMessage "等待应用退出超时（PID $GuiPid 仍在运行），更新已中止。请手动退出应用后重试。"
+        exit 1
+    }
+    Write-Log 'GUI 已退出'
+    # 给 converter.py 收尾时间：释放 8787 与文件句柄，否则重建会撞占用
+    Start-Sleep -Seconds 2
 }
-if (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue) {
-    Write-Log "等待 GUI（PID $GuiPid）退出超时，中止更新" 'ERROR'
-    Show-FailureMessage "等待应用退出超时（PID $GuiPid 仍在运行），更新已中止。请手动退出应用后重试。"
-    exit 1
-}
-Write-Log 'GUI 已退出，开始更新工作树'
-
-# GUI 退出后 converter.py 可能仍在收尾，给它一点时间释放 8787 与文件句柄
-Start-Sleep -Seconds 2
 
 $previousSha = $null
 $stashed = $false
@@ -124,7 +212,11 @@ try {
     Push-Location $InstallRoot
 
     # ── 2. 记录更新前状态（回滚用） ─────────────────────────────────────────
+    Write-State -Phase 'preparing' -Message '正在检查工作区'
     $previousSha = (& git rev-parse HEAD 2>&1 | Select-Object -First 1).ToString().Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $previousSha) {
+        Throw-Failure 'not-a-git-checkout' "无法读取当前提交（$InstallRoot 不是有效的 git 检出）"
+    }
     Write-Log "更新前 HEAD：$previousSha"
 
     $dirty = (& git status --porcelain 2>&1) -join "`n"
@@ -132,25 +224,28 @@ try {
         Write-Log "工作树有未提交改动，先 stash 保存：`n$dirty"
         $stashCode = Invoke-Logged -FilePath 'git' -Arguments @('stash', 'push', '-u', '-m', "workbuddy2api auto-update $(Get-Date -Format 'yyyyMMdd-HHmmss')") -What 'git stash'
         if ($stashCode -eq 0) { $stashed = $true }
-        else { throw '工作树有未提交改动且 stash 失败，为避免丢失改动已中止更新' }
+        else { Throw-Failure 'stash-failed' '工作树有未提交改动且 stash 失败，为避免丢失改动已中止更新' }
     }
 
     # ── 3. 快进到远端分支 ───────────────────────────────────────────────────
     # --ff-only：本地领先或已分叉时直接失败，绝不产生合并提交或覆盖用户提交
+    Write-State -Phase 'fetching' -Message "正在获取 origin/$Branch"
     if ((Invoke-Logged -FilePath 'git' -Arguments @('fetch', 'origin', $Branch) -What 'git fetch') -ne 0) {
-        throw "git fetch origin $Branch 失败（网络或代理问题）"
+        Throw-Failure 'fetch-failed' "git fetch origin $Branch 失败（网络或代理问题）"
     }
 
     $targetSha = (& git rev-parse "origin/$Branch" 2>&1 | Select-Object -First 1).ToString().Trim()
     if ($targetSha -eq $previousSha) {
         Write-Log '远端无新提交，无需重建'
         if ($stashed) { Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop' | Out-Null }
-        Start-WorkBuddy -Reason '无更新'
+        Write-State -Phase 'done' -Message '已是最新版本，无需更新'
+        Start-WorkBuddy -Reason '无更新' | Out-Null
         exit 0
     }
 
+    Write-State -Phase 'merging' -Message '正在快进到最新提交'
     if ((Invoke-Logged -FilePath 'git' -Arguments @('merge', '--ff-only', "origin/$Branch") -What 'git merge --ff-only') -ne 0) {
-        throw "无法快进到 origin/$Branch（本地可能有未推送的提交）。请手动处理分叉后重试。"
+        Throw-Failure 'diverged' "无法快进到 origin/$Branch：本地存在未推送的提交。请手动处理分叉后重试。"
     }
     $currentSha = (& git rev-parse HEAD 2>&1 | Select-Object -First 1).ToString().Trim()
     Write-Log "已快进：$previousSha -> $currentSha"
@@ -162,37 +257,42 @@ try {
     $lockChanged = $changedFiles -contains 'package-lock.json'
 
     if ($lockChanged) {
-        Write-Log 'package-lock.json 有变化，执行 npm ci'
+        Write-State -Phase 'deps' -Message '依赖有变化，正在安装依赖'
         if ((Invoke-Logged -FilePath 'npm' -Arguments @('ci') -What 'npm ci') -ne 0) {
-            throw 'npm ci 失败'
+            Throw-Failure 'deps-failed' 'npm ci 失败（依赖安装未完成）'
         }
     } else {
         Write-Log 'package-lock.json 未变化，跳过 npm ci'
     }
 
+    Write-State -Phase 'frontend' -Message '正在构建前端'
     if ((Invoke-Logged -FilePath 'npm' -Arguments @('run', 'build') -What '前端构建') -ne 0) {
-        throw 'npm run build 失败'
+        Throw-Failure 'frontend-build-failed' 'npm run build 失败（前端构建未通过）'
     }
 
     # ── 5. Rust 重建（必须走 tauri CLI） ────────────────────────────────────
+    Write-State -Phase 'building' -Message '正在编译应用（此步耗时较长）'
     Push-Location (Join-Path $InstallRoot 'src-tauri')
     try {
         # ⚠️ 绝不改成 cargo build --release：custom-protocol feature 只有 tauri CLI 会带上，
         # plain cargo 会静默产出无前端的空壳 exe 且照常打印成功。
         if ((Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What 'Rust 重建') -ne 0) {
-            throw 'cargo tauri build 失败'
+            Throw-Failure 'rust-build-failed' 'cargo tauri build 失败（Rust 编译未通过）'
         }
     } finally {
         Pop-Location
     }
 
     # ── 6. 产物校验 ─────────────────────────────────────────────────────────
-    if (-not (Test-Path $exePath)) { throw "重建后未找到产物：$exePath" }
+    Write-State -Phase 'verifying' -Message '正在校验构建产物'
+    if (-not (Test-Path $exePath)) {
+        Throw-Failure 'artifact-missing' "重建后未找到产物：$exePath"
+    }
 
     $size = (Get-Item -LiteralPath $exePath).Length
     Write-Log "产物尺寸：$size 字节（空壳基准 $SHELL_BASELINE_BYTES）"
     if ($size -le $SHELL_BASELINE_BYTES) {
-        throw "产物尺寸 $size 不大于空壳基准 $SHELL_BASELINE_BYTES，疑似未内嵌前端（构建日志说成功不作数）"
+        Throw-Failure 'artifact-suspicious' "产物尺寸 $size 不大于空壳基准 $SHELL_BASELINE_BYTES，疑似未内嵌前端（构建日志说成功不作数）"
     }
 
     # 前端资源名必须能在 exe 中命中（dist/assets/index-<hash>.js）
@@ -208,34 +308,47 @@ try {
         if ($ascii.Contains($entryName)) {
             Write-Log "产物已内嵌前端资源：$entryName"
         } else {
-            throw "产物中未找到前端资源名 $entryName，前端未进包"
+            Throw-Failure 'artifact-suspicious' "产物中未找到前端资源名 $entryName，前端未进包"
         }
     } else {
         Write-Log 'dist/assets 下未找到 index-*.js，跳过资源内嵌校验' 'WARN'
     }
 
-    # ── 7. 恢复改动并拉起新版本 ─────────────────────────────────────────────
     if ($stashed) {
         if ((Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop') -ne 0) {
-            Write-Log "stash 恢复冲突，改动仍保存在 git stash 中，请手动 git stash pop" 'WARN'
+            Write-Log 'stash 恢复冲突，改动仍保存在 git stash 中，请手动 git stash pop' 'WARN'
         }
     }
 
-    Write-Log '更新完成，拉起新版本'
-    Start-WorkBuddy -Reason '更新完成'
-    exit 0
+    # ── 7. 拉起并等待启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待） ──────────
+    Write-State -Phase 'restarting' -Message '正在启动新版本'
+    $proc = Start-WorkBuddy -Reason '更新完成'
+
+    $health = Wait-WorkBuddyHealthy -Process $proc -TimeoutSeconds 90
+    if ($health.ok) {
+        Write-Log "启动确认通过：$($health.reason)"
+        Write-State -Phase 'done' -Message '更新完成，新版本已启动'
+        exit 0
+    }
+
+    # 启动确认失败：新版可能是坏的。回滚 + 重建 + 拉起旧版，绝不能把用户留在崩溃版本上。
+    Write-Log "启动确认失败：$($health.reason)" 'ERROR'
+    Throw-Failure 'startup-unhealthy' $health.reason
 }
 catch {
     $message = $_.Exception.Message
-    Write-Log "更新失败：$message" 'ERROR'
+    $kind = $script:FailureKind
+    Write-Log "更新失败（$kind）：$message" 'ERROR'
 
-    # 回滚到更新前 commit，尽量让用户回到可用状态
+    $rolledBack = $false
     if ($previousSha) {
+        Write-State -Phase 'rolling-back' -Message '更新失败，正在回滚到更新前的版本'
         try {
             Push-Location $InstallRoot
             Write-Log "回滚到 $previousSha"
             Invoke-Logged -FilePath 'git' -Arguments @('reset', '--hard', $previousSha) -What '回滚' | Out-Null
             if ($stashed) { Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop' | Out-Null }
+            $rolledBack = $true
         } catch {
             Write-Log "回滚过程出错：$_" 'ERROR'
         } finally {
@@ -243,16 +356,49 @@ catch {
         }
     }
 
-    Show-FailureMessage "自动更新失败：$message`n`n详细日志：$LogPath`n`n已回滚到更新前的版本。"
-    # 回滚后源码已恢复旧版，但 exe 可能已被覆盖一半 → 尽力拉起当前产物
-    Start-WorkBuddy -Reason '更新失败回滚后'
+    if ($rolledBack) {
+        # 源码已回旧版，但 exe 可能已被新版覆盖 → 必须重建，否则拉起的是坏 exe
+        try {
+            Write-State -Phase 'rolling-back' -Message '正在重新构建回滚后的版本'
+            Push-Location $InstallRoot
+            Invoke-Logged -FilePath 'npm' -Arguments @('run', 'build') -What '回滚后前端构建' | Out-Null
+            Push-Location (Join-Path $InstallRoot 'src-tauri')
+            try {
+                Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建' | Out-Null
+            } finally {
+                Pop-Location
+            }
+        } catch {
+            Write-Log "回滚后重建失败：$_" 'ERROR'
+        } finally {
+            Pop-Location -ErrorAction SilentlyContinue
+        }
+    }
+
+    $hint = switch ($kind) {
+        'fetch-failed' { '网络或代理不可用，无法获取远端提交。' }
+        'diverged' { '本地有未推送的提交，与远端分叉。请手动处理后再更新。' }
+        'stash-failed' { '工作区改动未能安全保存，已中止以免丢失。' }
+        'deps-failed' { '依赖安装失败，通常是网络问题。' }
+        'frontend-build-failed' { '前端构建失败，代码可能有问题。' }
+        'rust-build-failed' { 'Rust 编译失败，代码可能有问题。' }
+        'artifact-suspicious' { '构建产物异常（疑似未内嵌前端），已拒绝使用。' }
+        'startup-unhealthy' { '新版本启动后服务不可用，已回滚到更新前的版本。' }
+        default { '请查看日志了解详情。' }
+    }
+
+    Write-State -Phase 'failed' -Message '更新失败' -FailureKind $kind `
+        -Detail "$message`n$hint"
+
+    Show-FailureMessage "自动更新失败：$message`n`n$hint`n`n详细日志：$LogPath`n`n$(if ($rolledBack) { '已回滚到更新前的版本。' } else { '未能回滚，请手动检查工作区。' })"
+
+    Start-WorkBuddy -Reason '更新失败回滚后' | Out-Null
     exit 1
 }
 finally {
     # 确保无论成功失败都回到原始工作目录。
     # ⚠️ 不能用 `(Get-Location -Stack).Path` 之类写法：栈为空时它会抛错，
     # 在 finally 里抛错会顶替掉 try 中真正的失败原因，让日志丢失关键信息。
-    # 逐层 Pop 并计数（最多几次），任何异常都吞掉，finally 只负责收尾。
     for ($i = 0; $i -lt 8; $i++) {
         try {
             if ((Get-Location -Stack).Count -le 0) { break }

@@ -483,6 +483,11 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
     let log_dir = local_app_dir().join("update");
     std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     let log_path = log_dir.join("app-update.log");
+    let state_path = log_dir.join("app-update-state.json");
+
+    // 清掉上一次的状态残留：否则前端可能把上次的 done/failed 当成本次的进度。
+    // 脚本随后会立即写入 preparing，此处失败不影响更新流程。
+    let _ = std::fs::remove_file(&state_path);
 
     // 分离启动：DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP，使父进程退出后脚本继续运行。
     // 必须 -NoProfile 且用 pwsh 优先（Store 别名版本无关）；脚本自身负责等 GUI 退出。
@@ -507,6 +512,8 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             .arg(std::process::id().to_string())
             .arg("-LogPath")
             .arg(&log_path)
+            .arg("-StatePath")
+            .arg(&state_path)
             .current_dir(&root)
             .stdin(std::process::Stdio::null())
             // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住
@@ -540,6 +547,62 @@ fn resolve_powershell() -> String {
         return p;
     }
     "pwsh".to_string()
+}
+
+/// 读取更新编排脚本写入的阶段状态（供前端轮询显示实时进度）。
+///
+/// 契约：状态文件由 `scripts/app-update/windows.ps1` 原子写入，
+/// 字段为 camelCase（PowerShell 侧 `[ordered]@{}` + ConvertTo-Json 输出），
+/// 这里按名字逐个取值再转成 snake_case 返回，避免两侧字段名风格打架。
+///
+/// 失败不报错：文件不存在（从未更新过）或半截 JSON（正在写）都返回 None，
+/// 前端据此显示「无进行中的更新」，而不是弹错误。
+#[tauri::command]
+pub fn app_update_state() -> Result<Option<AppUpdateState>, String> {
+    let path = local_app_dir().join("update").join("app-update-state.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    // 容忍 UTF-8 BOM：Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，
+    // 而 serde_json 遇到 BOM 直接解析失败 —— 那会让整条进度显示静默失效。
+    // 脚本侧已改用无 BOM 写入（主防线），这里是防御性兜底。
+    let raw = raw.trim_start_matches('\u{feff}');
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        // 正在被脚本写入（读到半截）时按「暂无状态」处理，下次轮询会拿到完整内容
+        return Ok(None);
+    };
+
+    let text = |key: &str| -> Option<String> {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    Ok(Some(AppUpdateState {
+        phase: text("phase").unwrap_or_default(),
+        message: text("message").unwrap_or_default(),
+        failure_kind: text("failureKind").unwrap_or_default(),
+        detail: text("detail").unwrap_or_default(),
+        updated_at: value.get("updatedAt").and_then(|v| v.as_i64()).unwrap_or(0),
+        pid: value.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+    }))
+}
+
+/// 更新阶段状态（前端轮询显示用）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct AppUpdateState {
+    /// preparing / fetching / merging / deps / frontend / building / verifying /
+    /// restarting / done / failed / rolling-back
+    pub phase: String,
+    pub message: String,
+    /// 失败分类（仅 phase=failed 时有意义），见脚本内 Throw-Failure 的 kind 取值
+    pub failure_kind: String,
+    pub detail: String,
+    pub updated_at: i64,
+    /// 写状态的脚本进程 PID（前端可据此判断更新是否仍在进行）
+    pub pid: u64,
 }
 
 #[cfg(test)]
@@ -781,5 +844,31 @@ mod tests {
             compare_api_url("o/r", "aaa", "bbb"),
             "https://api.github.com/repos/o/r/compare/aaa...bbb"
         );
+    }
+
+    #[test]
+    fn state_parsing_tolerates_utf8_bom() {
+        // Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，
+        // serde_json 遇到 BOM 会直接失败 —— 而 app_update_state 的容错会把
+        // 解析失败降级成 None，于是整条进度显示静默失效（用户只看到黑屏）。
+        // 这里锁定「剥掉 BOM 后必须能解析出各字段」。
+        let body = r#"{"phase":"building","message":"正在编译应用","failureKind":"","detail":"","updatedAt":1789573868187,"pid":2976}"#;
+        let with_bom = format!("\u{feff}{body}");
+
+        // 不剥 BOM 时确实解析失败（证明这个防御不是多余的）
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&with_bom).is_err(),
+            "serde_json 不再拒绝 BOM？则本防御可移除以简化代码"
+        );
+
+        // 剥掉 BOM 后必须成功，且字段取值正确
+        let stripped = with_bom.trim_start_matches('\u{feff}');
+        let value: serde_json::Value = serde_json::from_str(stripped).unwrap();
+        assert_eq!(value.get("phase").unwrap().as_str().unwrap(), "building");
+        assert_eq!(
+            value.get("message").unwrap().as_str().unwrap(),
+            "正在编译应用"
+        );
+        assert_eq!(value.get("updatedAt").unwrap().as_i64().unwrap(), 1789573868187);
     }
 }

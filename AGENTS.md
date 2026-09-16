@@ -19,8 +19,8 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：180 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：72 passed
+npm test                                          # 前端：186 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：73 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -155,20 +155,33 @@ workbuddy2api.exe (GUI)
   结果缓存 TTL：成功 24h / 失败 1h，**以「本地 HEAD + 分支」为键**——更新或切分支后
   立即失效，不会残留假的「有更新」。
 
-  **② 应用 = 交接式**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
+  **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
   `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → 脚本等 GUI 消失后
   `git stash`（若有改动）→ `git fetch` + `git merge --ff-only` → `npm run build`
   → **`cargo tauri build --no-bundle`** → 校验产物（尺寸 > 空壳基准 + `index-*.js` 已内嵌）
-  → 拉起新 exe；任一步失败则 `git reset --hard` 回滚到更新前 commit 并弹失败框。
-  ⚠️ 脚本内**必须**用 `cargo tauri build`，理由同第 2 节（裸 cargo 会产出空壳）；
+  → 拉起新 exe → **等待启动确认**（进程存活 + `8787/v1/models` 探活，90s 超时）
+  → 确认失败则 `git reset --hard` 回滚 + 重建 + 拉起旧版。
+  ⚠️ 启动确认不可省（借鉴 EasyCLIProxyAPI 的 ack 等待）：只 `Start-Process` 就宣布成功，
+  会在新版「启动即崩」时把用户反复拉回同一个坏版本，且脚本已退出无从回滚。
+  仅验进程存活也不够——GUI 活着但内核没起来时服务仍不可用，故必须探 8787。
+  ⚠️ 脚本内**必须**用 `cargo tauri build`（裸 cargo 会产出空壳）；
   `--ff-only` 不可改成 merge/`reset --hard origin`（会覆盖或丢失用户提交）。
-  ⚠️ 更新必然中断 8787 反代与进行中的会话：`converter.py` 是 GUI 的子进程，GUI 退出时随之结束，
-  更新完成后由脚本拉起新 GUI 恢复。这是该功能的正常代价，不是缺陷。
 
-  **③ 契约**：前端字段名走 **snake_case**（`update_available` / `current_sha` / `target_sha` /
-  `behind` / `supported` / `dirty` / `commits`），写驼峰会静默 `undefined`；
-  远端 commit 标题**必须**用 `textContent` 渲染（不可信输入，防注入）。
-  改动检测/应用/弹窗任一环都要同步 `tests/test_app_update_contract.test.js`。
+  **③ 阶段进度与失败分级**：脚本每步 `Write-State` 写
+  `%LOCALAPPDATA%/workbuddy2api/update/app-update-state.json`（原子替换），
+  GUI 轮询 `app_update_state` 显示步骤条（准备/获取/快进/依赖/前端/编译/校验/启动），
+  用户不会看到黑屏等几分钟。失败带 `failureKind`，前端映射成可行动的一句话。
+  ⚠️ **状态文件必须用无 BOM UTF-8 写入**（脚本用 `[System.IO.File]::WriteAllText` +
+  `UTF8Encoding($false)`）：Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，
+  而 serde_json 遇 BOM 直接失败 → 因容错降级为 None 而**整条进度显示静默失效**。
+  Rust 侧另做了 `trim_start_matches('\u{feff}')` 防御兜底（双保险，有单测锁定）。
+
+  **④ 契约**：前端字段名走 **snake_case**（`update_available` / `current_sha` / `target_sha` /
+  `behind` / `supported` / `dirty` / `commits` / `failure_kind`），写驼峰会静默 `undefined`；
+  远端 commit 标题**必须**用 `textContent` 渲染（不可信输入，防注入）；
+  阶段名在「脚本 / 前端 UPDATE_PHASES / index.html 步骤条」三处必须一致，
+  失败分类在「脚本 kind / Rust 字段 / 前端 FAILURE_HINTS」三处必须一致
+  （`tests/test_app_update_contract.test.js` 会逐项对拍，漏一处即红）。
 
 - **`model_list_mode` 开关的作用域（别把它当成万能的）**：
   本开关**只改变内核向客户端暴露的清单**（`/v1/models`），**管不到客户端自己写死的模型表**。
