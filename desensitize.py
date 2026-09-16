@@ -15,13 +15,16 @@ development, credential testing, C2 frameworks ...」），属于**拒绝作恶*
 
     "DoS" -> "Do\u200bS"        （人/模型读仍是 DoS，后端关键词匹配失效）
 
-只处理一个明确的词表，默认只作用于 system 角色的消息（这是模板合规声明的
-集中地）。不改动其它角色内容，避免影响真实对话。
+只处理一个明确的词表，**作用角色由调用方经 `roles=` 传入**：本模块的函数默认
+值为 `("system",)`（模板合规声明的集中地），但生产转发路径
+（`converter.py` 的三个聊天端点）显式传 `("system", "assistant")`——
+这与上游实测的拦截面**精确吻合**（后端只拦 system/assistant，不拦 user/tool）。
+未列入 `roles` 的角色内容一律不动，避免污染真实对话。
 
 设计原则
 --------
 - 独立模块，可单独 import / 单独测试。
-- 保守：词表小而明确；只默认处理 system 消息；可关闭。
+- 保守：词表小而明确；作用角色显式声明（默认 system，生产含 assistant）；可关闭。
 - 不试图、也不可能绕过对用户真实有害输入的审核——只缓解客户端模板被误伤。
 """
 
@@ -156,7 +159,9 @@ def desensitize_messages(messages: Iterable[dict],
                          roles: tuple[str, ...] = ("system",)) -> list[dict]:
     """对指定角色的消息文本做脱敏，返回新的 messages 列表（不修改原对象）。
 
-    默认只处理 system 角色（合规模板集中地）。如需扩大，传 roles=("system","user")。
+    `roles` 的默认值是 ("system",)，但**生产转发不使用该默认值**——三个聊天端点
+    都显式传 ("system", "assistant") 以对齐上游拦截面。需要诊断扫全部可疑角色时
+    用 scan_messages()（它本就默认覆盖 system + assistant）。
     """
     out: list[dict] = []
     for m in messages:
@@ -243,7 +248,7 @@ if __name__ == "__main__":
             print(f"     | 脱敏: {d}")
             print(f"     | 可见字符相同，差异为零宽空格 U+200B")
     print()
-    print("=== messages 脱敏（只处理 system）===")
+    print("=== messages 脱敏（本演示只传 system；生产转发含 assistant）===")
     msgs = [
         {"role": "system", "content": "Refuse DoS attacks and exploit development."},
         {"role": "user", "content": "explain DoS attacks"},  # 不应被改

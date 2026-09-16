@@ -65,6 +65,16 @@ workbuddy2api.exe (GUI)
   `x-anthropic-billing-header:`、`"You are Claude Code, Anthropic's official CLI"`、
   `"Main branch (you will usually use this for PRs):"`。改动后需实测模型可调用性，
   不能只看单测。
+  当前词表 49 条（模块级 `SENSITIVE_TERMS`），分三类：① 安全术语（DoS/exploit/…，
+  来自真实被拦的客户端 system 模板）；② 已实证的客户端 system prompt 指纹；
+  ③ 竞争品牌词（Claude/Anthropic/OpenAI/Gemini 等，借鉴 DistPub/workbuddy2api）。
+  **「精细化」属可选演进、非当前缺陷**：现词表按「整串/词边界匹配 + 零宽空格打断」
+  工作，且 `\b` 边界与 `_rewrite_known_fingerprints()` 精确改写两层顺序不可颠倒
+  （精确改写优先，零宽兜底）。若要继续精细化，方向是「按上下文分级」而非「加词」——
+  例如区分「用户真的在讨论安全话题」（不该动）与「客户端模板里的合规声明」（该动），
+  但那需要语义判断，收益与风险都需重新评估；**在拿到新的真实 11128 样本之前不要动**。
+  作用角色由调用方传入（默认 `("system",)`，生产三端点显式传 `("system","assistant")`
+  以对齐上游拦截面——后端实测只拦 system/assistant，不拦 user/tool）。
 - **思考档位矩阵（`billing.rs` 的 `EFFORT_CATALOG`）**：上游 `/v2/enterprises/personal/models`
   对 `deepseek-v4.1-flash`、`deepseek-v4-pro` 等只下发扁平 `reasoning:{"effort":"high"}`，
   **不含** `supportedEfforts` / `canDisableThinking`；完整矩阵只在官方客户端另两路下发
