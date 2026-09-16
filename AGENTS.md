@@ -20,7 +20,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
 npm test                                          # 前端：189 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：77 passed
+cd src-tauri && cargo test --quiet                # Rust：72 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -63,6 +63,10 @@ fingerprint，每次构建都会漂移。
 Get-CimInstance Win32_Process -Filter "Name='workbuddy2api.exe'" |
   Select-Object ProcessId, CreationDate   # CreationDate 晚于 exe mtime = 正在跑新版本
 ```
+
+**界面上的版本标识即当前产物的构建提交**（形如 `v0.2.1 7e7a9c1`，由 `build.rs` 烘焙进
+二进制 + `vite.config.js` 注入前端）。**不要**用工作树 `git rev-parse HEAD` 判断「跑的是哪个
+版本」——源码留在检出目录、工作树会被 pull 推进，与运行中的产物无关（详见第 4 节更新检测）。
 
 ## 3. 会让当前聊天断掉的操作（重要）
 
@@ -158,7 +162,8 @@ workbuddy2api.exe (GUI)
   `cargo:rustc-env=WORKBUDDY2API_BUILD_SHA=<git rev-parse --short HEAD>`，
   并对 `.git/HEAD` 与当前分支引用发 `rerun-if-changed` 保证新提交后重编；
   无 git 环境构建时退化为 `"unknown"`（不 fail 构建）。
-  `AppUpdateInfo.current_sha` = 烘焙 sha，`worktree_sha` 才是工作树 HEAD（两者不可混用）。
+  `AppUpdateInfo.current_sha` = 烘焙 sha；**不得**再引入任何「读工作树 HEAD 做版本判定」
+  的入口（`read_git_head` 及其单测已随此修复一并删除，留着只会被误用）。
 
   ⚠️ **`ahead_by == 0` 但 tip 不同 ⇒ 本地领先，必须判「无更新」**——报成「有更新」会诱导
   用户用远端覆盖掉自己的提交，这是本模块最危险的误报。`compare` 失败（限流/本地独有提交 404）

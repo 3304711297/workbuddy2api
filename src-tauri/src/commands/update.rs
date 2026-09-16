@@ -54,10 +54,6 @@ pub struct AppUpdateInfo {
     pub fetched_at: i64,
     pub error: Option<String>,
     pub message: Option<String>,
-    /// 工作树当前 HEAD（与 `current_sha` 区分：后者是**本 exe 构建时**的提交）。
-    /// 供前端/脚本判断「运行版本 vs 工作树」是否已经不一致。
-    #[serde(default)]
-    pub worktree_sha: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,54 +68,6 @@ pub struct AppUpdateInfo {
 /// 「已是最新」（真实踩到：exe 构建于 88b0f7e、工作树已到 d1cb787）。
 pub fn build_sha() -> &'static str {
     env!("WORKBUDDY2API_BUILD_SHA")
-}
-
-/// 读工作树当前 HEAD（仅用于脚本侧判定「快进后是否需要重建」，不用于版本比对）。
-fn read_worktree_head(root: &Path) -> Option<String> {
-    read_git_head(root)
-}
-
-/// 读取本地 HEAD 的完整 commit SHA。支持普通检出、detached HEAD 与 packed-refs。
-///
-/// 之所以不 shell 出 `git rev-parse`：用户机器未必装 git，而读 `.git/HEAD` 是纯文件操作，
-/// 成功率更高，也让判定逻辑可在单测里直接构造目录验证。
-fn read_git_head(root: &Path) -> Option<String> {
-    let git_dir = resolve_git_dir(root)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim().to_string();
-
-    // 普通检出：HEAD 内容是 "ref: refs/heads/main"
-    let Some(reference) = head.strip_prefix("ref:") else {
-        // detached HEAD：HEAD 直接就是 40 位 SHA
-        return is_sha(&head).then_some(head);
-    };
-    let reference = reference.trim();
-
-    // 松散引用优先
-    if let Ok(raw) = std::fs::read_to_string(git_dir.join(reference)) {
-        let sha = raw.trim().to_string();
-        if is_sha(&sha) {
-            return Some(sha);
-        }
-    }
-
-    // 已被 pack 的引用：`.git/packed-refs` 里形如 "<sha> <refname>"
-    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).ok()?;
-    for line in packed.lines() {
-        let line = line.trim();
-        // '#' 是文件头注释，'^' 是 annotated tag 指向的 commit，均跳过
-        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let (Some(sha), Some(name)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        if name == reference && is_sha(sha) {
-            return Some(sha.to_string());
-        }
-    }
-    None
 }
 
 /// 解析 `.git`：普通检出的 `.git` 是目录；worktree 下是内容为 `gitdir: <path>` 的文件。
@@ -392,12 +340,7 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
     // 源码留在检出目录且更新靠就地重建，工作树会被 pull 推到最新，而运行中的 exe
     // 仍是旧提交的产物 —— 读工作树会把「运行的是旧版本」谎报成「已是最新」。
     let current_sha = build_sha().to_string();
-    let worktree_head = read_worktree_head(&root);
     let dirty = working_tree_dirty(&root);
-
-    // 供脚本判断「快进后工作树是否与运行版本一致 / 是否需要重建」。
-    // 与 current_sha 分开传：脚本要用工作树的 sha 做 git 操作，用构建 sha 做版本判定。
-    let worktree_sha = worktree_head.clone().unwrap_or_default();
 
     if !handoff_script_path(&root).exists() {
         return Ok(AppUpdateInfo {
@@ -449,7 +392,6 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
                 fetched_at: now,
                 error: None,
                 message: None,
-                worktree_sha: worktree_sha.clone(),
             }
         }
         Err(message) => AppUpdateInfo {
@@ -461,7 +403,6 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
             update_root: root_str.clone(),
             fetched_at: now,
             error: Some(message),
-            worktree_sha: worktree_sha.clone(),
             ..Default::default()
         },
     };
@@ -702,63 +643,6 @@ mod tests {
 
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-    #[test]
-    fn read_git_head_supports_loose_ref() {
-        let root = tmp_dir("loose");
-        let git = root.join(".git");
-        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
-        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(git.join("refs/heads/main"), format!("{SHA_A}\n")).unwrap();
-        assert_eq!(read_git_head(&root).as_deref(), Some(SHA_A));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn read_git_head_supports_detached_head() {
-        let root = tmp_dir("detached");
-        let git = root.join(".git");
-        std::fs::create_dir_all(&git).unwrap();
-        std::fs::write(git.join("HEAD"), format!("{SHA_B}\n")).unwrap();
-        assert_eq!(read_git_head(&root).as_deref(), Some(SHA_B));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn read_git_head_falls_back_to_packed_refs() {
-        let root = tmp_dir("packed");
-        let git = root.join(".git");
-        std::fs::create_dir_all(&git).unwrap();
-        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(
-            git.join("packed-refs"),
-            format!("# pack-refs with: peeled\n{SHA_A} refs/heads/main\n{SHA_B} refs/heads/dev\n"),
-        )
-        .unwrap();
-        assert_eq!(read_git_head(&root).as_deref(), Some(SHA_A));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn read_git_head_returns_none_without_git() {
-        let root = tmp_dir("nogit");
-        assert_eq!(read_git_head(&root), None);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn read_git_head_resolves_worktree_gitdir_file() {
-        // worktree 场景：.git 是文件，内容为 "gitdir: <绝对路径>"
-        let real = tmp_dir("wt_real");
-        std::fs::create_dir_all(real.join("refs/heads")).unwrap();
-        std::fs::write(real.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(real.join("refs/heads/main"), format!("{SHA_B}\n")).unwrap();
-        let wt = tmp_dir("wt_root");
-        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", real.to_string_lossy())).unwrap();
-        assert_eq!(read_git_head(&wt).as_deref(), Some(SHA_B));
-        let _ = std::fs::remove_dir_all(&real);
-        let _ = std::fs::remove_dir_all(&wt);
-    }
 
     #[test]
     fn parse_compare_maps_payload_and_reverses_to_newest_first() {
@@ -1032,10 +916,11 @@ mod tests {
             !code.contains(&forbidden),
             "current_sha 又改回读工作树 HEAD —— 会再次谎报「已是最新」"
         );
-        // 工作树 sha 仍需保留（脚本做 git 操作用），但必须是独立字段
+        // 生产代码里不应再有任何「读工作树 HEAD 做版本判定」的入口
+        let head_reader = ["read_git", "_head"].concat();
         assert!(
-            code.contains("read_worktree_head(&root)"),
-            "工作树 HEAD 未被单独读取（脚本需要它做快进基准）"
+            !code.contains(&head_reader),
+            "生产代码仍保留读工作树 HEAD 的函数：它已无合法用途，留着只会被误用为版本比对"
         );
     }
 }

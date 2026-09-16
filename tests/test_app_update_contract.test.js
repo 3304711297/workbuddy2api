@@ -273,6 +273,12 @@ test('版本比对必须用烘焙 sha，不得读工作树 HEAD', () => {
     !/let current_sha = read_git_head/.test(updateRs),
     'current_sha 又改回读工作树 HEAD —— 会再次谎报「已是最新」'
   );
+  // 生产代码里不应再存在「读工作树 HEAD」的函数：它已无合法用途，留着只会被误用
+  const prodOnly = updateRs.split('#[cfg(test)]')[0] || updateRs;
+  assert.ok(
+    !/fn read_git_head/.test(prodOnly),
+    '生产代码仍保留读工作树 HEAD 的函数：版本判定必须用烘焙 sha，工作树 HEAD 会被 pull 推进而谎报「已是最新」'
+  );
   // build.rs 必须把构建提交注入二进制，并在 HEAD/分支变化时重编
   const buildRs = readFileSync(join(root, 'src-tauri', 'build.rs'), 'utf8');
   assert.ok(
