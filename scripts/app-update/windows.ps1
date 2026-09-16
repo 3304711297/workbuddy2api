@@ -14,13 +14,13 @@
       5.  cargo tauri build --no-bundle 重建 exe —— ⚠️ 必须走 tauri CLI，
           裸 cargo build --release 会因缺少 custom-protocol feature 静默产出无前端的空壳；
       6.  校验产物（尺寸显著大于空壳基准 + 前端资源名已内嵌）；
-      7.  拉起新 exe 并**等待启动确认**（进程存活 + 8787 反代探活）；
+      7.  拉起新 exe 并**等待启动确认**（进程存活 + 反代端口探活）；
           确认失败 → 回滚到更新前 commit → 重新构建并拉起旧版，避免把用户留在崩溃版本上。
       8.  恢复 stash。
 
     全程把阶段与进度写入 $StatePath（JSON），GUI 侧轮询显示，用户不会看到黑屏。
 
-    ⚠️ 关于 8787 反代：converter.py 是 GUI 的子进程，GUI 退出时它随之结束。
+    ⚠️ 关于反代：converter.py 是 GUI 的子进程，GUI 退出时它随之结束。
     这是本机 Hermes 会话链路所依赖的服务，因此更新必然中断当前会话——
     更新完成后脚本会拉起新 GUI，服务随 GUI 启动恢复。
 
@@ -45,6 +45,13 @@
     ⚠️ 判定「是否需要重建」必须用它，而不是工作树 HEAD：本项目源码留在检出目录，
     工作树会被 pull 推进到最新，而跑着的 exe 仍是旧提交产物。只看工作树会得出
     「已是最新，无需重建」→ 用户点了更新却什么都没发生（真实踩到过）。
+
+.PARAMETER Port
+    反代实际监听端口，用于启动确认（探活）。
+
+    ⚠️ 必须由 GUI 传入其配置真源（`load_app_config().port`）。**不得**在本脚本里
+    写死 8787：端口可配置，用户配成 9000 时新版会正常监听 9000，而写死 8787 的
+    探活必然失败 → 90 秒后误判 startup-unhealthy → 把**正常的新版**回滚掉。
 #>
 [CmdletBinding()]
 param(
@@ -53,7 +60,8 @@ param(
     [Parameter(Mandatory = $true)][int]$GuiPid,
     [string]$LogPath,
     [string]$StatePath,
-    [string]$CurrentBuildSha = ''
+    [string]$CurrentBuildSha = '',
+    [Parameter(Mandatory = $true)][int]$Port
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,8 +136,9 @@ function Invoke-Logged {
 $exePath = Join-Path $InstallRoot 'src-tauri\target\release\workbuddy2api.exe'
 # 裸 cargo build --release 的空壳基准尺寸：产物明显小于它即说明前端没进包
 $SHELL_BASELINE_BYTES = 15572992
-# 反代探活地址：GUI 起来后会拉起 converter.py，8787 通即证明整条链路活着
-$PROXY_HEALTH_URL = 'http://127.0.0.1:8787/v1/models'
+# 反代探活地址：端口由 GUI 传入（配置真源 load_app_config().port），**不写死**。
+# GUI 起来后会拉起 converter.py，该端口通即证明整条链路活着。
+$PROXY_HEALTH_URL = "http://127.0.0.1:$Port/v1/models"
 
 function Start-WorkBuddy {
     param([string]$Reason)
@@ -147,15 +156,51 @@ function Start-WorkBuddy {
 }
 
 <#
-    启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待）：
-    拉起后必须确认「进程活着」且「8787 反代可用」。仅确认进程存在是不够的——
+    启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待 + 时序判据）：
+    拉起后必须确认「进程活着」且「反代端口可用」。仅确认进程存在是不够的——
     本项目 GUI 启动后要拉起 Python 内核，内核起不来时 GUI 进程仍在但不提供服务，
     用户看到的仍是坏掉的应用。
 
-    注意：8787 可能是**上一次**遗留进程占用，所以先要求它先消失再出现（可选），
-    但为兼容「旧内核未及时退出」的情况，这里只做「最终可用」判定而非严格时序判定，
-    避免误判成失败而触发不必要的回滚。
+    ⚠️ 为什么必须要求「端口先消失再出现」而不是只看「最终可用」：
+    converter.py 没有父进程退出检测（实测：GUI 退出后它变孤儿继续存活），
+    因此旧内核可能一直占着该端口。若只判「最终可用」，就会出现
+    「新版 GUI 启动即崩 → 旧内核仍在响应 → 健康检查拿到 2xx → 误判成功」，
+    把崩溃版本当成更新成功留在盘上。先等端口消失，可证明旧内核确实退了，
+    此后端口上的 2xx 必然来自新启动的进程。
+
+    宽容期设计：给旧进程一段退出时间（默认 30s）。若超时仍未释放，
+    再宽限一轮「最终可用」判定（有上限），避免把「旧内核残留」误判成
+    「新版失败」而触发不必要的回滚——两种情况都不可取，但后者代价更大。
 #>
+# 等到探活不再返回 2xx（旧内核确实退出）或超时
+function Test-ProxyEndpoint {
+    param([Parameter(Mandatory = $true)][string]$Url)
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
+            return @{ ok = $true; reason = "HTTP $($resp.StatusCode)" }
+        }
+        return @{ ok = $false; reason = "HTTP $($resp.StatusCode)" }
+    } catch {
+        return @{ ok = $false; reason = $_.Exception.Message }
+    }
+}
+
+# 等到探活不再返回 2xx（旧内核确实退出）或超时
+function Wait-PortReleased {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $probe = Test-ProxyEndpoint -Url $Url
+        if (-not $probe.ok) { return $true }
+        Start-Sleep -Milliseconds 700
+    }
+    return $false
+}
+
 function Wait-WorkBuddyHealthy {
     param(
         [Parameter(Mandatory = $true)]$Process,
@@ -166,13 +211,9 @@ function Wait-WorkBuddyHealthy {
         if ($Process -and $Process.HasExited) {
             return @{ ok = $false; reason = "新版应用启动后立即退出（退出码 $($Process.ExitCode)）" }
         }
-        try {
-            $resp = Invoke-WebRequest -Uri $PROXY_HEALTH_URL -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-            if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
-                return @{ ok = $true; reason = "反代已在 $PROXY_HEALTH_URL 响应（HTTP $($resp.StatusCode)）" }
-            }
-        } catch {
-            # 还没起来，继续等
+        $probe = Test-ProxyEndpoint -Url $PROXY_HEALTH_URL
+        if ($probe.ok) {
+            return @{ ok = $true; reason = "反代已在 $PROXY_HEALTH_URL 响应（$($probe.reason)）" }
         }
         Start-Sleep -Milliseconds 1000
     }
@@ -209,7 +250,7 @@ if ($GuiPid -gt 0) {
         exit 1
     }
     Write-Log 'GUI 已退出'
-    # 给 converter.py 收尾时间：释放 8787 与文件句柄，否则重建会撞占用
+    # 给 converter.py 收尾时间：释放监听端口与文件句柄，否则重建会撞占用
     Start-Sleep -Seconds 2
 }
 
@@ -353,7 +394,17 @@ try {
         }
     }
 
-    # ── 7. 拉起并等待启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待） ──────────
+    # ── 7. 拉起并等待启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待 + 时序判据） ──
+    # 先等旧内核把端口交出来，这样后面探到的 2xx 必然来自新进程，而不是残留的旧内核。
+    Write-State -Phase 'restarting' -Message '正在等待旧服务释放端口'
+    if (Wait-PortReleased -Url $PROXY_HEALTH_URL -TimeoutSeconds 30) {
+        Write-Log "端口已释放（$PROXY_HEALTH_URL）"
+    } else {
+        # 旧内核没退干净：继续等下去只会白耗；标记为「可能残留」但仍带时序判据继续验活。
+        # 这里刻意不判失败——把「旧进程残留」误判成「新版失败」会错误回滚，代价更大。
+        Write-Log "端口在 30 秒内未释放（$PROXY_HEALTH_URL），继续启动并放宽判定" 'WARN'
+    }
+
     Write-State -Phase 'restarting' -Message '正在启动新版本'
     $proc = Start-WorkBuddy -Reason '更新完成'
 

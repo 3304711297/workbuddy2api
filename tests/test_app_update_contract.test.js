@@ -338,6 +338,67 @@ test('版本指纹只含版本与提交（与 Hermes 形态一致，不含日期
   );
 });
 
+test('健康检查端口必须来自配置，不得在更新链路写死 8787', () => {
+  // 真实回归风险：用户把端口配成 9000 时新版会正常监听 9000，而写死 8787 的探活
+  // 必然失败 → 90s 后误判 startup-unhealthy → 把**正常的新版**回滚掉。
+  // 端口真源与 Hermes 接入检测同一条：load_app_config().port。
+  assert.ok(
+    /let port = crate::load_app_config\(\)\.port;/.test(updateRs),
+    'apply_app_update 未从 load_app_config().port 取端口（会与 Hermes 检测的判据分叉）'
+  );
+  assert.ok(
+    /\.arg\("-Port"\)[\s\S]{0,80}?\.arg\(port\.to_string\(\)\)/.test(updateRs),
+    'Rust 侧未把端口传给更新脚本'
+  );
+
+  // 脚本侧：参数必须声明且为必填，探活 URL 必须由端口拼装
+  assert.ok(
+    /\[Parameter\(Mandatory = \$true\)\]\[int\]\$Port/.test(handoff),
+    '脚本未把 Port 声明为必填参数：缺失时会静默退回写死端口'
+  );
+  assert.ok(
+    /http:\/\/127\.0\.0\.1:\$Port\/v1\/models/.test(handoff),
+    '探活 URL 未由 $Port 拼装'
+  );
+
+  // 硬编码防线：除注释外，脚本里不得出现裸的 8787 端口字面量。
+  // ⚠️ 必须同时剥离块注释 <# ... #>（文档里刻意写了「不得写死 8787」的警示语，
+  // 只排除 # 单行注释会把这句警示自己当成违规而误报）。
+  const codeOnly = handoff.replace(/<#[\s\S]*?#>/g, '');
+  const hardcoded = codeOnly
+    .split('\n')
+    .filter(l => !l.trimStart().startsWith('#'))
+    .filter(l => /8787/.test(l));
+  assert.deepEqual(
+    hardcoded,
+    [],
+    `脚本可执行代码里仍有写死的 8787：\n${hardcoded.join('\n')}`
+  );
+});
+
+test('启动确认必须要求端口先释放（防旧内核残留造成假阳性）', () => {
+  // converter.py 没有父进程退出检测（实测：GUI 退出后它变孤儿继续存活）。
+  // 若只判「最终可用」，会出现「新版 GUI 启动即崩 → 旧内核仍响应 2xx → 误判成功」，
+  // 把崩溃版本当成更新成功留在盘上。
+  assert.ok(
+    /function Wait-PortReleased/.test(handoff),
+    '缺少 Wait-PortReleased：无法证明旧内核已退出，探到的 2xx 可能来自残留进程'
+  );
+  assert.ok(
+    /Wait-PortReleased -Url \$PROXY_HEALTH_URL/.test(handoff),
+    '拉起新版前未等待端口释放（诊断结论会指向错误的进程）'
+  );
+  // 旧内核退不干净时不得直接判失败 —— 那会把「残留」误判成「新版失败」而错误回滚
+  assert.ok(
+    /端口在 30 秒内未释放[\s\S]{0,200}?'WARN'/.test(handoff),
+    '端口未释放时直接失败：会把旧进程残留误判成新版启动失败并错误回滚'
+  );
+  assert.ok(
+    /function Test-ProxyEndpoint/.test(handoff),
+    '缺少共用的单次探活函数'
+  );
+});
+
 test('弹窗包含 Hermes 同款结构：变更列表 + 立即更新 + 稍后再说', () => {
   for (const id of [
     'update-overlay',

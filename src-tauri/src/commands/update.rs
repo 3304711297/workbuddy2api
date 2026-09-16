@@ -450,6 +450,11 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
     }
 
     let branch = update_branch();
+    // ⚠️ 端口必须取自配置真源 `load_app_config().port`，与 Hermes 接入检测同一口径
+    // （`is_our_proxy_url` 也是这么取的）。**不得**在更新链路上再引入第二个「默认 8787」：
+    // 用户把端口配成 9000 时，新版会正常监听 9000，而写死 8787 的健康检查会
+    // 探活失败 → 误判 startup-unhealthy → 把正常的新版回滚掉。
+    let port = crate::load_app_config().port;
     let log_dir = local_app_dir().join("update");
     std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     let log_path = log_dir.join("app-update.log");
@@ -488,6 +493,10 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             // 不能只比工作树 HEAD —— 工作树可能已被 pull 到最新，而跑着的仍是旧产物。
             .arg("-CurrentBuildSha")
             .arg(build_sha())
+            // 实际监听端口：健康检查必须探这个端口。写死 8787 会让自定义端口的
+            // 用户在新版正常启动时被判 startup-unhealthy 并错误回滚。
+            .arg("-Port")
+            .arg(port.to_string())
             .current_dir(&root)
             .stdin(std::process::Stdio::null())
             // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住

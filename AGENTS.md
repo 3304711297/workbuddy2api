@@ -19,7 +19,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：189 passed（node --test）
+npm test                                          # 前端：191 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：72 passed
 ```
 
@@ -171,6 +171,13 @@ workbuddy2api.exe (GUI)
   结果缓存 TTL：成功 24h / 失败 1h，**以「本地 HEAD + 分支」为键**——更新或切分支后
   立即失效，不会残留假的「有更新」。
 
+  ⚠️ **健康检查端口不得写死 8787**（与 Hermes 检测同一条铁律）：端口可配置，用户配成 9000 时
+  新版会正常监听 9000，而写死 8787 的探活必然失败 → 90s 后误判 `startup-unhealthy`
+  → **把正常的新版回滚掉**。链路：`load_app_config().port` → `-Port` 参数 → 脚本
+  `$PROXY_HEALTH_URL = "http://127.0.0.1:$Port/v1/models"`。脚本的 `Port` 必须是
+  **必填参数**（缺失即报错，不得静默退回默认值）；契约测试会扫描脚本可执行代码
+  （剥离 `#` 与 `<# #>` 注释后）断言其中不含 8787 字面量。
+
   **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
   `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → 脚本等 GUI 消失后
   `git stash`（若有改动）→ `git fetch` + `git merge --ff-only` → `npm run build`
@@ -179,7 +186,12 @@ workbuddy2api.exe (GUI)
   → 确认失败则 `git reset --hard` 回滚 + 重建 + 拉起旧版。
   ⚠️ 启动确认不可省（借鉴 EasyCLIProxyAPI 的 ack 等待）：只 `Start-Process` 就宣布成功，
   会在新版「启动即崩」时把用户反复拉回同一个坏版本，且脚本已退出无从回滚。
-  仅验进程存活也不够——GUI 活着但内核没起来时服务仍不可用，故必须探 8787。
+  仅验进程存活也不够——GUI 活着但内核没起来时服务仍不可用，故必须探反代端口。
+  ⚠️ **必须「端口先释放再出现」**（`Wait-PortReleased`，30s 宽容期）：`converter.py`
+  **没有父进程退出检测**（实测：GUI 退出后它变孤儿继续存活并占着端口），若只判
+  「最终可用」，会出现「新版 GUI 启动即崩 → 旧内核仍响应 2xx → 误判成功」，
+  把崩溃版本当成功留在盘上。先等端口消失可证明旧内核确实退了，此后 2xx 必来自新进程。
+  端口超时未释放时**只 WARN 不失败**——把「旧进程残留」误判成「新版失败」会错误回滚，代价更大。
   ⚠️ **「是否需要重建」的基准是「工作树 vs 运行中的产物」，不是「工作树 vs 远端」**：
   用户可能已手动 pull 过、或上次更新中断，此时工作树已领先而远端无新提交；
   只看远端会得出「无需重建」→ 点了更新却什么都没发生。脚本为此接收
