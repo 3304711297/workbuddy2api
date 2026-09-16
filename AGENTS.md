@@ -20,7 +20,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ```bash
 python -m pytest tests/ -q          # Python：372 passed 为当前基线
 npm test                            # 前端：140 passed（node --test）
-cd src-tauri && cargo test          # Rust：44 passed
+cd src-tauri && cargo test          # Rust：46 passed
 ```
 
 **改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust
@@ -272,6 +272,17 @@ workbuddy2api.exe (GUI)
   （由 `tests/test_env_compat.py` 锁定）。`shared.rs::env_compat` 用的是 Go 时代
   遗留的 `C2O_` 前缀，与内核**不一致**，故 `resolve_api_key` 刻意不经过它 —— 
   照抄 `env_compat` 会让②路径又静默漏配。若要统一前缀，须先对齐两侧并同步改测试。
+  ⚠️ **失败分级必须把「成功」挡在外面（`ed207c7` 修的回归，改动必读）**：
+  `classify_status(code)` 返回 **`Option<ForwardFailure>`**，**所有 2xx 一律 `None`**
+  （`is_failure_status(code) = !(200..300).contains(&code)`）；`forward_failure_message(code)`
+  内部经 `classify_status(code)?` 短路，成功状态返回 `None`（= 无需报错）。
+  四个调用点统一写成 `if let Some(msg) = forward_failure_message(status) { return Err(msg) }`。
+  **禁止**再把任意状态码无条件塞进失败枚举——调用方按 `Option` 判失败，200 落进枚举
+  就会把成功当错误抛给前端（曾致签到完全不可用：toast「签到请求失败: 内核返回 HTTP 200」，
+  且四个转发命令全部受影响）。契约锁定：`proxy.rs::test_chat_probe_tests` 的
+  `success_status_is_never_classified_as_failure`（200/201/202/204/299 既非失败也无失败文案）
+  与 `failure_statuses_still_classified_and_actionable`（真失败仍被识别，401 文案含
+  「密钥」「服务设置」）。变异验证：把 `is_failure_status` 改成恒 `true` → 两条测试立刻变红。
 - **结构化日志透传（AppConfig.log_level / log_payloads）**：
   不传 `--log` 时内核 `_log()` 因 `log_path` 为空**直接丢弃**全部结构化行（请求摘要/耗时/错误详情），日志页只能看到 uvicorn 原始 stdout——所以 `proxy_start` 必须显式传 `--log` 指向 `converter.log`。
   `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
