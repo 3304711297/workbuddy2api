@@ -18,19 +18,51 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-python -m pytest tests/ -q          # Python：372 passed 为当前基线
-npm test                            # 前端：140 passed（node --test）
-cd src-tauri && cargo test          # Rust：46 passed
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
+npm test                                          # 前端：166 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：55 passed
 ```
 
-**改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust
-嵌入 exe。只改源码不构建，GUI 里看到的还是旧界面。
+⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
+Hermes 运行时 venv，不是本仓 venv。必须用 `./.venv/Scripts/python.exe`。
+
+### 构建：用户自己跑，助手不要绕
+
+**构建由仓库主自己执行**：`npm run tauri build`（PowerShell，仓库根）。
+助手改完代码只需说一句「可以构建了」，**不要**自建隔离 target 目录、不要写替换/重建
+脚本、不要试图「在不影响会话的情况下构建」——内核 `converter.py` 是 GUI 的子进程，
+任何绕过方案都会弄断正在进行的对话链路。
+
+若确需命令行（仅限明确要求时）：
 
 ```bash
 npm run build && cd src-tauri && cargo tauri build --no-bundle
 ```
 
-构建前先退 GUI：内核 `converter.py` 是 GUI 托管启动的子进程，退 GUI 会连带结束它。
+**绝不跑裸 `cargo build --release`**：`custom-protocol` feature 只有 tauri CLI 会带上，
+plain cargo 会**静默产出无前端的空壳 exe**（15,572,992 字节 vs 正确约 15,663,616）
+且照常打印 "Built application at..."，不报错。正确产物尺寸随功能增长，判据不是死记数字。
+
+**验证产物真伪的方法**（构建日志说成功不算数）：
+
+```python
+d = open("src-tauri/target/release/workbuddy2api.exe","rb").read()
+len(d)                                                        # 尺寸应显著大于空壳 15,572,992
+d.count(b"index-XXXXXX.js")                                   # 从 dist/assets 取实际文件名，命中=前端已内嵌
+d.count(b"hermes_proxy_base_url")                             # Rust 侧 ASCII 标记物
+```
+
+⚠️ 前端中文文案在 bundle 里被 **brotli 压缩**，在 exe 内搜不到不等于没进包——
+要验前端文案，请读 `dist/assets/*.js`。Rust 侧字符串（如字段名）不压缩，可直接搜。
+另：**不能用资源 hash 判新鲜度**——`vite.config.js` 把 git hash + 构建日期注入
+fingerprint，每次构建都会漂移。
+
+判断跑的是不是新版本：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='workbuddy2api.exe'" |
+  Select-Object ProcessId, CreationDate   # CreationDate 晚于 exe mtime = 正在跑新版本
+```
 
 ## 3. 会让当前聊天断掉的操作（重要）
 
@@ -93,6 +125,30 @@ workbuddy2api.exe (GUI)
   测试会校验每个条目都有声明来源。**不要**把它改成强制覆盖上游（会压住上游
   日后新增的档位），也不要退化成「非空即上游」（半截矩阵会压回已确认能力）。
   Rust 侧配套单测在 `billing.rs::reasoning_matrix_tests`。
+- **Hermes 接入检测（`agents.rs`，2026-09-16 重写，改动必读）**：
+  判据**不是**「顶层 `model` 段指向本工具」，而是「Hermes 配置里**任意落点**出现指向本工具的反代地址」。
+  扫描四个落点：顶层 `model` / `providers.<name>` / `model_aliases.<alias>` / `custom_providers[]`。
+  曾因只读顶层 `model.provider` 名字去 `providers` 找同名键，而用户实际把反代登记在
+  `providers.workbuddy2api`（`model.provider` 指向别的订阅）→ 明明在用却显示「未配置」。
+
+  ⚠️ **`is_our_proxy_url(url, our_port)` 必须比对端口**：本机常有多个回环 `/v1` 服务
+  （实测踩到 CPA 网关 `18080`），仅凭「回环 + 路径含 `/v1`」会把别人的服务认成自己。
+  端口取自 `crate::load_app_config()`（可配置），**不得写死 8787**。
+  返回给前端的字段是 **`hermes_proxy_base_url`**（serde snake_case）——
+  前端 `src/agents.js` 读它时**不能**写成 camelCase，否则静默 `undefined`（本轮踩过）。
+  契约锁定：`tests/test_hermes_detection_contract.test.js` + `agents.rs` 内 9 条 Rust 单测。
+
+- **`model_list_mode` 开关的作用域（别把它当成万能的）**：
+  本开关**只改变内核向客户端暴露的清单**（`/v1/models`），**管不到客户端自己写死的模型表**。
+  典型困惑：用户选了「仅展示可用模型」，但 Hermes 模型选择器里仍有需授权模型——
+  原因是 Hermes 的自定义端点勾了 `discover_models: false`，它改用自己 `config.yaml` 里
+  写死的 `models:` 列表（42 项含 7 个 GPT），从不请求本清单。内核侧过滤实际是生效的
+  （实测 `/v1/models` 返回 36 项、gpt 系列 0 项）。
+  → 客户端须打开「Discover models」改为实时探测，改后需重启客户端。
+  设置页已在该开关下方加动态说明（`MODEL_LIST_MODE_NOTES` + `renderModelListModeNote`），
+  文案**刻意不写**「选此项即可让客户端隐藏模型」这类误导性承诺。
+  契约锁定：`tests/test_model_list_mode_client_note.test.js`。
+
 - **「默认」档语义 = 透传，不是本地默认值**：控制台思考强度选「默认」时
   `model_settings.json` 里不写 `reasoning_effort` 键，`converter.py` 因而不改写
   请求体，客户端（如 Hermes `agent.reasoning_effort=ultra`）下发什么就发什么。
