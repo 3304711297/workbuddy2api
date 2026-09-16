@@ -19,8 +19,8 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：166 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：55 passed
+npm test                                          # 前端：180 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：72 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -140,6 +140,35 @@ workbuddy2api.exe (GUI)
   返回给前端的字段是 **`hermes_proxy_base_url`**（serde snake_case）——
   前端 `src/agents.js` 读它时**不能**写成 camelCase，否则静默 `undefined`（本轮踩过）。
   契约锁定：`tests/test_hermes_detection_contract.test.js` + `agents.rs` 内 10 条 Rust 单测。
+
+- **应用更新（`commands/update.rs` + `scripts/app-update/windows.ps1`，2026-09-16 重写，改动必读）**：
+  检测与「应用更新」的机制对齐 Hermes Desktop，**不使用 GitHub Release 发版**。
+
+  **① 检测 = 被动 API 比对 commit，不做 `git fetch` 轮询**：
+  多客户端反复 fetch 会拖垮仓库并触发 GitHub 429。正确口径是
+  `GET /repos/{slug}/commits/{branch}` + `Accept: application/vnd.github.sha`
+  取 40 字节远端 tip SHA，与本机 HEAD（读 `.git/HEAD`，不依赖 PATH 上有 git）比对；
+  **仅当两者不同**才 `GET /compare/{head}...{tip}` 取 `ahead_by`（= 落后数）与 commit 列表。
+  ⚠️ **`ahead_by == 0` 但 tip 不同 ⇒ 本地领先，必须判「无更新」**——报成「有更新」会诱导
+  用户用远端覆盖掉自己的提交，这是本模块最危险的误报。`compare` 失败（限流/本地独有提交 404）
+  时 `behind = None`，UI 显示「有更新、数量未知」，**绝不编造数字**。
+  结果缓存 TTL：成功 24h / 失败 1h，**以「本地 HEAD + 分支」为键**——更新或切分支后
+  立即失效，不会残留假的「有更新」。
+
+  **② 应用 = 交接式**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
+  `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → 脚本等 GUI 消失后
+  `git stash`（若有改动）→ `git fetch` + `git merge --ff-only` → `npm run build`
+  → **`cargo tauri build --no-bundle`** → 校验产物（尺寸 > 空壳基准 + `index-*.js` 已内嵌）
+  → 拉起新 exe；任一步失败则 `git reset --hard` 回滚到更新前 commit 并弹失败框。
+  ⚠️ 脚本内**必须**用 `cargo tauri build`，理由同第 2 节（裸 cargo 会产出空壳）；
+  `--ff-only` 不可改成 merge/`reset --hard origin`（会覆盖或丢失用户提交）。
+  ⚠️ 更新必然中断 8787 反代与进行中的会话：`converter.py` 是 GUI 的子进程，GUI 退出时随之结束，
+  更新完成后由脚本拉起新 GUI 恢复。这是该功能的正常代价，不是缺陷。
+
+  **③ 契约**：前端字段名走 **snake_case**（`update_available` / `current_sha` / `target_sha` /
+  `behind` / `supported` / `dirty` / `commits`），写驼峰会静默 `undefined`；
+  远端 commit 标题**必须**用 `textContent` 渲染（不可信输入，防注入）。
+  改动检测/应用/弹窗任一环都要同步 `tests/test_app_update_contract.test.js`。
 
 - **`model_list_mode` 开关的作用域（别把它当成万能的）**：
   本开关**只改变内核向客户端暴露的清单**（`/v1/models`），**管不到客户端自己写死的模型表**。

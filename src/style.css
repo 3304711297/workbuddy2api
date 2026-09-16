@@ -1360,3 +1360,157 @@ body {
   .update-entry { justify-content: center; padding: 8px; }
   .update-entry span:last-child { display: none; }
 }
+
+/* --------------------------------------------------------------------------
+   更新弹窗（对齐 Hermes Desktop：纵向居中布局、圆形图标、分组变更列表）
+   -------------------------------------------------------------------------- */
+.update-card {
+  position: relative;
+  width: min(420px, 92vw);
+  padding: 28px 24px 22px;
+}
+.update-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.update-close:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+.update-close[hidden] { display: none; }
+
+.update-status-view,
+.update-available-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+/* hidden 属性会被上面的 flex 覆盖，必须显式压回 */
+.update-status-view[hidden],
+.update-available-view[hidden] { display: none !important; }
+
+.update-status-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: var(--primary);
+  background: var(--primary-subtle);
+  border-radius: 50%;
+  flex: none;
+}
+.update-status-icon.spin { animation: update-spin 1.1s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+
+.update-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+.update-subtitle {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.update-detail {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 0;
+  word-break: break-all;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.update-detail[hidden] { display: none; }
+
+.update-changelog {
+  width: 100%;
+  margin-top: 6px;
+  text-align: left;
+  display: grid;
+  gap: 12px;
+}
+.update-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 6px;
+}
+.update-group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.update-group-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+/* 与 Hermes 的琥珀色圆点一致：用 warning 语义色，两种主题下都保持足够对比 */
+.update-group-list li::before {
+  content: '';
+  flex: none;
+  width: 4px;
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.update-more {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0;
+}
+.update-more[hidden] { display: none; }
+
+.update-actions {
+  width: 100%;
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.update-actions .btn-lg { width: 100%; }
+/* 次要操作：无边框纯文本按钮（本仓库无现成同类类名，故用专属类，避免误用不存在的样式） */
+.update-later {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.update-later:hover { color: var(--text-primary); }
+/* 键盘焦点必须可见：上方无边框样式不能把焦点环一并抹掉 */
+.update-later:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.update-close:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.update-actions button[hidden] { display: none; }
+

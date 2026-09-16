@@ -934,6 +934,47 @@ print(response.choices[0].message.content)</code></pre>
     </main>
   </div>
 
+  <!-- 更新弹窗（对齐 Hermes Desktop：图标 + 标题 + 副标题 + 分组变更列表 + 立即更新/稍后再说） -->
+  <div id="update-overlay" class="modal-overlay" hidden>
+    <div class="modal-card update-card">
+      <button id="update-close" class="update-close" type="button" aria-label="关闭">×</button>
+
+      <!-- 检测中 / 已是最新 / 检查失败 / 不可自更新：单图标状态视图 -->
+      <div id="update-status-view" class="update-status-view" hidden>
+        <div class="update-status-icon" id="update-status-icon" aria-hidden="true"></div>
+        <h3 id="update-status-title" class="update-title"></h3>
+        <p id="update-status-body" class="update-subtitle"></p>
+        <p id="update-status-detail" class="update-detail mono" hidden></p>
+        <div class="update-actions">
+          <button id="update-status-action" class="btn btn-primary btn-sm" hidden></button>
+        </div>
+      </div>
+
+      <!-- 有可用更新：变更列表 + 两个操作 -->
+      <div id="update-available-view" class="update-available-view" hidden>
+        <div class="update-status-icon" aria-hidden="true">⬆</div>
+        <h3 id="update-title" class="update-title">有可用更新</h3>
+        <p id="update-subtitle" class="update-subtitle">新版 WorkBuddy2API 已可安装。</p>
+
+        <div id="update-changelog" class="update-changelog"></div>
+        <p id="update-more" class="update-more" hidden></p>
+
+        <div class="update-actions">
+          <button id="update-now" class="btn btn-primary btn-lg">立即更新</button>
+          <button id="update-later" class="update-later" type="button">稍后再说</button>
+        </div>
+      </div>
+
+      <!-- 更新已发起：应用即将退出的说明（不提供关闭） -->
+      <div id="update-applying-view" class="update-status-view" hidden>
+        <div class="update-status-icon spin" aria-hidden="true">◐</div>
+        <h3 class="update-title">正在更新</h3>
+        <p class="update-subtitle">更新程序将在本窗口关闭后接管，重建完成后会自动重新打开应用。更新期间请勿手动启动应用。</p>
+        <p class="update-detail mono" id="update-applying-log"></p>
+      </div>
+    </div>
+  </div>
+
   <!-- 通用确认弹窗（Promise 风格，替代原生 confirm；遮罩模式与 model-edit-overlay 一致） -->
   <div id="confirm-overlay" class="modal-overlay" hidden>
     <div class="modal-card">

@@ -156,12 +156,24 @@ test('openExternal 实施协议白名单、不抛错、window.open 带 noopener'
   assert.ok(/noopener/.test(fn), 'window.open 兜底缺 noopener,noreferrer');
 });
 
-test('update-check 不再自行调 shell.open（须经 openExternal 的协议校验）', () => {
+test('update-check 不得再依赖 GitHub Release（本项目用 commit 比对发版）', () => {
+  // 旧实现点击更新是「打开 Release 发布页」。现改为 commit 比对 + 应用内自更新，
+  // 因此代码里不得再残留 release_url / openExternal 这条已废弃路径。
+  assert.ok(
+    !/release_url/.test(UPDATE),
+    'update-check.js 仍引用 release_url：Release 路径已废弃（本项目不用 Release 发版）'
+  );
+  assert.ok(
+    !/openExternal/.test(UPDATE),
+    'update-check.js 仍在打开外部发布页：应改为应用内自更新弹窗'
+  );
   assert.ok(
     !/__TAURI__[^\n]*shell[^\n]*\.open/.test(UPDATE),
-    'update-check.js 仍直接调 shell.open，绕过 openExternal 的应用层校验'
+    'update-check.js 仍直接调 shell.open，绕过应用层校验'
   );
-  assert.ok(/openExternal/.test(UPDATE), 'update-check.js 未改为走 openExternal');
+  // 新的应用内更新链路必须齐备
+  assert.ok(/apply_app_update/.test(UPDATE), 'update-check.js 未调用 apply_app_update（无法应用更新）');
+  assert.ok(/check_app_update/.test(UPDATE), 'update-check.js 未调用 check_app_update');
 });
 
 test('Mock invoke 不得把含密钥的实参打进控制台', () => {
