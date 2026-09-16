@@ -478,9 +478,27 @@ fn api_key_of(raw: &str) -> Option<String> {
     }
 }
 
-/// 从磁盘配置读取客户端密钥（每次现读，与 proxy_start 同源）。
+/// 解析转发命令应携带的客户端密钥（每次现读）。
+///
+/// 优先级必须与内核真源一致：**GUI 显式配置 > 继承环境变量 > 无鉴权**。
+/// 内核的 `api_key` 取自 `_env_compat("KEY")`（即 `WORKBUDDY2API_KEY`，回退
+/// `CODEBUDDY2OPENAI_KEY`），而 `proxy_start` 仅在 GUI 密钥非空时才注入该环境变量、
+/// 否则**不清除**父进程的 —— 所以「GUI 里没填密钥、但父进程设了环境变量」时内核
+/// 会启用鉴权。只读 GUI 配置会让转发命令在该路径下 401（与本次修复的缺陷同源）。
+///
+/// ⚠️ 环境变量旧名以 Python 侧 `_env_compat` 为准（`CODEBUDDY2OPENAI_KEY`，
+/// 由 tests/test_env_compat.py 锁定）。shared.rs 的 `env_compat` 用的是 Go 时代
+/// 遗留的 `C2O_` 前缀，与内核不一致，此处不采用（避免又一处静默偏差）。
+fn resolve_api_key(gui_key: &str, env_key: Option<String>) -> Option<String> {
+    api_key_of(gui_key).or_else(|| env_key.and_then(|v| api_key_of(&v)))
+}
+
+/// 从磁盘配置 + 环境变量读取客户端密钥（与内核 `--api-key` 的解析口径对齐）。
 fn configured_api_key() -> Option<String> {
-    api_key_of(&crate::load_app_config().api_key)
+    let env_key = std::env::var("WORKBUDDY2API_KEY")
+        .ok()
+        .or_else(|| std::env::var("CODEBUDDY2OPENAI_KEY").ok());
+    resolve_api_key(&crate::load_app_config().api_key, env_key)
 }
 
 /// 按配置给转发请求附加 `Authorization: Bearer <key>`（未配置时原样返回）。
@@ -1284,6 +1302,28 @@ mod test_chat_probe_tests {
         assert_eq!(api_key_of(""), None);
         assert_eq!(api_key_of("   "), None);
         assert_eq!(api_key_of("\t\n"), None);
+    }
+
+    #[test]
+    fn api_key_resolution_matches_documented_precedence() {
+        // 密钥优先级（AGENTS.md 明示且有既有测试锁定）：GUI 显式配置 > 继承环境变量 > 无鉴权。
+        // 内核真源是 WORKBUDDY2API_KEY（`--api-key` 的默认值取自 _env_compat("KEY")），
+        // 且 GUI 在密钥为空时**不清除**父进程环境变量 → 「GUI 里没填密钥却要求鉴权」是既有语义。
+        // 若只读 GUI 配置，这条路径下转发命令仍会 401 —— 与已修复的同类缺陷同源。
+        // GUI 配置胜出（即便环境也设了）
+        assert_eq!(
+            resolve_api_key("gui-key", Some("env-key".to_string())).as_deref(),
+            Some("gui-key")
+        );
+        // GUI 留空 → 回退继承的环境变量（含项目改名前的旧名）
+        assert_eq!(
+            resolve_api_key("", Some("env-key".to_string())).as_deref(),
+            Some("env-key")
+        );
+        assert_eq!(resolve_api_key("   ", Some("env-key".to_string())).as_deref(), Some("env-key"));
+        // 两者皆空 → 不鉴权（回环默认放行）
+        assert_eq!(resolve_api_key("", None), None);
+        assert_eq!(resolve_api_key("  ", Some("  ".to_string())), None);
     }
 
     #[test]

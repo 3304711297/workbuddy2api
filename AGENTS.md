@@ -20,7 +20,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ```bash
 python -m pytest tests/ -q          # Python：372 passed 为当前基线
 npm test                            # 前端：140 passed（node --test）
-cd src-tauri && cargo test          # Rust：43 passed
+cd src-tauri && cargo test          # Rust：44 passed
 ```
 
 **改前端（`index.html` / `src/*.js`）后必须重建才生效**——前端打包进 `dist/`，再由 Rust
@@ -262,6 +262,16 @@ workbuddy2api.exe (GUI)
   ③ 两者皆无 → 不鉴权（回环默认）。
   刻意**不**做「GUI 空密钥时清除环境变量」：那会破坏上述高级配置用法，且
   ① 已保证无覆盖风险。契约锁定：`tests/test_secret_precedence.test.js`。
+  **GUI 侧转发命令的密钥解析必须复刻以上三档**（`proxy.rs::resolve_api_key`）：
+  `proxy_rate_limit` / `proxy_checkin_claim` / `proxy_checkin_status` /
+  `proxy_test_chat` 向本机内核转发时，密钥需按「GUI 配置 > 环境变量 > 无」解析。
+  只读 GUI 配置会在 ② 路径（GUI 留空 + 父进程有环境变量）下 401 —— 而这正是
+  「GUI 里看不到密钥、内核却要求鉴权」的困惑场景。Rust 单测：
+  `proxy.rs::api_key_resolution_matches_documented_precedence`。
+  ⚠️ **环境变量旧名以 Python 侧 `_env_compat` 为准：`CODEBUDDY2OPENAI_KEY`**
+  （由 `tests/test_env_compat.py` 锁定）。`shared.rs::env_compat` 用的是 Go 时代
+  遗留的 `C2O_` 前缀，与内核**不一致**，故 `resolve_api_key` 刻意不经过它 —— 
+  照抄 `env_compat` 会让②路径又静默漏配。若要统一前缀，须先对齐两侧并同步改测试。
 - **结构化日志透传（AppConfig.log_level / log_payloads）**：
   不传 `--log` 时内核 `_log()` 因 `log_path` 为空**直接丢弃**全部结构化行（请求摘要/耗时/错误详情），日志页只能看到 uvicorn 原始 stdout——所以 `proxy_start` 必须显式传 `--log` 指向 `converter.log`。
   `proxy_get_logs` 合并读取结构化日志与 stdout（各 48KB / 32KB 配额），只读其中一个会让用户看不到级别调整效果；`proxy_clear_logs` 必须同时清两个文件，否则清空后旧日志仍显示。
