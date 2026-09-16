@@ -31,6 +31,12 @@ test('调试 Tab：debug.js 导出加载/重放/导出能力', () => {
   }
   assert.ok(src.includes('snapshots_list'), 'debug.js 未调用 snapshots_list');
   assert.ok(src.includes('snapshot_replay'), 'debug.js 未调用 snapshot_replay');
+  // 载荷键名必须是 camelCase（Tauri 命令参数默认 ArgumentCase::Camel）；
+  // 写 api_key 时 Rust 的 Option<String> 会静默收到 None，配了客户端密钥后重放必 401。
+  const call = /invokeTauri\(\s*'snapshot_replay'\s*,\s*\{([^}]*)\}/.exec(src);
+  assert.ok(call, 'debug.js 未找到 snapshot_replay 调用');
+  assert.ok(/\bapiKey\b/.test(call[1]), 'snapshot_replay 载荷必须用 apiKey');
+  assert.ok(!/\bapi_key\s*:/.test(call[1]), 'snapshot_replay 载荷不得使用 api_key');
 });
 
 test('快照开关进设置契约：payload 与脏合并守卫', () => {

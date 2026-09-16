@@ -90,7 +90,7 @@ export async function replaySnapshot(id) {
         if (typeof cfg.api_key === 'string') apiKey = cfg.api_key;
       }
     } catch { /* 读不到设置则用默认值继续 */ }
-    const r = await invokeTauri('snapshot_replay', { id: s.id, port, api_key: apiKey });
+    const r = await invokeTauri('snapshot_replay', { id: s.id, port, apiKey: apiKey });
     if (result) {
       result.style.display = '';
       result.textContent = `HTTP ${r.status} · ${r.latency_ms} ms\n${r.excerpt || '（空响应）'}`;

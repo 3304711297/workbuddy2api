@@ -227,7 +227,12 @@ workbuddy2api.exe (GUI)
   已在 `converter.py`、`src/accounts.js`、`token-stats` 插件落地：自然日（UTC+8）今日用量（`reqsToday`/`tokensToday`/`err429_today`）优先展示，兼容 5h/24h；动态感知 `23:00–08:00` 免费时段并打上「🌙 夜间限免中」徽章。提交 `83ef9e2`（c2o 仓） / `894f500`（hermes 仓 hermes 分支）。
 - **用量明细契约（usage_events，对标 EasyCLIProxyAPI v0.2.90）**：
   `UsageRecord` 必须完整解析 `converter.py` 写入的 JSONL 字段（`model`/`error`/`retry_count`/`retry_reason`/`requested_model`/`actual_model`/`fallback_reason`）——少解析字段会让前端明细缺列而不报错。
-  `usage_events(model, status, since_ms, page, page_size)` 契约：筛选在 Rust 侧完成（`filter_usage_records`），**最新在前**排序后再分页；`analysis.models` 基于**过滤后全集**计算（不受分页影响），否则分组统计与筛选口径会自相矛盾。
+  ⚠️ **IPC 键名必须是 camelCase**（下同）：`#[tauri::command]` 未声明 `rename_all` 时，
+  tauri-macros 默认 `ArgumentCase::Camel` + `key.to_lower_camel_case()`，Rust 形参
+  `since_ms`/`page_size` 对应的前端键是 **`sinceMs`/`pageSize`**。写成 snake_case 不会报错——
+  形参是 `Option<_>`，缺键即静默 `None`（曾致时间范围筛选完全失效）。本文件早期版本把 Rust 侧
+  形参名当成 IPC 键名写进文档，是这两处缺陷的引入源，勿再照抄形参名。
+  `usage_events(model, status, sinceMs, page, pageSize)` 契约：筛选在 Rust 侧完成（`filter_usage_records`），**最新在前**排序后再分页；`analysis.models` 基于**过滤后全集**计算（不受分页影响），否则分组统计与筛选口径会自相矛盾。
   分页默认 50/页；`page`/`page_size` 为 0 时按 1 处理，越界页返回空列表但 `total`/`total_pages` 如实上报（前端据此禁用按钮）；空输入时 `total_pages` 仍为 1，避免前端除零。
   前端 `usage.js` 明细与汇总各自持有独立请求序号（`_usageRequestSeq` / `_usageEventsSeq`）——共用一个会让两个并行请求互相丢弃。
 - **客户端鉴权密钥（AppConfig.api_key，对标 EasyCLIProxyAPI ApiAccessPage）**：
@@ -268,7 +273,7 @@ workbuddy2api.exe (GUI)
   快照腿独立于用量开关（`usage_log` 为空仍落快照）。文件 `%LOCALAPPDATA%/workbuddy2api/usage/snapshots.jsonl`
   由 `proxy_start` 以 `--snapshots-log` 注入；超 `2*keep` 行轮转保留 `keep` 条（默认 200）。
   快照默认开启（含完整 prompt 明文，Token/Key 已脱敏）：关了调试 Tab 即无新数据，别误报成采集 bug。
-  重放（`snapshot_replay`）只接受本机 `/v1/` 规范路径（禁 `..`/query/反斜杠/双斜杠，防篡改快照打站外），调用方传 `port` + `api_key`（snake_case），
+  重放（`snapshot_replay`）只接受本机 `/v1/` 规范路径（禁 `..`/query/反斜杠/双斜杠，防篡改快照打站外），调用方传 `port` + **`apiKey`**（camelCase——Rust 形参名是 `api_key`，但 IPC 键按 tauri-macros 默认驼峰化为 `apiKey`；曾因写成 snake_case 导致配了密钥后重放必 401），
   前端复制 curl 时密钥只放 `YOUR_KEY` 占位。
   已知限制（不修）：`snapshots_clear`（Rust 直接清文件）与内核追加写之间无跨进程锁，
   极端并发下可能多留/少留一行——调试记录级别的影响，不做原子替换。

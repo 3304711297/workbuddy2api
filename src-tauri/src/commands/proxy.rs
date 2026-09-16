@@ -952,6 +952,9 @@ fn aggregate_usage(records: &[UsageRecord], now_utc_ms: i64, local_midnight_ms: 
     let cur_bucket = now_utc_ms.div_euclid(HOUR_MS);
     let mut buckets = vec![0i64; 48];          // 每桶请求数
     let mut bucket_out = vec![0i64; 48];       // 每桶输出 tokens
+    let mut bucket_ok = vec![0i64; 48];        // 每桶成功数（统计卡随范围裁剪所需）
+    let mut bucket_fail = vec![0i64; 48];      // 每桶失败数
+    let mut bucket_in = vec![0i64; 48];        // 每桶输入 tokens
 
     for r in records {
         t_req += 1;
@@ -982,6 +985,8 @@ fn aggregate_usage(records: &[UsageRecord], now_utc_ms: i64, local_midnight_ms: 
             let idx = (bucket - (cur_bucket - 47)) as usize;
             buckets[idx] += 1;
             bucket_out[idx] += o;
+            if r.ok { bucket_ok[idx] += 1 } else { bucket_fail[idx] += 1 }
+            bucket_in[idx] += i;
         }
     }
 
@@ -990,6 +995,9 @@ fn aggregate_usage(records: &[UsageRecord], now_utc_ms: i64, local_midnight_ms: 
             serde_json::json!({
                 "ts": (cur_bucket - 47 + i) * HOUR_MS,
                 "requests": buckets[i as usize],
+                "ok": bucket_ok[i as usize],
+                "failed": bucket_fail[i as usize],
+                "input_tokens": bucket_in[i as usize],
                 "output_tokens": bucket_out[i as usize],
             })
         })
@@ -1476,6 +1484,18 @@ mod usage_tests {
         assert_eq!(hourly[46]["output_tokens"], 300);
         assert_eq!(hourly[0]["requests"], 0); // 空桶零填充
         assert_eq!(v["today"]["requests"], 3); // 上一小时记录（ts < h0=local_midnight）不算今天
+
+        // 桶内成功/失败/输入拆分：前端 summarizeClipped 依赖这些字段按范围裁剪统计卡
+        // （缺任一个会让「成功 N · 失败 N」静默归零，历史缺陷）。
+        assert_eq!(hourly[47]["ok"], 2); // 该桶 3 条记录里 2 条成功
+        assert_eq!(hourly[47]["failed"], 1);
+        assert_eq!(hourly[47]["input_tokens"], 10 * 3); // rec() 的 input_tokens 固定为 10/条
+        assert_eq!(hourly[46]["ok"], 1);
+        assert_eq!(hourly[46]["failed"], 0);
+        assert_eq!(hourly[46]["input_tokens"], 10);
+        assert_eq!(hourly[0]["ok"], 0); // 空桶各项零填充
+        assert_eq!(hourly[0]["failed"], 0);
+        assert_eq!(hourly[0]["input_tokens"], 0);
 
         // local_midnight 晚于该记录 → 不计 today，仍计 overall
         let v2 = aggregate_usage(&records[..1], now, h0 + 1);

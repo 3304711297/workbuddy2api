@@ -180,12 +180,12 @@ export async function loadUsageEvents(pageOverride) {
   const modelEl = document.getElementById('usage-events-model');
   const statusEl = document.getElementById('select-usage-status');
   const since = rangeToSinceMs(readUsageRange());
-  const args = { page, page_size: 50 };
+  const args = { page, pageSize: 50 };
   const model = (modelEl?.value || '').trim();
   if (model) args.model = model;
   const status = statusEl?.value || '';
   if (status) args.status = status;
-  if (since) args.since_ms = since;
+  if (since) args.sinceMs = since;
   try {
     const data = await invokeTauri('usage_events', args);
     if (seq !== _usageEventsSeq) return; // 陈旧响应丢弃

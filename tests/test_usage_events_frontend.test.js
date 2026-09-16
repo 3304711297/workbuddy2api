@@ -131,7 +131,11 @@ test('usage.js 明细分页防竞态并复用范围选择器', () => {
     'usage.js 明细分页缺少请求序号防竞态'
   );
   assert.ok(
-    USAGE_JS.includes('readUsageRange') && /rangeToSinceMs|since_ms/.test(USAGE_JS),
-    'usage.js 明细查询应复用时间范围选择器换算 since_ms'
+    USAGE_JS.includes('readUsageRange') && /rangeToSinceMs|sinceMs/.test(USAGE_JS),
+    'usage.js 明细查询应复用时间范围选择器换算 sinceMs（camelCase，Tauri IPC 键名）'
+  );
+  assert.ok(
+    !/since_ms|page_size/.test(USAGE_JS),
+    'usage.js 的 invoke 载荷不得用 snake_case 键名（Tauri 默认 camelCase，写成 snake_case 会被静默丢弃）'
   );
 });

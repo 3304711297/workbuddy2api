@@ -336,9 +336,13 @@ function renderActiveAccountAndUsage(acct, usage, rateLimit) {
     container.innerHTML = `
       <div class="card" style="text-align: center; padding: 36px 20px;">
         <p class="muted" style="font-size: 15px; margin-bottom: 14px;">当前尚未登录任何账号</p>
-        <button class="btn btn-primary" onclick="document.querySelector('.nav-item[data-tab=\\'oauth\\']').click()">立即授权绑定新账号</button>
+        <button id="btn-empty-goto-oauth" class="btn btn-primary">立即授权绑定新账号</button>
       </div>
     `;
+    // CSP（script-src 'self'）下内联 onclick 会被阻断，必须用监听器绑定
+    container.querySelector('#btn-empty-goto-oauth')?.addEventListener('click', () => {
+      document.querySelector('.nav-item[data-tab="oauth"]')?.click();
+    });
     return;
   }
 
