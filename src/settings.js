@@ -61,6 +61,20 @@ export function initTheme() {
 // ---------------------------------------------------------------------------
 // 设置页面逻辑
 // ---------------------------------------------------------------------------
+// 模型清单模式的「客户端侧」说明：本开关只影响内核向客户端暴露的清单，
+// 管不到客户端自己写死的模型表 —— 这是真实踩到过的困惑点（已选「仅展示可用」
+// 但 Hermes 里仍有需授权模型）。提示随当前选择变化，避免用户在错误的开关上找原因。
+const MODEL_LIST_MODE_NOTES = {
+  available: '注意：此开关只改变内核对外提供的清单。Hermes 等客户端若在其端点配置里关闭了「Discover models」（即 discover_models: false），会改用其配置文件里写死的模型列表，此时本开关不生效 —— 需在客户端打开「Discover models」让它实时读取本清单（改后需重启客户端）。',
+  all: '提示：选「全部展示」时需授权模型会带 🔒 标记一并下发，供客户端自行选择是否隐藏。',
+};
+
+function renderModelListModeNote(mode) {
+  const el = document.getElementById('model-list-mode-client-note');
+  if (!el) return; // DOM 缺失不得硬崩（与本文件其它处同约定）
+  el.textContent = MODEL_LIST_MODE_NOTES[mode] || MODEL_LIST_MODE_NOTES.all;
+}
+
 export function initSettings() {
   const inputPort = document.getElementById('input-port');
   const btnSave = document.getElementById('btn-save-port');
@@ -258,6 +272,7 @@ export function initSettings() {
   selectModelListMode?.addEventListener('change', async (e) => {
     const v = e.target.value === 'available' ? 'available' : 'all';
     modelListModeCache = v;
+    renderModelListModeNote(v);
     if (await persistSettings({ model_list_mode: v })) {
       showToast(v === 'available' ? '已切换为仅展示可用模型（Hermes 等客户端刷新模型列表后生效）' : '已切换为全量展示（含需授权模型标记）', 'success');
     }
@@ -444,6 +459,7 @@ export function initSettings() {
         if (selectModelListMode) {
           selectModelListMode.value = cfg.model_list_mode === 'available' ? 'available' : 'all';
           modelListModeCache = selectModelListMode.value;
+          renderModelListModeNote(modelListModeCache);
         }
         // 客户端鉴权密钥回读：null/undefined 都归一到空串
         if (inputApiKey) {

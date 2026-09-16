@@ -587,6 +587,11 @@ print(response.choices[0].message.content)</code></pre>
                 <option value="available">仅展示可用模型（剔除需授权项）</option>
               </select>
               <p class="muted field-hint">内核热读生效，无需重启服务；Hermes 等客户端刷新模型列表后即可看到变化。不可用模型由运行时学习（上游 11102）与预标记共同判定。</p>
+              <!-- 客户端侧提示：本开关只影响内核向客户端暴露的清单，管不到客户端自己写死的模型表。
+                   真实困惑场景：已选「仅展示可用」，但 Hermes 模型选择器里仍有需授权模型 —— 原因是
+                   Hermes 的自定义端点勾了「Discover models」时用本清单，未勾时用其配置文件里写死的
+                   models 列表（discover_models: false）。此提示按当前选择动态变化，避免误导。 -->
+              <p class="muted field-hint" id="model-list-mode-client-note"></p>
             </div>
 
             <div class="divider"></div>
