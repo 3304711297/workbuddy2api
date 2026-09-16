@@ -20,7 +20,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
 npm test                                          # 前端：186 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：73 passed
+cd src-tauri && cargo test --quiet                # Rust：75 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是

@@ -540,13 +540,64 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
-/// 优先 pwsh（PowerShell 7+，版本无关且不受 Store 别名影响），回退 Windows PowerShell 5.1。
+/// 解析用于运行更新脚本的 PowerShell 可执行文件。
+///
+/// 优先级：`WORKBUDDY2API_POWERSHELL` 显式指定 > PATH 上的 pwsh（7+，不受 Store 别名影响）
+/// > 系统自带 Windows PowerShell 5.1（`%SystemRoot%\System32\WindowsPowerShell\v1.0\`）。
+///
+/// ⚠️ 5.1 回退不可省：pwsh 是独立安装项，干净 Windows 上未必存在；
+/// 而更新脚本本身已兼容 5.1（无 BOM 写入、避免 5.1 不支持的语法）。
+/// 只返回 "pwsh" 会让缺 pwsh 的机器在 `cmd.spawn()` 处以
+/// 「无法启动更新程序：系统找不到指定的文件」失败，用户完全无从判断原因。
 #[cfg(target_os = "windows")]
 fn resolve_powershell() -> String {
     if let Some(p) = env_compat("POWERSHELL").filter(|p| Path::new(p).exists()) {
         return p;
     }
+    // PATH 上能找到 pwsh 就用它（版本更新、行为更一致）
+    if which("pwsh").is_some() {
+        return "pwsh".to_string();
+    }
+    // 回退系统自带 5.1：路径由 %SystemRoot% 派生，不硬编码盘符
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let ps51 = Path::new(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if ps51.exists() {
+        return ps51.to_string_lossy().to_string();
+    }
+    // 都找不到仍返回 "pwsh"，让调用方的 spawn 报错带上原始信息
     "pwsh".to_string()
+}
+
+/// 在 PATH 中查找可执行文件（仅 Windows）。
+///
+/// 之所以不用 `std::process::Command::new("pwsh").arg("--version")` 探测：
+/// 那会真的启动一个进程（几十到上百毫秒，且可能被 Store 别名弹窗干扰）。
+/// 这里只做「PATH 中是否存在该文件」的纯查询。
+#[cfg(target_os = "windows")]
+fn which(exe: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .map(|v| v.split(';').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_else(|_| vec![".COM".into(), ".EXE".into(), ".BAT".into(), ".CMD".into()]);
+
+    for dir in std::env::split_paths(&path_var) {
+        // 先试原名，再按 PATHEXT 补后缀（pwsh.exe / pwsh.cmd 等）
+        let direct = dir.join(exe);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        for ext in &exts {
+            let candidate = dir.join(format!("{exe}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// 读取更新编排脚本写入的阶段状态（供前端轮询显示实时进度）。
@@ -850,7 +901,7 @@ mod tests {
     fn state_parsing_tolerates_utf8_bom() {
         // Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，
         // serde_json 遇到 BOM 会直接失败 —— 而 app_update_state 的容错会把
-        // 解析失败降级成 None，于是整条进度显示静默失效（用户只看到黑屏）。
+        // 解析失败降级成 None，于是整条进度显示静默失效（用户仍只看到黑屏）。
         // 这里锁定「剥掉 BOM 后必须能解析出各字段」。
         let body = r#"{"phase":"building","message":"正在编译应用","failureKind":"","detail":"","updatedAt":1789573868187,"pid":2976}"#;
         let with_bom = format!("\u{feff}{body}");
@@ -870,5 +921,41 @@ mod tests {
             "正在编译应用"
         );
         assert_eq!(value.get("updatedAt").unwrap().as_i64().unwrap(), 1789573868187);
+    }
+
+    #[test]
+    fn resolve_powershell_falls_back_to_windows_powershell() {
+        // 文档承诺「回退 Windows PowerShell 5.1」，实现必须真的做到：
+        // pwsh 是独立安装项，干净 Windows 上未必存在；只返回 "pwsh" 会让
+        // 那些机器在 spawn 处以「系统找不到指定的文件」失败，用户无从判断原因。
+        let resolved = resolve_powershell();
+        assert!(!resolved.is_empty(), "解析结果不得为空");
+
+        // 本机（CI 与本机）至少存在系统自带 5.1，因此结果必须指向一个真实文件；
+        // 若结果是无路径的 "pwsh"，则必须它在 PATH 上确实存在。
+        let path = Path::new(&resolved);
+        if path.components().count() > 1 {
+            assert!(
+                path.is_file(),
+                "resolve_powershell 返回了带路径但不存在的文件：{resolved}"
+            );
+        } else {
+            assert!(
+                which(&resolved).is_some(),
+                "resolve_powershell 返回了裸命令名 {resolved}，但 PATH 上找不到它"
+            );
+        }
+    }
+
+    #[test]
+    fn which_finds_existing_and_rejects_missing() {
+        // 纯 PATH 查询：找到的必须是真实文件，找不到的必须返回 None
+        if let Some(found) = which("pwsh") {
+            assert!(found.is_file(), "which 返回了不存在的路径：{}", found.display());
+        }
+        assert!(
+            which("definitely-not-a-real-exe-9f3a2b").is_none(),
+            "which 对不存在的程序返回了 Some"
+        );
     }
 }
