@@ -25,7 +25,11 @@
 
   --text-primary: #f8fafc;
   --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  /* 次要文字：需在最坏深底（卡片 #181c24）上达 WCAG AA 小字 4.5:1。
+     #64748b 仅 3.59:1——审计发现它名下 8 个使用点全部不达标。
+     取 #77879d = 4.66:1，同时仍明显暗于 --text-secondary 以保持视觉层级。
+     契约锁定：tests/test_text_contrast_contract.test.js（改值会重算，不锁具体色号）。 */
+  --text-muted: #77879d;
 
   /* 组件级扩展变量：原散落各处的硬编码深色统一收口，浅色主题在 [data-theme="light"] 中整体覆盖 */
   --bg-header: rgba(18, 21, 27, 0.4);          /* 顶栏毛玻璃底 */
@@ -97,7 +101,10 @@
 
   --text-primary: #1f2937;
   --text-secondary: #475569;
-  --text-muted: #64748b;
+  /* 浅色主题次要文字：需在最坏浅底（侧栏 #eff1ed）上达 4.5:1。
+     #64748b 仅 4.19:1（侧栏/内容头两处不达标）。取 #5d6b7d = 4.78:1，
+     仍明显浅于 --text-secondary 以保持层级。 */
+  --text-muted: #5d6b7d;
 
   --bg-header: rgba(246, 247, 245, 0.82);
   --bg-btn-secondary: #f3f4f1;
@@ -1172,7 +1179,7 @@ body {
 /* 自动滚动开关：结构上是 <button>（可 Tab 到达、aria-pressed 报状态），但外观必须与该行
    原来的提示文字完全一致，故做按钮复位。
    ⚠️ 顺序敏感：本条必须位于 .log-console-hint 之前——两者同为单类选择器（0-1-0），
-   靠源码顺序决胜，让随后的 .log-console-hint 覆盖回 11px / #64748b；若放在其后，
+   靠源码顺序决胜，让随后的 .log-console-hint 覆盖回 11px / 合规灰；若放在其后，
    `font: inherit` 会把字号顶回继承值、`color: inherit` 会把颜色顶成正文色。 */
 .log-auto-scroll-btn {
   background: none;
@@ -1186,7 +1193,9 @@ body {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
-.log-console-hint { font-size: 11px; color: #64748b; }
+/* 色值 #7c8ba1：本控制台固定黑底（header #151821 / 正文 #0b0d11），不随主题切换。
+   原 #64748b 在 #151821 上仅 3.73:1，11px 小字不达 AA；#7c8ba1 = 5.12 / 5.62:1。 */
+.log-console-hint { font-size: 11px; color: #7c8ba1; }
 /* 暂停态：灰 → 琥珀，一眼可辨（aria-pressed 由 JS 切换）。
    此处刻意用组件级的固定琥珀而非 var(--warning)：本控制台是「固定黑底终端风格，不随明暗主题切换」
    （见上方 .log-console 注释），而浅色主题的 --warning(#b45309) 在该固定黑底上仅 3.5:1、
