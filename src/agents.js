@@ -9,6 +9,7 @@ export async function loadAgentsStatus() {
   const hBadge = document.getElementById('hermes-status-badge');
   const zBadge = document.getElementById('zcode-status-badge');
   const hPath = document.getElementById('hermes-path');
+  const hProxy = document.getElementById('hermes-proxy-url');
   const zPath = document.getElementById('zcode-path');
 
   try {
@@ -17,6 +18,12 @@ export async function loadAgentsStatus() {
     // Hermes 状态（DOM 节点缺失时不得硬崩：直接对 getElementById 结果解引用，
     // 一旦 id 被改名/删除，`hPath.textContent` 会抛 TypeError 打断整个面板刷新）
     if (hPath) hPath.textContent = res.hermes_config_path || '未找到';
+    // 接入点：显示配置里实际命中的反代地址（未接入时给出明确提示）。
+    // 这条能让用户一眼看出「配置里到底认到了哪个地址」，避免出现
+    // 「我明明配了却显示未配置/指向别处」时无从判断。
+    if (hProxy) {
+      hProxy.textContent = res.hermes_proxy_base_url || (res.hermes_configured ? '已接入（地址未解析）' : '未检测到本工具地址');
+    }
     if (hBadge) {
       if (!res.hermes_installed) {
         hBadge.className = 'badge badge-stopped';
