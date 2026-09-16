@@ -262,6 +262,76 @@ test('前端必须支持接续进行中的更新（重开应用后继续显示�
 });
 
 
+test('版本比对必须用烘焙 sha，不得读工作树 HEAD', () => {
+  // 真实踩到的谎报：exe 构建自 88b0f7e，工作树已被 pull 到 d1cb787，
+  // 检测读工作树 → 与远端一致 → 报「已是最新」，而运行中的产物落后 3 个提交。
+  assert.ok(
+    /let current_sha = build_sha\(\)\.to_string\(\)/.test(updateRs),
+    'current_sha 未取自 build_sha()：读工作树会把「运行的是旧版本」谎报成「已是最新」'
+  );
+  assert.ok(
+    !/let current_sha = read_git_head/.test(updateRs),
+    'current_sha 又改回读工作树 HEAD —— 会再次谎报「已是最新」'
+  );
+  // build.rs 必须把构建提交注入二进制，并在 HEAD/分支变化时重编
+  const buildRs = readFileSync(join(root, 'src-tauri', 'build.rs'), 'utf8');
+  assert.ok(
+    /cargo:rustc-env=WORKBUDDY2API_BUILD_SHA=/.test(buildRs),
+    'build.rs 未注入构建 sha：运行时无从知道本 exe 是哪个提交构建的'
+  );
+  assert.ok(
+    /rerun-if-changed=\.\.\/\.git\/HEAD/.test(buildRs),
+    'build.rs 未在 .git/HEAD 变化时重编：新提交后 sha 会陈旧'
+  );
+});
+
+test('脚本判定「是否需要重建」必须基于运行版本，而非远端差异', () => {
+  // 工作树可能已被用户手动 pull（或上次更新中断），此时远端无新提交但
+  // 跑着的 exe 是旧的。只看远端会得出「无需重建」→ 点了更新却什么都没发生。
+  assert.ok(
+    /\$CurrentBuildSha = ''/.test(handoff),
+    '脚本未声明 CurrentBuildSha 参数（无法判断工作树与产物是否一致）'
+  );
+  assert.ok(
+    /-CurrentBuildSha/.test(updateRs),
+    'Rust 侧未把运行版本的构建提交传给脚本'
+  );
+  assert.ok(
+    /\$CurrentBuildSha -ne \$previousSha/.test(handoff),
+    '未比较「运行版本 vs 工作树」：工作树领先时会误判为无需重建'
+  );
+  assert.ok(
+    /\$needsRebuild/.test(handoff),
+    '缺少 needsRebuild 判定（重建条件不只取决于远端是否有新提交）'
+  );
+  // 拿不到构建 sha 时必须保守重建，而不是跳过
+  assert.ok(
+    /-not \$CurrentBuildSha -or \$CurrentBuildSha -eq 'unknown'[\s\S]{0,200}?\$needsRebuild = \$true/.test(handoff),
+    '构建 sha 未知时未保守重建（无 git 构建的产物会永久无法更新）'
+  );
+});
+
+test('版本指纹只含版本与提交（与 Hermes 形态一致，不含日期）', () => {
+  const vite = readFileSync(join(root, 'vite.config.js'), 'utf8');
+  assert.ok(
+    /v\$\{pkg\.version\} \$\{gitHash\}/.test(vite),
+    '指纹形态应为 `v<版本> <提交>`（与 Hermes 的 v0.21.3 784d5c3 一致）'
+  );
+  assert.ok(
+    !/buildDate|BUILD_DATE/.test(vite),
+    '指纹仍含构建日期：日期无可行动信息且随每次构建漂移，会让人误以为内容变了'
+  );
+  // 界面必须直接显示「版本 + 提交」，而不是只显示版本号
+  assert.ok(
+    /verEl\.textContent = hash \? `v\$\{ver\} \$\{hash\}`/.test(updateJs),
+    '版本标识未显示构建提交：无法一眼判断界面对应的产物是哪个提交'
+  );
+  assert.ok(
+    /__GIT_HASH__/.test(updateJs),
+    '前端未读取 __GIT_HASH__'
+  );
+});
+
 test('弹窗包含 Hermes 同款结构：变更列表 + 立即更新 + 稍后再说', () => {
   for (const id of [
     'update-overlay',

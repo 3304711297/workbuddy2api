@@ -38,6 +38,13 @@
 
 .PARAMETER StatePath
     阶段/进度状态文件（JSON）。GUI 轮询它显示实时进度。
+
+.PARAMETER CurrentBuildSha
+    发起更新的 GUI **自身**的构建提交短 sha。
+
+    ⚠️ 判定「是否需要重建」必须用它，而不是工作树 HEAD：本项目源码留在检出目录，
+    工作树会被 pull 推进到最新，而跑着的 exe 仍是旧提交产物。只看工作树会得出
+    「已是最新，无需重建」→ 用户点了更新却什么都没发生（真实踩到过）。
 #>
 [CmdletBinding()]
 param(
@@ -45,7 +52,8 @@ param(
     [string]$Branch = 'main',
     [Parameter(Mandatory = $true)][int]$GuiPid,
     [string]$LogPath,
-    [string]$StatePath
+    [string]$StatePath,
+    [string]$CurrentBuildSha = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -235,25 +243,50 @@ try {
     }
 
     $targetSha = (& git rev-parse "origin/$Branch" 2>&1 | Select-Object -First 1).ToString().Trim()
-    if ($targetSha -eq $previousSha) {
-        Write-Log '远端无新提交，无需重建'
+
+    # ⚠️ 是否需要重建，取决于「工作树 vs **运行中的产物**」，而不是「工作树 vs 远端」。
+    # 本项目源码留在检出目录：用户可能已手动 pull 过，或上一次更新中途失败，
+    # 此时工作树已比跑着的 exe 新，远端却没有新提交。只看远端会得出
+    # 「无需重建」→ 用户点了更新却什么都没发生（真实踩到过）。
+    $needsRebuild = $false
+    if (-not $CurrentBuildSha -or $CurrentBuildSha -eq 'unknown') {
+        # 拿不到构建版本（无 git 构建 / 未知）→ 保守重建，慢但正确
+        Write-Log '未获得运行版本的构建提交，保守起见执行重建'
+        $needsRebuild = $true
+    } elseif ($CurrentBuildSha -ne $previousSha) {
+        Write-Log "工作树（$previousSha）已比运行中的产物（$CurrentBuildSha）新，需要重建"
+        $needsRebuild = $true
+    }
+
+    if ($targetSha -ne $previousSha) {
+        Write-State -Phase 'merging' -Message '正在快进到最新提交'
+        if ((Invoke-Logged -FilePath 'git' -Arguments @('merge', '--ff-only', "origin/$Branch") -What 'git merge --ff-only') -ne 0) {
+            Throw-Failure 'diverged' "无法快进到 origin/$Branch：本地存在未推送的提交。请手动处理分叉后重试。"
+        }
+        $currentSha = (& git rev-parse HEAD 2>&1 | Select-Object -First 1).ToString().Trim()
+        Write-Log "已快进：$previousSha -> $currentSha"
+        $needsRebuild = $true
+    } else {
+        Write-Log "远端 $Branch 无新提交（工作树已是 $previousSha）"
+    }
+
+    if (-not $needsRebuild) {
+        Write-Log '工作树与运行中的产物一致，无需重建'
         if ($stashed) { Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop' | Out-Null }
         Write-State -Phase 'done' -Message '已是最新版本，无需更新'
         Start-WorkBuddy -Reason '无更新' | Out-Null
         exit 0
     }
 
-    Write-State -Phase 'merging' -Message '正在快进到最新提交'
-    if ((Invoke-Logged -FilePath 'git' -Arguments @('merge', '--ff-only', "origin/$Branch") -What 'git merge --ff-only') -ne 0) {
-        Throw-Failure 'diverged' "无法快进到 origin/$Branch：本地存在未推送的提交。请手动处理分叉后重试。"
-    }
-    $currentSha = (& git rev-parse HEAD 2>&1 | Select-Object -First 1).ToString().Trim()
-    Write-Log "已快进：$previousSha -> $currentSha"
-
     # ── 4. 依赖与前端重建 ───────────────────────────────────────────────────
-    # 用 git diff --name-only 判断依赖是否变化：比对 lock 文件内容虽然更精确，
-    # 但 package-lock.json 常达数万行，两边全量读入只为判断「有没有变」不划算。
-    $changedFiles = @(& git diff --name-only $previousSha HEAD 2>&1)
+    # 依赖是否变化的比对基准取「运行中的产物」，才能覆盖「工作树早已领先」的情形。
+    # 短 sha 用 rev-parse 解析为完整 sha（也可能因不在此仓库而失败 → 回退）。
+    $diffBase = $previousSha
+    if ($CurrentBuildSha -and $CurrentBuildSha -ne 'unknown') {
+        $resolved = (& git rev-parse --verify --quiet "$CurrentBuildSha^{commit}" 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $resolved) { $diffBase = $resolved.ToString().Trim() }
+    }
+    $changedFiles = @(& git diff --name-only $diffBase HEAD 2>&1)
     $lockChanged = $changedFiles -contains 'package-lock.json'
 
     if ($lockChanged) {

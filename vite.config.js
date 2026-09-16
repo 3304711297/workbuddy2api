@@ -7,8 +7,7 @@ let gitHash = 'dev';
 try {
   gitHash = execSync('git rev-parse --short HEAD').toString().trim();
 } catch (e) {}
-const buildDate = new Date().toISOString().slice(0, 10);
-const buildFingerprint = `v${pkg.version} (${gitHash} · ${buildDate})`;
+const buildFingerprint = `v${pkg.version} ${gitHash}`;
 
 // Tauri 要求产物使用相对路径；输出目录与 src-tauri/tauri.conf.json 的 frontendDist 对应
 export default defineConfig({
@@ -16,7 +15,9 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
     __GIT_HASH__: JSON.stringify(gitHash),
-    __BUILD_DATE__: JSON.stringify(buildDate),
+    // 指纹只含「版本 + 构建提交」，与 Hermes 的展示形态一致（v0.21.3 xxxxxxx）。
+    // 刻意不含日期：日期不携带任何可行动信息，却会随每次构建漂移，
+    // 让人误以为「内容变了」——判据应是版本与提交，不是日历。
     __BUILD_FINGERPRINT__: JSON.stringify(buildFingerprint),
   },
   build: {

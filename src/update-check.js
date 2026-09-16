@@ -393,12 +393,15 @@ async function applyUpdate() {
 // ---------------------------------------------------------------------------
 
 export function initUpdateCheck() {
-  // 绑定版本与构建指纹展示
+  // 绑定版本与构建指纹展示（形态与 Hermes 一致：v0.2.1 d1cb787）
   const verEl = el('app-ver');
   if (verEl) {
     const ver = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.1';
+    const hash = typeof __GIT_HASH__ !== 'undefined' ? __GIT_HASH__ : '';
     const fp = typeof __BUILD_FINGERPRINT__ !== 'undefined' ? __BUILD_FINGERPRINT__ : `v${ver}`;
-    verEl.textContent = `v${ver}`;
+    // 行内直接显示「版本 + 构建提交」：当前跑的是哪个提交必须一眼可见，
+    // 否则用户无法判断「界面上的版本」与「实际运行的产物」是否一致。
+    verEl.textContent = hash ? `v${ver} ${hash}` : `v${ver}`;
     verEl.title = `构建指纹: ${fp}\n点击可复制版本信息`;
     verEl.style.cursor = 'pointer';
     verEl.addEventListener('click', () => {

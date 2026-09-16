@@ -54,11 +54,30 @@ pub struct AppUpdateInfo {
     pub fetched_at: i64,
     pub error: Option<String>,
     pub message: Option<String>,
+    /// 工作树当前 HEAD（与 `current_sha` 区分：后者是**本 exe 构建时**的提交）。
+    /// 供前端/脚本判断「运行版本 vs 工作树」是否已经不一致。
+    #[serde(default)]
+    pub worktree_sha: String,
 }
 
 // ---------------------------------------------------------------------------
 // 本地 git 元数据读取（纯文件操作，不依赖 PATH 上有 git 可执行文件）
 // ---------------------------------------------------------------------------
+
+/// 构建时烘焙进的短 sha（由 `build.rs` 注入 `WORKBUDDY2API_BUILD_SHA`）。
+///
+/// ⚠️ 这是「本 exe 是哪个提交构建的」的唯一真源，**不能**改用工作树 `.git/HEAD`：
+/// 本项目源码留在检出目录且更新靠就地重建，工作树 HEAD 会被 pull 推进到最新，
+/// 而运行中的 exe 仍是旧提交的产物 —— 读工作树会把「运行的是旧版本」谎报成
+/// 「已是最新」（真实踩到：exe 构建于 88b0f7e、工作树已到 d1cb787）。
+pub fn build_sha() -> &'static str {
+    env!("WORKBUDDY2API_BUILD_SHA")
+}
+
+/// 读工作树当前 HEAD（仅用于脚本侧判定「快进后是否需要重建」，不用于版本比对）。
+fn read_worktree_head(root: &Path) -> Option<String> {
+    read_git_head(root)
+}
 
 /// 读取本地 HEAD 的完整 commit SHA。支持普通检出、detached HEAD 与 packed-refs。
 ///
@@ -369,8 +388,16 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
         });
     };
     let root_str = root.to_string_lossy().to_string();
-    let current_sha = read_git_head(&root).unwrap_or_default();
+    // ⚠️ 版本比对必须用「本 exe 构建时的提交」，不能用工作树 HEAD：
+    // 源码留在检出目录且更新靠就地重建，工作树会被 pull 推到最新，而运行中的 exe
+    // 仍是旧提交的产物 —— 读工作树会把「运行的是旧版本」谎报成「已是最新」。
+    let current_sha = build_sha().to_string();
+    let worktree_head = read_worktree_head(&root);
     let dirty = working_tree_dirty(&root);
+
+    // 供脚本判断「快进后工作树是否与运行版本一致 / 是否需要重建」。
+    // 与 current_sha 分开传：脚本要用工作树的 sha 做 git 操作，用构建 sha 做版本判定。
+    let worktree_sha = worktree_head.clone().unwrap_or_default();
 
     if !handoff_script_path(&root).exists() {
         return Ok(AppUpdateInfo {
@@ -422,6 +449,7 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
                 fetched_at: now,
                 error: None,
                 message: None,
+                worktree_sha: worktree_sha.clone(),
             }
         }
         Err(message) => AppUpdateInfo {
@@ -433,6 +461,7 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
             update_root: root_str.clone(),
             fetched_at: now,
             error: Some(message),
+            worktree_sha: worktree_sha.clone(),
             ..Default::default()
         },
     };
@@ -514,6 +543,10 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             .arg(&log_path)
             .arg("-StatePath")
             .arg(&state_path)
+            // 运行中 exe 的构建提交：脚本据此判断「快进后是否需要重建」。
+            // 不能只比工作树 HEAD —— 工作树可能已被 pull 到最新，而跑着的仍是旧产物。
+            .arg("-CurrentBuildSha")
+            .arg(build_sha())
             .current_dir(&root)
             .stdin(std::process::Stdio::null())
             // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住
@@ -956,6 +989,53 @@ mod tests {
         assert!(
             which("definitely-not-a-real-exe-9f3a2b").is_none(),
             "which 对不存在的程序返回了 Some"
+        );
+    }
+
+    #[test]
+    fn build_sha_is_baked_at_compile_time() {
+        // build.rs 必须把构建提交注入二进制：这是「本 exe 是哪个提交构建的」唯一真源。
+        // 值为短 sha（7-40 位十六进制）；无 git 环境构建时退化为 "unknown"（不 fail 构建）。
+        let sha = build_sha();
+        assert!(!sha.is_empty(), "WORKBUDDY2API_BUILD_SHA 未注入（build.rs 失效）");
+        let ok = sha == "unknown"
+            || (sha.len() >= 7 && sha.len() <= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(ok, "构建 sha 形状异常：{sha:?}（应为短 sha 或 unknown）");
+    }
+
+    #[test]
+    fn version_comparison_uses_build_sha_not_worktree_head() {
+        // 核心回归：本项目源码留在检出目录，工作树 HEAD 会被 pull 推进到最新，
+        // 而运行中的 exe 仍是旧提交的产物。若版本比对读工作树，就会把
+        // 「运行的是旧版本」谎报成「已是最新」（真实踩到：exe=88b0f7e / 工作树=d1cb787）。
+        //
+        // 这里用源码形状锁定：check_app_update 里 current_sha 必须来自 build_sha()，
+        // 且不得再出现直接读工作树 HEAD 赋给 current_sha 的写法。
+        //
+        // ⚠️ 只取测试模块之前的生产代码：include_str! 会把测试模块自身也读进来，
+        // 断言里的字符串字面量会命中自己（恒真的假绿）。截断到 #[cfg(test)] 之前。
+        let src = include_str!("update.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let code: String = production
+            .split('\n')
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains("let current_sha = build_sha().to_string()"),
+            "current_sha 未取自 build_sha()：读工作树会把「运行的是旧版本」谎报成「已是最新」"
+        );
+        // 拼出禁用串，避免字面量再次出现在源码里造成自指
+        let forbidden = ["let current_sha = read_git", "head"].concat();
+        assert!(
+            !code.contains(&forbidden),
+            "current_sha 又改回读工作树 HEAD —— 会再次谎报「已是最新」"
+        );
+        // 工作树 sha 仍需保留（脚本做 git 操作用），但必须是独立字段
+        assert!(
+            code.contains("read_worktree_head(&root)"),
+            "工作树 HEAD 未被单独读取（脚本需要它做快进基准）"
         );
     }
 }

@@ -19,8 +19,8 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：186 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：75 passed
+npm test                                          # 前端：189 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：77 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -147,8 +147,19 @@ workbuddy2api.exe (GUI)
   **① 检测 = 被动 API 比对 commit，不做 `git fetch` 轮询**：
   多客户端反复 fetch 会拖垮仓库并触发 GitHub 429。正确口径是
   `GET /repos/{slug}/commits/{branch}` + `Accept: application/vnd.github.sha`
-  取 40 字节远端 tip SHA，与本机 HEAD（读 `.git/HEAD`，不依赖 PATH 上有 git）比对；
+  取 40 字节远端 tip SHA，与本机**运行版本**比对；
   **仅当两者不同**才 `GET /compare/{head}...{tip}` 取 `ahead_by`（= 落后数）与 commit 列表。
+
+  ⚠️ **「本机版本」必须用烘焙进二进制的构建提交，绝不能读工作树 `.git/HEAD`**：
+  本项目源码留在检出目录且更新靠就地重建，工作树会被 pull 推进到最新，而运行中的
+  exe 仍是旧提交产物 —— 读工作树会把「运行的是旧版本」谎报成「已是最新」
+  （真实踩到：exe 构建于 `88b0f7e`、工作树已到 `d1cb787`，界面显示「已是最新」，
+  实际落后 3 个提交）。机制：`src-tauri/build.rs` 注入
+  `cargo:rustc-env=WORKBUDDY2API_BUILD_SHA=<git rev-parse --short HEAD>`，
+  并对 `.git/HEAD` 与当前分支引用发 `rerun-if-changed` 保证新提交后重编；
+  无 git 环境构建时退化为 `"unknown"`（不 fail 构建）。
+  `AppUpdateInfo.current_sha` = 烘焙 sha，`worktree_sha` 才是工作树 HEAD（两者不可混用）。
+
   ⚠️ **`ahead_by == 0` 但 tip 不同 ⇒ 本地领先，必须判「无更新」**——报成「有更新」会诱导
   用户用远端覆盖掉自己的提交，这是本模块最危险的误报。`compare` 失败（限流/本地独有提交 404）
   时 `behind = None`，UI 显示「有更新、数量未知」，**绝不编造数字**。
@@ -164,6 +175,10 @@ workbuddy2api.exe (GUI)
   ⚠️ 启动确认不可省（借鉴 EasyCLIProxyAPI 的 ack 等待）：只 `Start-Process` 就宣布成功，
   会在新版「启动即崩」时把用户反复拉回同一个坏版本，且脚本已退出无从回滚。
   仅验进程存活也不够——GUI 活着但内核没起来时服务仍不可用，故必须探 8787。
+  ⚠️ **「是否需要重建」的基准是「工作树 vs 运行中的产物」，不是「工作树 vs 远端」**：
+  用户可能已手动 pull 过、或上次更新中断，此时工作树已领先而远端无新提交；
+  只看远端会得出「无需重建」→ 点了更新却什么都没发生。脚本为此接收
+  `-CurrentBuildSha`（Rust 传烘焙 sha）；拿不到构建 sha 时**保守重建**（慢但正确）。
   ⚠️ 脚本内**必须**用 `cargo tauri build`（裸 cargo 会产出空壳）；
   `--ff-only` 不可改成 merge/`reset --hard origin`（会覆盖或丢失用户提交）。
 
