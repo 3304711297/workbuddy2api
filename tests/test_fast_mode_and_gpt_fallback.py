@@ -471,6 +471,56 @@ def test_e2e_anthropic_stream_unauthorized_gpt_model_fallback_observability(fake
     assert rec["fallback_reason"] == "11102 unauthorized"
 
 
+@pytest.mark.parametrize("endpoint,stream,tools", [
+    ("/v1/chat/completions", False, False),
+    ("/v1/messages", False, False),
+    ("/v1/responses", False, False),
+    ("/v1/chat/completions", True, False),
+    ("/v1/chat/completions", True, True),
+    ("/v1/messages", True, False),
+    ("/v1/responses", True, False),
+])
+def test_success_evidence_belongs_to_fallback_model(
+    fake_multi_accounts, monkeypatch, endpoint, stream, tools,
+):
+    """成功不能再把实际模型标为未授权，也不能漏记实际模型的成功证据。"""
+    monkeypatch.setitem(converter.CONFIG, "cred", CredentialManager())
+    call_models = []
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        call_models.append(model)
+        if model == "gpt-5.6-luna":
+            return httpx.Response(400, json={"code": 11102, "msg": "model [gpt-5.6-luna] is only available for authorized users"})
+        assert model == "fast-model"
+        return httpx.Response(200, content=(
+            'data: {"id":"success","model":"fast-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}\n\n'
+            'data: {"id":"success","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            'data: [DONE]\n\n'
+        ).encode(), headers={"content-type": "text/event-stream"})
+
+    orig_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: orig_client(
+        **{**kw, "transport": httpx.MockTransport(handler)}
+    ))
+    payload = {"model": "gpt-5.6-luna", "stream": stream, "max_tokens": 30}
+    if endpoint == "/v1/responses":
+        payload["input"] = "hi"
+    else:
+        payload["messages"] = [{"role": "user", "content": "hi"}]
+    if tools:
+        payload["tools"] = [{"type": "function", "function": {
+            "name": "example", "parameters": {"type": "object", "properties": {}},
+        }}]
+    response = TestClient(converter.app, headers={"Host": "127.0.0.1"}).post(endpoint, json=payload)
+    assert response.status_code == 200
+    assert call_models == ["gpt-5.6-luna", "fast-model"]
+    evidence = json.loads(Path(converter._availability_file()).read_text(encoding="utf-8"))["accounts"]["uid-alpha"]
+    assert evidence["gpt-5.6-luna"]["source"] == "runtime-11102"
+    assert evidence.get("fast-model", {}).get("source") == "runtime-200"
+    assert "fast-model" not in converter._effective_unavailable("uid-alpha")
+
+
 # ── _safe_stream_upstream failover 重试语义钉子 ─────────────────────
 
 class _Rotator:
