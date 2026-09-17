@@ -18,7 +18,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：393 passed 为当前基线
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：395 passed 为当前基线
 npm test                                          # 前端：202 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：82 passed
 ```

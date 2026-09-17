@@ -3289,6 +3289,11 @@ async def anthropic_messages(
                 for ev in translator.finalize():
                     yield ev.encode("utf-8")
             finally:
+                if hasattr(upstream_gen, "aclose"):
+                    try:
+                        await upstream_gen.aclose()
+                    except Exception:
+                        pass
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
@@ -3464,12 +3469,13 @@ async def openai_responses(
 
     if client_wants_stream:
         async def _responses_stream_generator():
+            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name)
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
                 converter_inst = ResponsesStreamConverter(model=mapped_model)
                 buf = ""
-                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
+                async for chunk in upstream_gen:
                     try:
                         text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
                         buf += text
@@ -3507,6 +3513,11 @@ async def openai_responses(
                 if finish_sse:
                     yield finish_sse.encode("utf-8")
             finally:
+                if hasattr(upstream_gen, "aclose"):
+                    try:
+                        await upstream_gen.aclose()
+                    except Exception:
+                        pass
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
@@ -3867,11 +3878,20 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         return
                     # 聚合等待期间定期下发 SSE 注释保活心跳，防止中间代理或客户端 60s 静默超时
                     collect_task = asyncio.create_task(_collect_stream(r, t0))
-                    while not collect_task.done():
-                        done, _ = await asyncio.wait({collect_task}, timeout=5.0)
-                        if not done:
-                            yield b": ping\n\n"
-                    collected, ttft_ms = await collect_task
+                    try:
+                        while not collect_task.done():
+                            done, _ = await asyncio.wait({collect_task}, timeout=5.0)
+                            if not done:
+                                yield b": ping\n\n"
+                        collected, ttft_ms = await collect_task
+                    except BaseException:
+                        if not collect_task.done():
+                            collect_task.cancel()
+                            try:
+                                await collect_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                        raise
         except httpx.HTTPError as e:
             if rotator and attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
