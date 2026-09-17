@@ -684,4 +684,10 @@ test('回滚阶段必须严格检查外部命令退出码并受控拉起（防�
     /if\s*\(\$rolledBack\)\s*\{[\s\S]*?Start-WorkBuddy/.test(handoff),
     '回滚拉起必须在 if ($rolledBack) 守卫内：回滚未完全成功时绝不得拉起应用'
   );
+
+  // stash pop 在回滚分支中必须严格收口在 reset 成功的条件内，reset 失败绝不得触碰 stash（防二次污染现场）
+  assert.ok(
+    /if\s*\(\$resetCode\s*-eq\s*0\)[\s\S]*?git stash pop/.test(handoff),
+    '回滚中的 stash pop 必须置于 git reset 成功的守卫内：reset 失败绝不得触碰 stash'
+  );
 });

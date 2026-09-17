@@ -597,16 +597,17 @@ catch {
             $resetCode = Invoke-Logged -FilePath 'git' -Arguments @('reset', '--hard', $previousSha) -What '回滚'
             if ($resetCode -eq 0) {
                 $rollbackSourceRestored = $true
-            } else {
-                Write-Log "git reset --hard 回滚失败（退出码 $resetCode）" 'ERROR'
-            }
-
-            if ($stashed) {
-                $stashCode = Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop'
-                if ($stashCode -ne 0) {
-                    $rollbackStashRestored = $false
-                    Write-Log "git stash pop 恢复失败（退出码 $stashCode），改动仍保留在 stash 中" 'WARN'
+                # 仅当 reset 成功将源码干净还原后，才尝试恢复工作区改动；
+                # 若 reset 失败，绝不得碰 stash，以免改动在破损工作树中冲突导致二次污染现场。
+                if ($stashed) {
+                    $stashCode = Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop'
+                    if ($stashCode -ne 0) {
+                        $rollbackStashRestored = $false
+                        Write-Log "git stash pop 恢复失败（退出码 $stashCode），改动仍保留在 stash 中" 'WARN'
+                    }
                 }
+            } else {
+                Write-Log "git reset --hard 回滚失败（退出码 $resetCode），跳过 stash pop 以免污染现场" 'ERROR'
             }
         } catch {
             Write-Log "回滚过程出错：$_" 'ERROR'
@@ -653,7 +654,11 @@ catch {
     } elseif ($rollbackSourceRestored) {
         '源码已回滚，但旧版产物重新构建失败，请手动编译或检查工作区。'
     } else {
-        '未能回滚，请手动检查工作区。'
+        if ($stashed) {
+            '未能回滚源码，已放弃恢复 stash 以免污染现场。未提交改动仍安全保存在 git stash 中，请手动检查工作区。'
+        } else {
+            '未能回滚，请手动检查工作区。'
+        }
     }
 
     $hint = switch ($kind) {

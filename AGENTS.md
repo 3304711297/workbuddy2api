@@ -250,6 +250,8 @@ workbuddy2api.exe (GUI)
   查询偶发异常时直接绕过 `converter.py` 身份匹配而被 `taskkill /F /T` 误杀！
   起始端口监听者必须严格包含 `converter.py`；监听者或祖先查询若抛出系统错误（`QueryFailed`），
   必须**一律 Fail-Closed 返回 Err 中止清理，严禁 kill**。
+  另 `find_listener_pid` 依靠 `Get-NetTCPConnection ... -ErrorAction SilentlyContinue`，查询异常时
+  安全退化为 `None`（无监听者）直接返回放弃清理，同样天然满足 Fail-Safe（放弃清理优于误杀）。
   契约单测：`proxy.rs::orphan_climb_tests`（8 条覆盖全链路与 Fail-Closed 场景）。
   端口超时未释放时**必须中止更新**（`Throw-Failure 'port-not-released'`，外部评审 P1 采纳，
   推翻早先的 WARN 宽容策略）：uvicorn 端口被占的实测行为是 `create_server` 抛
@@ -267,15 +269,16 @@ workbuddy2api.exe (GUI)
   必须检查每个命令的退出码；`$rolledBack` 必须满足「源码 reset 成功 + 旧版产物重建成功」。
   回滚未完全成功时，严禁无脑拉起损坏或半截的 exe（避免将用户反复推入崩溃循环）。
   契约锁定：`tests/test_app_update_contract.test.js`。
-  ⚠️ **stash 恢复必须晚于所有回滚点（实测复现的数据丢失路径，改动必读）**：
+  ⚠️ **stash 恢复必须晚于所有回滚点且仅在 reset 成功时才恢复（实测复现的数据丢失与二次污染路径，改动必读）**：
   旧写法在第 6 步（产物校验后）就提前 `stash pop`，一旦启动确认失败触发
   `git reset --hard $previousSha`，刚弹回的用户改动会被一并抹掉，而 catch 分支的
   第二次 pop 只得到「No stash entries found」——用户未提交的工作**静默丢失**。
   提前 pop 对构建/启动毫无影响（exe 早已编译完成），纯属引灾。正确时序：
   **成功路径** pop 放在启动确认通过之后（唯一不会再回滚的点）；
   **「无更新」早退路径** pop 在 `needsRebuild` 分支内（该路径不回滚）；
-  **回滚路径** pop 在 `reset --hard` 之后。契约锁定：
-  `tests/test_app_update_contract.test.js` 的 stash 时序断言。
+  **回滚路径** pop 必须在 `reset --hard` 之后，且**必须严格嵌套在 reset 成功（exit code 0）的守卫内**——
+  若 reset 失败，**绝不得触碰 stash**，未提交改动安全保留在 stash 中，避免在破损工作树二次冲突致污染现场。
+  契约锁定：`tests/test_app_update_contract.test.js` 的 stash 时序与成功守卫断言。
   ⚠️ **「是否需要重建」的基准是「工作树 vs 运行中的产物」，不是「工作树 vs 远端」**：
   用户可能已手动 pull 过、或上次更新中断，此时工作树已领先而远端无新提交；
   只看远端会得出「无需重建」→ 点了更新却什么都没发生。脚本为此接收
