@@ -592,6 +592,12 @@ body {
   }
 }
 
+.settings-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .section-title-row {
   display: flex;
   justify-content: space-between;
@@ -733,16 +739,18 @@ body {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
+  border: 1px solid transparent;
+  line-height: 1.4;
 }
-.badge-valid { background: var(--success-subtle); color: var(--success); }
-.badge-expired { background: var(--danger-subtle); color: var(--danger); }
-.badge-stopped { background: var(--danger-subtle); color: var(--danger-bright); }
-.badge-running { background: var(--success-subtle); color: var(--success); }
-.badge-info { background: var(--primary-subtle); color: var(--primary); }
-.badge-success { background: var(--success-subtle); color: var(--success); }
-.badge-warn { background: var(--warning-subtle); color: var(--warning); }
+.badge-valid { background: var(--success-subtle); color: var(--success); border-color: rgba(34, 197, 94, 0.2); }
+.badge-expired { background: var(--danger-subtle); color: var(--danger); border-color: rgba(239, 68, 68, 0.2); }
+.badge-stopped { background: var(--danger-subtle); color: var(--danger-bright); border-color: rgba(239, 68, 68, 0.2); }
+.badge-running { background: var(--success-subtle); color: var(--success); border-color: rgba(34, 197, 94, 0.2); }
+.badge-info { background: var(--primary-subtle); color: var(--primary); border-color: rgba(59, 130, 246, 0.2); }
+.badge-success { background: var(--success-subtle); color: var(--success); border-color: rgba(34, 197, 94, 0.2); }
+.badge-warn { background: var(--warning-subtle); color: var(--warning); border-color: rgba(245, 158, 11, 0.2); }
 /* 失败结果徽章（用量明细用） */
-.badge-danger { background: var(--danger-subtle); color: var(--danger); }
+.badge-danger { background: var(--danger-subtle); color: var(--danger); border-color: rgba(239, 68, 68, 0.2); }
 
 /* --------------------------------------------------------------------------
    控制台组件
@@ -1430,6 +1438,7 @@ body {
 .log-console:hover {
   background: #0b0d11;
   border-color: #262c38;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .log-console-header {
   background: #151821;
@@ -1555,20 +1564,53 @@ body {
    用量统计页 + 侧栏更新入口（批次3）
    --------------------------------------------------------------------------- */
 
-/* 统计卡行：5 张等宽小卡自适应换行 */
+/* 统计卡行：5 张等宽小卡自适应换行 (对标 EasyCLIProxyAPI Metric Cards) */
 .usage-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
 }
 .usage-stat-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 14px 16px;
+  padding: 16px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.usage-stat-card .metric-value { font-size: 20px; font-weight: 700; }
-.usage-sub { font-size: 12px; }
+.usage-stat-card:hover {
+  border-color: var(--border-light);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px -3px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.usage-stat-card .metric-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+.usage-stat-card .metric-value {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.usage-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.usage-events-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-table-head);
+  z-index: 2;
+}
 
 /* 48 小时趋势图（手写 SVG，高质感深色凹陷底与柱体微光） */
 .usage-chart-wrap {

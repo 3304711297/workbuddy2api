@@ -590,194 +590,192 @@ print(response.choices[0].message.content)</code></pre>
 
         <!-- 6. 服务设置页面 (Settings) -->
         <section id="panel-settings" class="panel-page">
-          <div class="card settings-card">
-            <h2 class="card-title">代理与环境设置</h2>
-            
-            <div class="form-group">
-              <label class="field-label" for="input-port">监听端口</label>
-              <div class="input-with-btn" style="max-width: 320px;">
-                <input id="input-port" class="input mono" type="number" min="1024" max="65535" value="8787" />
-                <button id="btn-save-port" class="btn btn-secondary">保存端口</button>
+          <div class="settings-grid">
+            <!-- 1. 网络与端点配置 -->
+            <div class="card settings-card">
+              <div class="card-header-flex">
+                <div>
+                  <h3 class="card-title">网络与端点配置</h3>
+                  <p class="card-desc" style="margin-bottom: 0;">本地监听端口、自动拉起与多网卡共享</p>
+                </div>
               </div>
-              <p class="muted field-hint">默认 8787，修改后需重启反代服务生效。</p>
-            </div>
 
-            <div class="divider"></div>
+              <div class="form-group" style="margin-top: 12px;">
+                <label class="field-label" for="input-port">监听端口</label>
+                <div class="input-with-btn" style="max-width: 320px;">
+                  <input id="input-port" class="input mono" type="number" min="1024" max="65535" value="8787" />
+                  <button id="btn-save-port" class="btn btn-secondary">保存端口</button>
+                </div>
+                <p class="muted field-hint">默认 8787，修改后需重启反代服务生效。</p>
+              </div>
 
-            <div class="form-group">
-              <label class="switch-label">
-                <input id="chk-auto-start" type="checkbox" />
-                <span class="switch-slider"></span>
-                <span class="switch-text">启动应用时自动拉起反代服务</span>
-              </label>
-              <p class="muted field-hint">勾选后每次打开控制台会按上方端口与脱敏设置自动启动服务，无需手动点击「启动服务」。</p>
-            </div>
+              <div class="divider"></div>
 
-            <div class="divider"></div>
-
-            <div class="form-group">
-              <label class="switch-label">
-                <input id="chk-desensitize" type="checkbox" checked />
-                <span class="switch-slider"></span>
-                <span class="switch-text">启用内容安全脱敏 (--desensitize)</span>
-              </label>
-              <p class="muted field-hint">自动处理敏感触发词，避免触发内容审核误报阻断。</p>
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="form-group">
-              <label class="field-label" for="select-model-list-mode">模型清单模式（/v1/models）</label>
-              <select id="select-model-list-mode" class="input" style="max-width: 320px;">
-                <option value="all">全部展示（需授权模型带 🔒 标记）</option>
-                <option value="available">仅展示可用模型（剔除需授权项）</option>
-              </select>
-              <p class="muted field-hint">内核热读生效，无需重启服务；Hermes 等客户端刷新模型列表后即可看到变化。不可用模型由运行时学习（上游 11102）与预标记共同判定。</p>
-              <!-- 客户端侧提示：本开关只影响内核向客户端暴露的清单，管不到客户端自己写死的模型表。
-                   真实困惑场景：已选「仅展示可用」，但 Hermes 模型选择器里仍有需授权模型 —— 原因是
-                   Hermes 的自定义端点勾了「Discover models」时用本清单，未勾时用其配置文件里写死的
-                   models 列表（discover_models: false）。此提示按当前选择动态变化，避免误导。 -->
-              <p class="muted field-hint" id="model-list-mode-client-note"></p>
-            </div>
-
-            <div class="divider"></div>
-
-            <!-- 控制台黑框窗口与调试 -->
-            <div class="form-group">
-              <label class="switch-label">
-                <input id="chk-debug-console" type="checkbox" />
-                <span class="switch-slider"></span>
-                <span class="switch-text">启动服务时显示外部 CMD 调试黑框</span>
-              </label>
-              <p class="muted field-hint">默认关闭（静默无黑框）。建议直接在左侧「实时日志」页面内嵌查看调试日志。</p>
-            </div>
-
-            <div class="divider"></div>
-
-            <!-- 关闭窗口行为设置 -->
-            <div class="form-group">
-              <span class="field-label" id="close-action-label">关闭主窗口时的行为</span>
-              <div class="radio-group" role="radiogroup" aria-labelledby="close-action-label" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
-                <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                  <input type="radio" name="close-action" value="hide_to_tray" checked />
-                  <span><strong>最小化到系统托盘</strong>（不停用服务，后台继续静默提供 API）</span>
+              <div class="form-group">
+                <label class="switch-label">
+                  <input id="chk-auto-start" type="checkbox" />
+                  <span class="switch-slider"></span>
+                  <span class="switch-text">启动应用时自动拉起反代服务</span>
                 </label>
-                <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                  <input type="radio" name="close-action" value="quit" />
-                  <span><strong>直接退出程序</strong>（自动停止反代服务并释放端口）</span>
+                <p class="muted field-hint">勾选后每次打开控制台会自动启动服务，无需手动点击「启动服务」。</p>
+              </div>
+
+              <div class="divider"></div>
+
+              <!-- 局域网访问 -->
+              <div class="form-group" id="lan-access-field">
+                <label class="switch-label">
+                  <input id="chk-lan-access" type="checkbox" />
+                  <span class="switch-slider"></span>
+                  <span class="switch-text">允许其它设备访问（监听所有网卡，含局域网 / VPN / 虚拟网卡）</span>
                 </label>
+                <p class="muted field-hint" style="margin-top: 6px;">
+                  ⚠️ <b>安全风险</b>：开启后服务监听 <code class="mono">0.0.0.0</code>（本机所有网卡），<b>必须同时配置下方的客户端鉴权密钥</b>，否则内核拒绝启动。
+                </p>
+                <p class="muted field-hint" id="lan-address" style="display: none;">
+                  局域网地址：<code class="mono" id="lan-address-value">—</code>（修改后需重启内核生效）
+                </p>
               </div>
-              <p class="muted field-hint">点击右下角系统托盘图标可快速调出/隐藏控制台主窗口。</p>
             </div>
 
-            <div class="divider"></div>
-
-            <div class="form-group">
-              <label class="field-label" for="data-dir-path">凭据存储目录</label>
-              <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\workbuddy2api\accounts.json" />
-              <p class="muted field-hint">所有登录账号的 Token 统一保存在此文件中，与 WorkBuddy 桌面端完全解耦。</p>
-            </div>
-
-            <div class="divider"></div>
-
-            <!-- 客户端鉴权密钥（对标 EasyCLIProxyAPI 的 ApiAccessPage） -->
-            <div class="form-group" id="api-key-field">
-              <label class="field-label" for="input-api-key">客户端鉴权密钥（可选）</label>
-              <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
-                <input id="input-api-key" class="input mono" type="text" placeholder="留空 = 不鉴权（仅建议回环监听时）"
-                       style="flex: 1; min-width: 260px;" autocomplete="off" spellcheck="false" />
-                <button id="btn-gen-api-key" class="btn btn-secondary btn-sm" title="生成 32 位随机密钥（CSPRNG）">生成</button>
-                <button id="btn-copy-api-key" class="btn btn-secondary btn-sm">复制</button>
-                <button id="btn-clear-api-key" class="btn btn-secondary btn-sm">清空</button>
+            <!-- 2. 安全与客户端鉴权 -->
+            <div class="card settings-card">
+              <div class="card-header-flex">
+                <div>
+                  <h3 class="card-title">安全与访问鉴权</h3>
+                  <p class="card-desc" style="margin-bottom: 0;">客户端连接鉴权密钥与内容敏感词防护</p>
+                </div>
               </div>
-              <p class="muted field-hint" style="margin-top: 6px;">
-                设置后，所有客户端（Claude Code / Codex CLI / Hermes 等）必须携带
-                <code class="mono">Authorization: Bearer &lt;密钥&gt;</code> 或 <code class="mono">x-api-key: &lt;密钥&gt;</code>，
-                否则返回 <code class="mono">401 invalid api key</code>。
-              </p>
-              <p class="muted field-hint">
-                ⚠️ <b>修改后需重启内核生效</b>（密钥在启动时以 <code class="mono">--api-key</code> 传入，不热加载）。
-                若将来监听非回环地址（<code class="mono">0.0.0.0</code>）暴露给局域网，<b>必须</b>设置密钥，否则服务处于无鉴权暴露状态。
-              </p>
+
+              <div class="form-group" id="api-key-field" style="margin-top: 12px;">
+                <label class="field-label" for="input-api-key">客户端鉴权密钥（API Key，可选）</label>
+                <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
+                  <input id="input-api-key" class="input mono" type="text" placeholder="留空 = 不鉴权（仅建议回环监听时）"
+                         style="flex: 1; min-width: 260px;" autocomplete="off" spellcheck="false" />
+                  <button id="btn-gen-api-key" class="btn btn-secondary btn-sm" title="生成 32 位随机密钥（CSPRNG）">生成</button>
+                  <button id="btn-copy-api-key" class="btn btn-secondary btn-sm">复制</button>
+                  <button id="btn-clear-api-key" class="btn btn-secondary btn-sm">清空</button>
+                </div>
+                <p class="muted field-hint" style="margin-top: 6px;">
+                  设置后，客户端必须携带 <code class="mono">Authorization: Bearer &lt;key&gt;</code> 或 <code class="mono">x-api-key: &lt;key&gt;</code>，修改后需重启内核生效。
+                </p>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="form-group">
+                <label class="switch-label">
+                  <input id="chk-desensitize" type="checkbox" checked />
+                  <span class="switch-slider"></span>
+                  <span class="switch-text">启用内容安全脱敏 (--desensitize)</span>
+                </label>
+                <p class="muted field-hint">自动处理已知敏感客户端指纹与触发词，杜绝上游 11128 风控误拦截。</p>
+              </div>
             </div>
 
-            <div class="divider"></div>
+            <!-- 3. 模型与应用行为 -->
+            <div class="card settings-card">
+              <div class="card-header-flex">
+                <div>
+                  <h3 class="card-title">模型与客户端交互</h3>
+                  <p class="card-desc" style="margin-bottom: 0;">模型清单过滤模式、窗口关闭与系统集成</p>
+                </div>
+              </div>
 
-            <!-- 结构化日志级别（对标 EasyCLIProxyAPI 的日志管理） -->
-            <div class="form-group" id="log-level-field">
-              <label class="field-label" for="select-log-level">内核结构化日志级别</label>
-              <select id="select-log-level" class="input" style="max-width: 420px;">
-                <option value="info">info —— 仅记录请求摘要与耗时（默认，不含正文）</option>
-                <option value="debug">debug —— 附加错误响应详情</option>
-                <option value="trace">trace —— 完整请求体与响应流（自动脱敏 Token/Key）</option>
-              </select>
-              <p class="muted field-hint" style="margin-top: 6px;">
-                日志写入 <code class="mono">%LOCALAPPDATA%\workbuddy2api\converter.log</code>，
-                可在「实时日志」页查看。<b>修改后需重启内核生效</b>。
-              </p>
-              <label class="switch-label" style="margin-top: 8px;">
-                <input id="chk-log-payloads" type="checkbox" />
-                <span class="switch-slider"></span>
-                <span class="switch-text">落盘完整 Prompt / 响应正文（--log-payloads）</span>
-              </label>
-              <p class="muted field-hint">
-                ⚠️ <b>隐私风险</b>：开启后完整的提示词（Prompt）与模型响应正文会以<b>明文</b>写入日志文件，
-                仅建议在排查疑难问题且日志不外传时短时开启。该开关仅在日志级别为
-                <code class="mono">trace</code> 时实际生效（双闸门），排查完请及时关闭。
-              </p>
-              <label class="switch-label" style="margin-top: 8px;">
-                <input id="chk-snapshots" type="checkbox" checked />
-                <span class="switch-slider"></span>
-                <span class="switch-text">记录请求快照（调试 Tab 数据源）</span>
-              </label>
-              <p class="muted field-hint">
-                开启后每次聊天请求的<b>完整请求体（含 Prompt 明文）</b>写入
-                <code class="mono">%LOCALAPPDATA%\workbuddy2api\usage\snapshots.jsonl</code>，
-                在「调试」页查看与一键重放。保留条数
-                <input id="input-snapshots-keep" type="number" class="input mono" style="width: 76px; font-size: 12px; padding: 4px 8px;" min="10" max="2000" step="10" value="200" /> 条
-                （超 2 倍后轮转保留）。<b>修改后需重启内核生效</b>。
-              </p>
+              <div class="form-group" style="margin-top: 12px;">
+                <label class="field-label" for="select-model-list-mode">模型清单模式（/v1/models）</label>
+                <select id="select-model-list-mode" class="input" style="max-width: 340px;">
+                  <option value="all">全部展示（需授权模型带 🔒 标记）</option>
+                  <option value="available">仅展示可用模型（剔除需授权项）</option>
+                </select>
+                <p class="muted field-hint">内核热读生效，无需重启服务。客户端刷新模型列表后即可看到变化。</p>
+                <p class="muted field-hint" id="model-list-mode-client-note"></p>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="form-group">
+                <span class="field-label" id="close-action-label">关闭主窗口时的行为</span>
+                <div class="radio-group" role="radiogroup" aria-labelledby="close-action-label" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
+                  <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                    <input type="radio" name="close-action" value="hide_to_tray" checked />
+                    <span><strong>最小化到系统托盘</strong>（不停用服务，后台继续静默提供 API）</span>
+                  </label>
+                  <label class="radio-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                    <input type="radio" name="close-action" value="quit" />
+                    <span><strong>直接退出程序</strong>（自动停止反代服务并释放端口）</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="form-group">
+                <label class="switch-label">
+                  <input id="chk-debug-console" type="checkbox" />
+                  <span class="switch-slider"></span>
+                  <span class="switch-text">启动服务时显示外部 CMD 调试黑框</span>
+                </label>
+                <p class="muted field-hint">默认关闭（静默无黑框）。排查底层异常时可临时开启。</p>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="form-group">
+                <label class="field-label" for="data-dir-path">凭据存储目录</label>
+                <input id="data-dir-path" class="input mono" type="text" readonly value="%LOCALAPPDATA%\workbuddy2api\accounts.json" />
+              </div>
             </div>
 
-            <div class="divider"></div>
+            <!-- 4. 日志、调试快照与高级运行时 -->
+            <div class="card settings-card">
+              <div class="card-header-flex">
+                <div>
+                  <h3 class="card-title">日志、调试与高级运行时</h3>
+                  <p class="card-desc" style="margin-bottom: 0;">结构化排障日志、请求快照与底层环境变量</p>
+                </div>
+              </div>
 
-            <!-- 局域网访问（对标 EasyCLIProxyAPI 的 get_lan_ipv4 / 网络设置） -->
-            <!-- ⚠️ 文案刻意不写「仅局域网」：实现是 --host 0.0.0.0，即绑定**所有网卡**
-                 （Wi-Fi / 有线 / VPN / 虚拟网卡），不止「同一 Wi-Fi」。 -->
-            <div class="form-group" id="lan-access-field">
-              <label class="switch-label">
-                <input id="chk-lan-access" type="checkbox" />
-                <span class="switch-slider"></span>
-                <span class="switch-text">允许其它设备访问（监听所有网卡，含局域网 / VPN / 虚拟网卡）</span>
-              </label>
-              <p class="muted field-hint" style="margin-top: 6px;">
-                ⚠️ <b>安全风险</b>：开启后服务监听 <code class="mono">0.0.0.0</code>，即<b>本机所有网卡</b>——
-                不仅是同一 Wi-Fi 下的设备，<b>VPN 隧道对端、虚拟网卡（Hyper-V / VMware / WSL / Docker）</b>
-                所在网络内的设备也都能连接本服务并消耗你的账号额度。
-                因此<b>必须同时配置上方的客户端鉴权密钥</b>，否则内核会拒绝启动。
-                仅建议在受信任的私有网络短时开启。
-              </p>
-              <p class="muted field-hint" id="lan-address" style="display: none;">
-                局域网地址：<code class="mono" id="lan-address-value">—</code>（其它设备用此地址连接，
-                密钥已开启时须同时填写上方的密钥）
-              </p>
-              <p class="muted field-hint"><b>修改后需重启内核生效</b>。</p>
-            </div>
+              <div class="form-group" id="log-level-field" style="margin-top: 12px;">
+                <label class="field-label" for="select-log-level">内核结构化日志级别</label>
+                <select id="select-log-level" class="input" style="max-width: 420px;">
+                  <option value="info">info —— 仅记录请求摘要与耗时（默认，不含正文）</option>
+                  <option value="debug">debug —— 附加错误响应详情</option>
+                  <option value="trace">trace —— 完整请求体与响应流（自动脱敏 Token/Key）</option>
+                </select>
+                <p class="muted field-hint" style="margin-top: 6px;">
+                  修改后需重启内核生效，可在「实时日志」页查看。
+                </p>
+                <label class="switch-label" style="margin-top: 8px;">
+                  <input id="chk-log-payloads" type="checkbox" />
+                  <span class="switch-slider"></span>
+                  <span class="switch-text">落盘完整 Prompt / 响应正文（--log-payloads）</span>
+                </label>
+                <p class="muted field-hint">
+                  ⚠️ 开启后完整的提示词与响应正文以明文写入日志，仅建议在 trace 级别疑难排障时短时开启。
+                </p>
+                <label class="switch-label" style="margin-top: 8px;">
+                  <input id="chk-snapshots" type="checkbox" checked />
+                  <span class="switch-slider"></span>
+                  <span class="switch-text">记录请求快照（调试 Tab 数据源）</span>
+                </label>
+                <p class="muted field-hint">
+                  保留条数
+                  <input id="input-snapshots-keep" type="number" class="input mono" style="width: 76px; font-size: 12px; padding: 4px 8px;" min="10" max="2000" step="10" value="200" /> 条（修改后需重启内核生效）。
+                </p>
+              </div>
 
-            <div class="divider"></div>
+              <div class="divider"></div>
 
-            <!-- 高级运行时开关（不在 AppConfig 中，需环境变量 + 重启内核） -->
-            <div class="form-group" id="runtime-advanced-hint">
-              <span class="field-label">高级运行时开关（环境变量配置）</span>
-              <p class="muted field-hint" style="margin-top: 4px;">
-                以下开关<b>不写入 settings.json</b>，需设置环境变量后<b>重启内核</b>才生效（当前运行中的内核不会热加载）：
-              </p>
-              <ul class="muted field-hint" style="margin: 6px 0 0 18px; padding: 0; font-size: 11px; line-height: 1.9;">
-                <li><code class="mono">WORKBUDDY2API_OPTIMIZE_CONTEXT=1</code> —— 启用 Codex 长上下文投影压缩（默认关闭；有损压缩，会截断历史与工具参数，按需开启）</li>
-                <li><code class="mono">WORKBUDDY2API_MAX_IMAGE_MB</code> —— 远程多模态图片单图下载上限（默认 8；设为 <code class="mono">0</code> 完全禁用远程图片下载）</li>
-                <li><code class="mono">WORKBUDDY2API_MAX_BODY_MB</code> —— 请求体大小上限（默认 16；超限在 ASGI 层按块熔断返回 413）</li>
-                <li><code class="mono">WORKBUDDY2API_USER_AGENT</code> —— 覆盖出站 User-Agent（默认仿真官方客户端标识）</li>
-              </ul>
+              <div class="form-group" id="runtime-advanced-hint">
+                <span class="field-label">高级运行时环境变量参数</span>
+                <ul class="muted field-hint" style="margin: 6px 0 0 18px; padding: 0; font-size: 11px; line-height: 1.9;">
+                  <li><code class="mono">WORKBUDDY2API_OPTIMIZE_CONTEXT=1</code> —— 启用 Codex 长上下文投影压缩（默认关闭）</li>
+                  <li><code class="mono">WORKBUDDY2API_MAX_IMAGE_MB</code> —— 远程多模态图片单图下载上限（默认 8MB，设为 0 完全禁用）</li>
+                  <li><code class="mono">WORKBUDDY2API_MAX_BODY_MB</code> —— 请求体大小上限（默认 16MB，超限熔断返回 413）</li>
+                  <li><code class="mono">WORKBUDDY2API_USER_AGENT</code> —— 覆盖出站 User-Agent（默认仿真官方客户端标识）</li>
+                </ul>
+              </div>
             </div>
           </div>
         </section>
@@ -798,7 +796,10 @@ print(response.choices[0].message.content)</code></pre>
 
           <div class="card log-console" style="padding: 0; overflow: hidden;">
             <div class="log-console-header">
-              <span class="mono log-console-path">proxy_stdout.log</span>
+              <span class="mono log-console-path" style="display: inline-flex; align-items: center; gap: 8px;">
+                <span class="live-dot running pulse-glow" style="width: 7px; height: 7px;"></span>
+                proxy_stdout.log
+              </span>
               <button id="log-auto-scroll" class="log-console-hint log-auto-scroll-btn" type="button" aria-pressed="true" title="点击暂停/恢复自动滚动（向上翻看日志时会自动暂停）">自动同步中 (每 2 秒)</button>
             </div>
             <pre id="log-viewer" class="code-block" style="border: none; border-radius: 0; min-height: 420px; max-height: 520px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; padding: 16px; line-height: 1.5; font-size: 12px; color: #a6adbb;"></pre>
