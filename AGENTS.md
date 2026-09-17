@@ -47,6 +47,13 @@ npm run build && cd src-tauri && cargo tauri build --no-bundle
 `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` 是 AppExecLink 重解析点，`is_file()`
 对它返回 false → which 静默找不到 pwsh → 回退 5.1 → 触发上述 BOM 死亡链。
 判定用 `fs::metadata().is_ok()`（`update.rs::path_is_executable`）。
+⚠️ **spawn 更新脚本绝不能用 `DETACHED_PROCESS`（0x8，「点更新闪退」最终根因）**：
+实测（Rust 同款 creationflags 逐变量对照，覆盖 Store 别名/物理路径 pwsh/PS 5.1），
+该 flag 下 PowerShell 进程 spawn 成功但**静默不执行任何脚本**就退出——无日志、
+无状态文件、无报错。此前曾误判为 Store 别名问题和 BOM 问题（两者是真实缺陷但
+非此现象主因）。正确 flag 是 `CREATE_NO_WINDOW(0x08000000) | CREATE_NEW_PROCESS_GROUP`：
+同样无窗口、不与父进程生命周期绑定，但 console 正常初始化。契约锁定：
+`tests/test_app_update_contract.test.js` 的 spawn flags 断言。
 
 **绝不跑裸 `cargo build --release`**：`custom-protocol` feature 只有 tauri CLI 会带上，
 plain cargo 会**静默产出无前端的空壳 exe**（15,572,992 字节 vs 正确约 15,663,616）

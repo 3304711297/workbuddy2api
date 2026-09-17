@@ -160,6 +160,22 @@ test('apply_app_update 已注册到 Tauri 命令表', () => {
   );
 });
 
+test('更新脚本 spawn 禁用 DETACHED_PROCESS（会静默不执行任何脚本）', () => {
+  // 决定性实测：DETACHED_PROCESS(0x8) 下 PowerShell/pwsh 进程 spawn 成功但
+  // **静默不执行任何脚本**就退出（无 console 可初始化）——表现为「点更新闪退、
+  // 无日志、无状态文件」。CREATE_NO_WINDOW(0x08000000) 同样无窗口且不与父
+  // 进程生命周期绑定，但 console 正常初始化，脚本能真实执行。
+  const updateRsCode = updateRs.replace(/\/\/[^\n]*/g, '');
+  assert.ok(
+    !/DETACHED_PROCESS/.test(updateRsCode),
+    'spawn 使用了 DETACHED_PROCESS：PowerShell 会静默不执行脚本（无声闪退根因）'
+  );
+  assert.ok(
+    /CREATE_NO_WINDOW/.test(updateRsCode) && /CREATE_NEW_PROCESS_GROUP/.test(updateRsCode),
+    'spawn 缺少 CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP：需要无窗口 + 父退出后继续运行'
+  );
+});
+
 test('交接脚本必须用 --ff-only 快进（绝不覆盖用户提交）', () => {
   assert.ok(/merge',\s*'--ff-only'/.test(handoff), '脚本未用 --ff-only：本地领先/分叉时会产生合并提交或覆盖用户提交');
   assert.ok(!/reset',\s*'--hard',\s*'origin/.test(handoff), '脚本用 reset --hard 覆盖工作树：会丢用户提交');

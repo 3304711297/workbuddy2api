@@ -478,12 +478,15 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
     // 脚本随后会立即写入 preparing，此处失败不影响更新流程。
     let _ = std::fs::remove_file(&state_path);
 
-    // 分离启动：DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP，使父进程退出后脚本继续运行。
-    // 必须 -NoProfile 且用 pwsh 优先（Store 别名版本无关）；脚本自身负责等 GUI 退出。
+    // 分离启动：CREATE_NO_WINDOW + CREATE_NEW_PROCESS_GROUP，父进程退出后脚本继续运行。
+    // ⚠️ 绝不能用 DETACHED_PROCESS（0x8）：实测（Rust 同款 creationflags 逐变量对照）
+    // 它会让 PowerShell/pwsh **静默不执行任何脚本**就退出（无 console 可初始化）——
+    // 这就是「点更新闪退且无日志无状态文件」的最终根因；之前误判过 Store 别名/BOM。
+    // CREATE_NO_WINDOW 同样无窗口、不与父进程生命周期绑定，但 console 正常初始化。
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
         let shell = resolve_powershell();
@@ -516,7 +519,7 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         cmd.spawn().map_err(|e| format!("无法启动更新程序：{e}"))?;
 
         // 让前端有时间把界面切到「更新中」再退出：脚本正等待本 PID 消失才动工作树，
