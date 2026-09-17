@@ -584,17 +584,34 @@ fn which(exe: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         // 先试原名，再按 PATHEXT 补后缀（pwsh.exe / pwsh.cmd 等）
         let direct = dir.join(exe);
-        if direct.is_file() {
+        if path_is_executable(&direct) {
             return Some(direct);
         }
         for ext in &exts {
             let candidate = dir.join(format!("{exe}{ext}"));
-            if candidate.is_file() {
+            if path_is_executable(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+/// 可执行判定：Windows 上不能只用 `is_file()` —— Store 版 pwsh 的
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` 是 **AppExecLink 重解析点**，
+/// `is_file()` 对它返回 false，导致 which 静默找不到 pwsh → 回退 PS 5.1 →
+/// 5.1 按 GBK 读无 BOM UTF-8 脚本 → 解析即死（真实踩到：更新脚本无声闪退、
+/// 无日志无状态文件）。判定口径放宽为「metadata 可查询即放行」：
+/// 宽松方向的误差只是「选中坏 shell 然后 spawn 失败可见」，
+/// 严格方向的误差是「跳过存在的 shell 静默降级」，后者伤害大得多。
+#[cfg(target_os = "windows")]
+fn path_is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_is_executable(p: &Path) -> bool {
+    p.is_file()
 }
 
 /// 读取更新编排脚本写入的阶段状态（供前端轮询显示实时进度）。

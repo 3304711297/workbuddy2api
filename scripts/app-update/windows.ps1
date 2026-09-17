@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     WorkBuddy2API 应用内自动更新编排脚本（交接式 + 启动确认）。
 
@@ -84,6 +84,94 @@ function Write-Log {
     } catch { }
 }
 
+# ---------------------------------------------------------------------------
+# 进度小窗（Hermes 同款体验：更新全程可见，不再是后台黑箱）
+#
+# GUI 必须退出（Windows 锁运行中的 exe），进度窗因此由**脚本自己**用 WinForms
+# 绘制并置顶显示。实现在独立运行空间（runspace）里：主线程继续跑更新步骤，
+# 窗口线程读 $script:ProgressText 刷新 UI，互不阻塞。5.1/7 均内置 WinForms。
+# 若窗体初始化失败（极端精简系统），更新流程照常继续——进度窗是体验增强，
+# 决不能反过来成为更新的故障点。
+# ---------------------------------------------------------------------------
+$script:ProgressText = '正在准备更新…'
+$script:ProgressDone = $false
+
+function Start-ProgressWindow {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    } catch {
+        Write-Log "进度窗不可用（缺 WinForms）：$_" 'WARN'
+        return
+    }
+    # 共享表：主空间写、窗口线程读（Synchronized hashtable 线程安全）
+    $script:ProgressShared = [hashtable]::Synchronized(@{
+        Text = $script:ProgressText
+        Done = $false
+    })
+    $shared = $script:ProgressShared
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.ApartmentState = 'STA'
+    $rs.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    # 共享表经参数传入窗口线程；线程内只读 Text / Done
+    $winScript = @'
+param($shared)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'WorkBuddy2API 更新'
+$form.Size = New-Object System.Drawing.Size(440, 150)
+$form.StartPosition = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.TopMost = $true
+$form.ShowInTaskbar = $false
+$label = New-Object System.Windows.Forms.Label
+$label.SetBounds(20, 20, 390, 55)
+$label.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
+$label.ForeColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+$form.Controls.Add($label)
+$bar = New-Object System.Windows.Forms.ProgressBar
+$bar.SetBounds(20, 85, 390, 18)
+$bar.Style = 'Marquee'
+$bar.MarqueeAnimationSpeed = 30
+$form.Controls.Add($bar)
+$form.Add_Shown({ $form.Activate() })
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 300
+$timer.Add_Tick({
+    $label.Text = $shared.Text
+    if ($shared.Done) { $form.Close() }
+})
+$timer.Start()
+[void]$form.ShowDialog()
+$timer.Stop()
+'@
+
+    $ps.Streams.Error.add_DataAdded({
+        param($sender, $event)
+        try { Write-Log "进度窗线程错误：$($event.Item)" 'WARN' } catch { }
+    })
+    [void]$ps.AddScript($winScript).AddArgument($shared)
+    [void]$ps.BeginInvoke()
+}
+
+function Update-ProgressWindow {
+    param([Parameter(Mandatory = $true)][string]$Message)
+    $script:ProgressText = $Message
+    if ($script:ProgressShared) { $script:ProgressShared.Text = $Message }
+}
+
+function Stop-ProgressWindow {
+    param([string]$FinalMessage = '')
+    if ($script:ProgressShared) {
+        if ($FinalMessage) { $script:ProgressShared.Text = $FinalMessage }
+        $script:ProgressShared.Done = $true
+    }
+}
+
 # 阶段名与前端 i18n 一一对应；detail 是给人看的一句话
 function Write-State {
     param(
@@ -113,6 +201,8 @@ function Write-State {
         Write-Log "写入状态文件失败：$_" 'WARN'
     }
     Write-Log "[$Phase] $Message"
+    # 进度窗同步刷新：状态文件的每个阶段都实时可见（Hermes 同款体验）
+    if ($Message) { Update-ProgressWindow -Message $Message }
 }
 
 # 失败分类：让用户看到「哪一步、为什么」，而不是笼统的「更新失败」
@@ -240,6 +330,7 @@ function Show-FailureMessage {
     }
 }
 
+Start-ProgressWindow   # Hermes 同款：进度小窗置顶显示，更新不再是后台黑箱
 Write-State -Phase 'preparing' -Message '正在准备更新'
 Write-Log '============================================================'
 Write-Log "更新开始：branch=$Branch root=$InstallRoot guiPid=$GuiPid"
@@ -256,6 +347,7 @@ if ($GuiPid -gt 0) {
     if (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue) {
         Write-State -Phase 'failed' -Message '等待应用退出超时' -FailureKind 'gui-exit-timeout' `
             -Detail "PID $GuiPid 仍在运行。请手动退出应用后重试。"
+        Stop-ProgressWindow
         Show-FailureMessage "等待应用退出超时（PID $GuiPid 仍在运行），更新已中止。请手动退出应用后重试。"
         exit 1
     }
@@ -330,6 +422,7 @@ try {
             }
         }
         Write-State -Phase 'done' -Message '已是最新版本，无需更新'
+        Stop-ProgressWindow -FinalMessage '已是最新版本，无需更新。正在拉起应用…'
         Start-WorkBuddy -Reason '无更新' | Out-Null
         exit 0
     }
@@ -437,6 +530,7 @@ try {
             }
         }
         Write-State -Phase 'done' -Message '更新完成，新版本已启动'
+        Stop-ProgressWindow -FinalMessage '更新完成！新版本已启动，本窗口即将关闭。'
         exit 0
     }
 
@@ -499,6 +593,7 @@ catch {
     Write-State -Phase 'failed' -Message '更新失败' -FailureKind $kind `
         -Detail "$message`n$hint"
 
+    Stop-ProgressWindow -FinalMessage '更新失败，详见弹窗与日志。'
     Show-FailureMessage "自动更新失败：$message`n`n$hint`n`n详细日志：$LogPath`n`n$(if ($rolledBack) { '已回滚到更新前的版本。' } else { '未能回滚，请手动检查工作区。' })"
 
     Start-WorkBuddy -Reason '更新失败回滚后' | Out-Null

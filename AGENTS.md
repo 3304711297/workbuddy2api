@@ -19,7 +19,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：195 passed（node --test）
+npm test                                          # 前端：197 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：73 passed
 ```
 
@@ -38,6 +38,15 @@ Hermes 运行时 venv，不是本仓 venv。必须用 `./.venv/Scripts/python.ex
 ```bash
 npm run build && cd src-tauri && cargo tauri build --no-bundle
 ```
+
+⚠️ **`windows.ps1` 必须带 UTF-8 BOM（真实踩过的无声闪退）**：Windows PowerShell 5.1
+读无 BOM 的 UTF-8 文件时按 ANSI/GBK 解码，中文注释变乱码打散引号配对 → **19 个解析
+错误 → 脚本在写第一行日志之前就死了**，表现为「点更新闪退且无日志无状态文件」。
+5.1 只认 BOM 才按 UTF-8 读。写入后必须确认文件头是 `EF BB BF`（契约测试锁定）。
+⚠️ **`which()` 在 Windows 不能用 `is_file()`**：Store 版 pwsh 的
+`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` 是 AppExecLink 重解析点，`is_file()`
+对它返回 false → which 静默找不到 pwsh → 回退 5.1 → 触发上述 BOM 死亡链。
+判定用 `fs::metadata().is_ok()`（`update.rs::path_is_executable`）。
 
 **绝不跑裸 `cargo build --release`**：`custom-protocol` feature 只有 tauri CLI 会带上，
 plain cargo 会**静默产出无前端的空壳 exe**（15,572,992 字节 vs 正确约 15,663,616）
@@ -193,7 +202,10 @@ workbuddy2api.exe (GUI)
   不该触发回滚。契约锁定：`tests/test_app_update_contract.test.js` 两条断言。
 
   **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
-  `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → 脚本等 GUI 消失后
+  `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → **脚本自绘置顶进度小窗**
+  （WinForms + runspace，Hermes 同款全程可见体验；`Start-ProgressWindow` 起窗、
+  `Write-State` 联动刷新、四个出口 `Stop-ProgressWindow`；窗体失败只 WARN 不阻断更新）
+  → 脚本等 GUI 消失后
   `git stash`（若有改动）→ `git fetch` + `git merge --ff-only` → `npm run build`
   → **`cargo tauri build --no-bundle`** → 校验产物（尺寸 > 空壳基准 + `index-*.js` 已内嵌）
   → 拉起新 exe → **等待启动确认**（进程存活 + `<Port>/health` 探活，90s 超时）

@@ -558,3 +558,35 @@ test('changelog 分组过滤内部噪音类型且永不返回空列表', () => {
   assert.ok(/FALLBACK_GROUP/.test(changelogJs), '缺少兜底分组（全部被过滤会渲染空弹窗）');
   assert.ok(/result\.length === 0/.test(changelogJs), '未对空结果做兜底判断');
 });
+
+test('更新脚本必须带 UTF-8 BOM（PS 5.1 无 BOM 按 GBK 读 → 解析即死）', () => {
+  // 真实踩到：无 BOM 的 UTF-8 脚本被 Windows PowerShell 5.1 按 GBK 解码，
+  // 中文注释变乱码打散引号配对 → 19 个解析错误 → 脚本在写日志前就死了，
+  // 表现为「点更新闪退且无任何日志/状态文件」。5.1 只认 BOM 才按 UTF-8 读。
+  // JS 的 readFileSync('utf8') 会自动剥 BOM，后续断言不受影响。
+  const buf = readFileSync(join(root, 'scripts', 'app-update', 'windows.ps1'));
+  assert.ok(
+    buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf,
+    '更新脚本缺 UTF-8 BOM：PS 5.1 会按 ANSI/GBK 误读中文注释导致解析失败（无声闪退）'
+  );
+});
+
+test('脚本必须内置可见进度窗（Hermes 同款体验，不得是后台黑箱）', () => {
+  // 用户明确要求与 Hermes 更新逻辑一致：更新全程要有可见进度。
+  // GUI 必须退出（Windows 锁 exe），进度窗由脚本用 WinForms runspace 自绘。
+  for (const fn of ['Start-ProgressWindow', 'Update-ProgressWindow', 'Stop-ProgressWindow']) {
+    assert.ok(new RegExp(`function ${fn}`).test(handoff), `缺少进度窗函数 ${fn}`);
+  }
+  // Write-State 必须联动刷新进度窗（否则窗体文字停在初始值）
+  const wsIdx = handoff.indexOf('function Write-State');
+  const wsBody = handoff.slice(wsIdx, handoff.indexOf('function Throw-Failure'));
+  assert.ok(
+    /Update-ProgressWindow/.test(wsBody),
+    'Write-State 未联动进度窗：每个阶段都必须实时可见'
+  );
+  // 四个出口（成功/无更新/失败/GUI 超时）都必须关窗
+  const stops = [...handoff.matchAll(/Stop-ProgressWindow/g)].length;
+  assert.ok(stops >= 4, `Stop-ProgressWindow 出口覆盖不足（${stops} 处，需 ≥4）`);
+  // 窗体必须置顶（GUI 已退出，窗口是唯一可见面）
+  assert.ok(/TopMost\s*=\s*\$true/.test(handoff), '进度窗未置顶');
+});
