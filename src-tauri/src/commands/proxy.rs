@@ -512,7 +512,14 @@ mod orphan_killer {
         let mut current = start_pid;
         for _ in 0..8 {
             // 防环路上限
-            let (cmdline, parent_pid) = process_info(current)?;
+            let (cmdline, parent_pid) = match process_info(current) {
+                Ok(info) => info,
+                Err(_) => {
+                    // ⚠️ 进程已死 = 链顶就是 current（它死了但其子进程仍活着）
+                    // 这正是孤儿根的特征：current 死了，它的子进程（监听者）还活着
+                    return Ok(Some(current));
+                }
+            };
             if !cmdline.contains("converter.py") {
                 return Ok(None);
             }
@@ -520,12 +527,23 @@ mod orphan_killer {
                 None => return Ok(Some(current)),       // 父已死 = 孤儿根
                 Some(pp) => {
                     if !process_alive(pp) {
-                        current = pp;   // 父也是死的 → 继续向上爬
-                        continue;
+                        // 父已死：爬到父看看它是不是 converter.py 链的
+                        match process_info(pp) {
+                            Ok((parent_cmdline, _)) => {
+                                if parent_cmdline.contains("converter.py") {
+                                    current = pp;
+                                    continue;
+                                }
+                                // 父不是 converter.py 且已死 = current 是孤儿根
+                                return Ok(Some(current));
+                            }
+                            Err(_) => {
+                                // 父已死（process_info Err）= current 是孤儿根
+                                return Ok(Some(current));
+                            }
+                        }
                     }
-                    // 父活着：若父也是 converter.py，说明整条链的祖先仍活着的
-                    // 那个是链顶——但链顶不是 GUI（GUI 是 workbuddy2api.exe）。
-                    // 父是 converter.py 且活着 = 它自己也是孤儿（它的父已死），继续爬。
+                    // 父活着：若父也是 converter.py，说明父也是孤儿链成员（它的父已死），继续爬
                     let (parent_cmdline, _) = process_info(pp)?;
                     if parent_cmdline.contains("converter.py") {
                         current = pp;

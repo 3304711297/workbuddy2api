@@ -239,6 +239,11 @@ workbuddy2api.exe (GUI)
   converter.py**——若是，说明父也是孤儿链成员（它的父已死），继续爬；若父不是
   converter.py（= GUI 活着），才返回 None。实测修正后：4344→9180(converter.py,继续爬)
   →9180 父死 → 根=9180，taskkill /T 连带 4344。
+  ⚠️ **第三轮爬链的 bug（用户实测仍不行，第四轮修复）**：process_info 对「已死 PID」
+  返回 Err，climb_to_orphan_root 爬到链顶 9284（已死）时 process_info(9284) 的 Err
+  被 `?` 传播成整个清理失败——用户看到「停止失败: 进程 9284 已退出」。
+  正确语义：process_info Err = 链顶已死 = current 就是孤儿根（它的子进程还活着），
+  返回 Some(current) 而非传播错误。
   端口超时未释放时**必须中止更新**（`Throw-Failure 'port-not-released'`，外部评审 P1 采纳，
   推翻早先的 WARN 宽容策略）：uvicorn 端口被占的实测行为是 `create_server` 抛
   `OSError`（WinError 10048）→ `sys.exit(STARTUP_FAILURE=3)`——新版内核**必然起不来**，
