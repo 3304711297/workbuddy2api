@@ -2279,8 +2279,23 @@ def _is_content_policy_violation(status_code: int, err_text: str) -> bool:
     此类错误为用户侧输入命中上游安全策略，与账号额度/网络无关。
     严禁触发切号重试（换号重试同样被拦且增加账号风险），严禁计入账号冷却。
     """
-    t = err_text or ""
-    return ("11140" in t) or ("内容未通过安全审核" in t) or ("未通过安全审核" in t)
+    t = (err_text or "").strip()
+    if not t:
+        return False
+    try:
+        data = json.loads(t)
+        if isinstance(data, dict):
+            code = data.get("code")
+            if code is not None:
+                if code == 11140 or str(code) == "11140":
+                    return True
+                # 若存在其他明确业务错误码（如 50001、6004、11102 等），绝不按文本模糊误判为 11140
+                return False
+            msg = str(data.get("msg") or data.get("message") or "")
+            return ("内容未通过安全审核" in msg) or ("未通过安全审核" in msg) or ("request illegal" in msg.lower())
+    except Exception:
+        pass
+    return ("11140" in t) or ("内容未通过安全审核" in t) or ("未通过安全审核" in t) or ("request illegal" in t.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -3093,7 +3108,7 @@ async def chat_completions(request: Request,
                                 _log(f"[{rid}] ⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
                                 _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
                                               requested_model=model_name, fallback_reason=fallback_reason)
-                                raise HTTPException(status_code=400, detail=_safe_err_raw(raw, r.status_code))
+                                return JSONResponse(status_code=400, content=_safe_err_raw(raw, r.status_code))
                             _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
@@ -3343,9 +3358,9 @@ async def anthropic_messages(
                                 _log(f"[{rid}] ⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
                                 _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
                                               requested_model=model_name, fallback_reason=fallback_reason)
-                                raise HTTPException(
+                                return JSONResponse(
                                     status_code=400,
-                                    detail={"type": "error", "error": {"type": "invalid_request_error", "message": "上游内容安全审核未通过 (11140)，请调整提示词后重试"}},
+                                    content={"type": "error", "error": {"type": "invalid_request_error", "message": "上游内容安全审核未通过 (11140)，请调整提示词后重试"}},
                                 )
                             _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
@@ -3570,7 +3585,7 @@ async def openai_responses(
                                 _log(f"[{rid}] ⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
                                 _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
                                               requested_model=model_name, fallback_reason=fallback_reason)
-                                raise HTTPException(status_code=400, detail=_safe_err_raw(raw, r.status_code))
+                                return JSONResponse(status_code=400, content=_safe_err_raw(raw, r.status_code))
                             _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
@@ -3884,7 +3899,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         err_str = raw.decode("utf-8", "replace")
                         _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
                         if _is_content_policy_violation(r.status_code, err_str):
-                            _log(f"{prefix}⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
+                            _log(f"{prefix}⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端流式错误帧")
                             _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
                                           retry_count=retry_count, retry_reason=retry_reason,
                                           requested_model=requested_model or model_name,
@@ -3988,7 +4003,13 @@ def _safe_err_raw(raw: bytes, status: int) -> dict:
         if isinstance(data, dict):
             code = data.get("code")
             msg = data.get("msg") or data.get("message") or ""
-            if code == 11140 or "11140" in str(code) or "安全审核" in str(msg):
+            is_11140 = False
+            if code is not None:
+                is_11140 = (code == 11140 or str(code) == "11140")
+            elif "内容未通过安全审核" in str(msg) or "未通过安全审核" in str(msg) or "request illegal" in str(msg).lower():
+                is_11140 = True
+
+            if is_11140:
                 return {
                     "error": {
                         "message": f"上游内容安全审核未通过 (11140): {msg or '请调整提示词后重试'}",
@@ -3999,7 +4020,7 @@ def _safe_err_raw(raw: bytes, status: int) -> dict:
         return data
     except Exception:
         text = raw.decode("utf-8", "replace")[:500]
-        if "11140" in text or "安全审核" in text:
+        if "11140" in text or "内容未通过安全审核" in text or "request illegal" in text.lower():
             return {
                 "error": {
                     "message": "上游内容安全审核未通过 (11140)，请调整提示词后重试",
@@ -4475,6 +4496,13 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                             err_str = err.decode("utf-8", "replace")
                             _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
                             _log(f"{prefix}── ERROR BODY ──\n{err_str}", level="debug")
+                            if _is_content_policy_violation(r.status_code, err_str):
+                                _log(f"{prefix}⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端流式错误帧")
+                                _record_usage_once(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
+                                                   requested_model=requested_model or model_name,
+                                                   fallback_reason=fallback_reason)
+                                yield _err_event(err, 400)
+                                return
                             _record_rate_limit(model_name, err_str, uid=curr_uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True

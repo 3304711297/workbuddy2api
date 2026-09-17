@@ -158,7 +158,8 @@ def main():
             icon = "✅"
         print(f"{icon} [{res['name']}] {res['repo']}: {res['last_commit']} -> {res['latest_commit']} ({res['commit_msg']})")
 
-    print(f"\n巡检结束：共发现 {len(updates)} 项存在上游新提交待评估。")
+    failures = [r for r in results if r["status"] == "query_failed"]
+    print(f"\n巡检结束：共发现 {len(updates)} 项存在上游新提交待评估，{len(failures)} 项查询失败。")
 
     # 生成 Markdown 报告
     report_lines = [
@@ -167,12 +168,14 @@ def main():
         f"> 生成时间：{now.strftime('%Y-%m-%d %H:%M')}（北京时间） · 配置文件：`tools/upstream-sources.json`",
         ">",
         "> **跟进 SOP**：审查对应上游的新提交 Diff 是否有可借鉴机制；若吸收落地，更新 `tools/upstream-sources.json` 对应条目的 `last_synced_commit` 并推 main，CI 会在无待跟进项时自动关闭本 Issue。",
-        "",
-        "## 概览",
-        "",
-        "| 项目 / 借鉴源 | 仓库 | 本地基线 | 上游最新 | 状态 |",
-        "|---------------|------|----------|----------|------|",
     ]
+    if failures:
+        report_lines.append(f">\n> ⚠️ **注意**：本次巡检有 {len(failures)} 项上游仓库查询失败（受网络波动或 GitHub API 限额影响），已标记为降级巡检并保留既有基线。")
+    report_lines.append("")
+    report_lines.append("## 概览")
+    report_lines.append("")
+    report_lines.append("| 项目 / 借鉴源 | 仓库 | 本地基线 | 上游最新 | 状态 |")
+    report_lines.append("|---------------|------|----------|----------|------|")
 
     for r in results:
         if r["has_update"]:
@@ -205,7 +208,7 @@ def main():
         report_lines.append("")
 
     report_lines.append("---")
-    report_lines.append(f"**待跟进项目数：{len(updates)}**")
+    report_lines.append(f"**待跟进项目数：{len(updates)}** · **查询失败数：{len(failures)}**")
 
     report_text = "\n".join(report_lines)
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
@@ -214,8 +217,12 @@ def main():
     gh_output = os.environ.get("GITHUB_OUTPUT")
     if gh_output:
         has_updates_str = "true" if len(updates) > 0 else "false"
+        has_query_failures_str = "true" if len(failures) > 0 else "false"
         with open(gh_output, "a", encoding="utf-8") as f:
-            f.write(f"has_updates={has_updates_str}\nupdate_count={len(updates)}\n")
+            f.write(f"has_updates={has_updates_str}\n")
+            f.write(f"update_count={len(updates)}\n")
+            f.write(f"has_query_failures={has_query_failures_str}\n")
+            f.write(f"query_failure_count={len(failures)}\n")
 
 
 if __name__ == "__main__":

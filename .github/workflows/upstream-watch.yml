@@ -59,14 +59,27 @@ jobs:
               --label "upstream-watch" || true
           fi
 
-      - name: Auto-close when caught up
-        if: steps.check.outputs.has_updates == 'false'
+      - name: Retain and update issue when watch degraded
+        if: steps.check.outputs.has_updates == 'false' && steps.check.outputs.has_query_failures == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FAIL_COUNT="${{ steps.check.outputs.query_failure_count }}"
+          echo "⚠️ 巡检降级：本次有 ${FAIL_COUNT} 项查询失败，为防止误报不自动收口，保持跟踪。"
+          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            gh issue edit "$EXISTING" --body-file upstream-report.md || true
+            gh issue comment "$EXISTING" --body "⚠️ [Upstream Watch] 本次巡检有 ${FAIL_COUNT} 项上游仓库查询失败（受网络波动或 GitHub API 限额影响），已保留现有跟踪 Issue 并更新报告，不作虚假收口。" || true
+          fi
+
+      - name: Auto-close when caught up and all queries succeeded
+        if: steps.check.outputs.has_updates == 'false' && steps.check.outputs.has_query_failures == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-            gh issue close "$EXISTING" --comment "✅ 所有借鉴源基线已与上游一致，自动收口。下次有新提交会自动重新开 Issue。" || true
+            gh issue close "$EXISTING" --comment "✅ 所有借鉴源查询成功且基线与上游一致，自动收口。下次有新提交会自动重新开 Issue。" || true
           else
             echo "无待跟进项，也无未关闭 Issue，跳过。"
           fi

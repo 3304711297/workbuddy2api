@@ -18,7 +18,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：407 passed 为当前基线
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：419 passed 为当前基线
 npm test                                          # 前端：202 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：85 passed
 ```
@@ -380,7 +380,11 @@ workbuddy2api.exe (GUI)
   - **413 防护**：`MAX_BODY_MB`（环境变量 `WORKBUDDY2API_MAX_BODY_MB`，默认 16MB）。中间件为**纯 ASGI receive 层按块熔断**（`RequestBodyLimitMiddleware`，非 BaseHTTPMiddleware）：① `Content-Length` 快速拒绝（零读取）；② 分块累计一旦超限立即中止读取并返回 413，**不放任 chunked 大包读完进内存**。超限不转发上游、不触发切号、不罚账号。
   - **出站 User-Agent**：出站请求（计费、对话、模型）统一调用 `_get_user_agent(domain)` 仿真官方客户端（国服 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 导致的 10085 违规拦截，并使官网使用端归因正常。亦支持 `WORKBUDDY2API_USER_AGENT`（兼容旧名 `CODEBUDDY2OPENAI_USER_AGENT`）自定义。
   - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。**安全边界（P0，改动此逻辑必读）**：下载前经 `_url_is_safe_for_fetch` 做 SSRF 校验——仅允许 http(s)，拒绝回环/私网/链路本地/云元数据地址与 CGNAT 共享地址段（100.64.0.0/10、127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、::1、fe80::/10、0.0.0.0 等），域名解析后逐个 IP 校验；**重定向逐跳重新校验**（防「公网跳内网」）；**TCP/TLS 连接地址强制与已校验公网 IP 绑定**（直连 IP 搭配 Host 头与 sni_hostname 扩展，根除 DNS rebinding 窗口）；单图默认 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`，设 0 则完全禁用远程下载），按 `Content-Length` 预判 + 流式累计双保险；响应必须为 `image/*`，否则拒绝内联。
-  - **11140 内容安全审核拦截防误判（借鉴 `icebears111/workbuddy2api`）**：上游错误码 `11140`（`request illegal` / “内容未通过安全审核，请调整后重试”）为用户 Prompt 命中上游安全策略，与账号配额和网络可用性无关。网关统一经 `_is_content_policy_violation` 识别，**严禁将其判定为限流或故障切号重试**（换号重试必失败且增加全池账号关联风控风险），**严禁记入账号冷却池**；直接格式化为 OpenAI 兼容的 `invalid_request_error` (400) 秒级返回客户端，引导用户调整输入。
+  - **11140 内容安全审核拦截防误判（借鉴 `icebears111/workbuddy2api`）**：上游错误码 `11140`（`request illegal` / “内容未通过安全审核，请调整后重试”）为用户 Prompt 命中上游安全策略，与账号配额和网络可用性无关。网关统一经 `_is_content_policy_violation` 识别（显式 code 优先判定，防止包含安全审核文案的其他业务错误码误判），**严禁将其判定为限流或故障切号重试**（换号重试必失败且增加全池账号关联风控风险），**严禁记入账号冷却池**。
+    - **非流式 (stream=false)**: 秒级返回 HTTP 400 JSON (`invalid_request_error`)；
+    - **流式 (stream=true)**: 遵循 SSE 协议标准（HTTP 200 `text/event-stream` 保持连接，首帧下发协议级 error 事件并立即闭合流：OpenAI 下发 `data: {"error": {"type": "invalid_request_error", "code": 11140, ...}}`；Anthropic 下发 `event: error`；Responses 下发 `event: response.failed`），严禁在 generator 内部抛 HTTPException(400)（FastAPI/Starlette 会因 headers 已发无法回滚并触发内部异常）；
+    - **调度与用量**: 无论流式或非流式，usage 记录唯一归属 `HTTP 400 (11140 content rejected)`。
+  - **借鉴项目看门巡检与故障降级守卫 (`tools/check-upstream.py` + `upstream-watch.yml`)**：巡检脚本区分「发现更新（`has_updates`）」与「查询失败（`has_query_failures`）」，仅在**全部查询成功且全部基线一致**（`has_updates == 'false' && has_query_failures == 'false'`）时才自动收口关闭 Issue。出现网络波动或 API 限额导致 `query_failed` 时，自动进入 `Watch degraded` 降级状态保留 Issue 并追加警告说明，根除「上游查询失败却被误当成无更新而误关 Issue」的假收口漏洞。
 
   **Responses / Anthropic 协议层硬约束（2026-09-12 修复，改动相关代码前必读）**：
 
