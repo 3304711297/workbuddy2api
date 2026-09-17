@@ -585,15 +585,29 @@ catch {
         }
     }
 
-    $rolledBack = $false
+    $rollbackSourceRestored = $false
+    $rollbackStashRestored = $true
+    $rollbackRebuildOk = $false
+
     if ($previousSha) {
         Write-State -Phase 'rolling-back' -Message '更新失败，正在回滚到更新前的版本'
         try {
             Push-Location $InstallRoot
             Write-Log "回滚到 $previousSha"
-            Invoke-Logged -FilePath 'git' -Arguments @('reset', '--hard', $previousSha) -What '回滚' | Out-Null
-            if ($stashed) { Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop' | Out-Null }
-            $rolledBack = $true
+            $resetCode = Invoke-Logged -FilePath 'git' -Arguments @('reset', '--hard', $previousSha) -What '回滚'
+            if ($resetCode -eq 0) {
+                $rollbackSourceRestored = $true
+            } else {
+                Write-Log "git reset --hard 回滚失败（退出码 $resetCode）" 'ERROR'
+            }
+
+            if ($stashed) {
+                $stashCode = Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop'
+                if ($stashCode -ne 0) {
+                    $rollbackStashRestored = $false
+                    Write-Log "git stash pop 恢复失败（退出码 $stashCode），改动仍保留在 stash 中" 'WARN'
+                }
+            }
         } catch {
             Write-Log "回滚过程出错：$_" 'ERROR'
         } finally {
@@ -601,23 +615,45 @@ catch {
         }
     }
 
-    if ($rolledBack) {
+    if ($rollbackSourceRestored) {
         # 源码已回旧版，但 exe 可能已被新版覆盖 → 必须重建，否则拉起的是坏 exe
         try {
             Write-State -Phase 'rolling-back' -Message '正在重新构建回滚后的版本'
             Push-Location $InstallRoot
-            Invoke-Logged -FilePath 'npm' -Arguments @('run', 'build') -What '回滚后前端构建' | Out-Null
-            Push-Location (Join-Path $InstallRoot 'src-tauri')
-            try {
-                Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建' | Out-Null
-            } finally {
-                Pop-Location
+            $npmCode = Invoke-Logged -FilePath 'npm' -Arguments @('run', 'build') -What '回滚后前端构建'
+            if ($npmCode -eq 0) {
+                Push-Location (Join-Path $InstallRoot 'src-tauri')
+                try {
+                    $cargoCode = Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建'
+                    if ($cargoCode -eq 0) {
+                        $rollbackRebuildOk = $true
+                    } else {
+                        Write-Log "回滚后 Rust 重建失败（退出码 $cargoCode）" 'ERROR'
+                    }
+                } finally {
+                    Pop-Location
+                }
+            } else {
+                Write-Log "回滚后前端构建失败（退出码 $npmCode）" 'ERROR'
             }
         } catch {
             Write-Log "回滚后重建失败：$_" 'ERROR'
         } finally {
             Pop-Location -ErrorAction SilentlyContinue
         }
+    }
+
+    $rolledBack = ($rollbackSourceRestored -and $rollbackRebuildOk)
+    $rollbackSummary = if ($rolledBack) {
+        if (-not $rollbackStashRestored) {
+            '已回滚到更新前的版本并重新构建（但工作区改动 stash pop 恢复失败，仍保存在 stash 中）。'
+        } else {
+            '已回滚到更新前的版本。'
+        }
+    } elseif ($rollbackSourceRestored) {
+        '源码已回滚，但旧版产物重新构建失败，请手动编译或检查工作区。'
+    } else {
+        '未能回滚，请手动检查工作区。'
     }
 
     $hint = switch ($kind) {
@@ -637,9 +673,13 @@ catch {
         -Detail "$message`n$hint"
 
     Stop-ProgressWindow -FinalMessage '更新失败，详见弹窗与日志。'
-    Show-FailureMessage "自动更新失败：$message`n`n$hint`n`n详细日志：$LogPath`n`n$(if ($rolledBack) { '已回滚到更新前的版本。' } else { '未能回滚，请手动检查工作区。' })"
+    Show-FailureMessage "自动更新失败：$message`n`n$hint`n`n详细日志：$LogPath`n`n$rollbackSummary"
 
-    Start-WorkBuddy -Reason '更新失败回滚后' | Out-Null
+    if ($rolledBack) {
+        Start-WorkBuddy -Reason '更新失败回滚后' | Out-Null
+    } else {
+        Write-Log '回滚未完全成功（源码或重建失败），跳过拉起应用以避免重复启动损坏版本' 'WARN'
+    }
     exit 1
 }
 finally {

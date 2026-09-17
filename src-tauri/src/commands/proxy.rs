@@ -506,50 +506,54 @@ mod orphan_killer {
         Err(format!("孤儿内核根（PID {orphan_root}）已终止但端口 {port} 仍未释放"))
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum ProcessLookup {
+        Alive { cmdline: String, parent_pid: Option<u32> },
+        NotFound,
+        QueryFailed(String),
+    }
+
     /// 沿祖先链向上爬，返回链顶「父进程已死」的 converter.py 进程 PID。
-    /// 若链顶父进程仍活着（= 有活 GUI 在管理），返回 None。
-    fn climb_to_orphan_root(start_pid: u32) -> Result<Option<u32>, String> {
+    /// 若链顶父进程仍活着（= 有活 GUI 在管理），返回 Ok(None)。
+    /// 若关键查询失败（WMI/PowerShell 报错、解析异常），严格 Fail-Closed 返回 Err，绝不误杀。
+    pub(crate) fn climb_to_orphan_root_with<F>(start_pid: u32, mut lookup: F) -> Result<Option<u32>, String>
+    where
+        F: FnMut(u32) -> ProcessLookup,
+    {
         let mut current = start_pid;
+        let (current_cmdline, mut parent_opt) = match lookup(current) {
+            ProcessLookup::Alive { cmdline, parent_pid } => (cmdline, parent_pid),
+            ProcessLookup::NotFound => return Ok(None),
+            ProcessLookup::QueryFailed(e) => {
+                return Err(format!("查询端口监听进程 {current} 失败，为防误杀已中止孤儿清理: {e}"));
+            }
+        };
+
+        if !current_cmdline.contains("converter.py") {
+            return Ok(None);
+        }
+
         for _ in 0..8 {
-            // 防环路上限
-            let (cmdline, parent_pid) = match process_info(current) {
-                Ok(info) => info,
-                Err(_) => {
-                    // ⚠️ 进程已死 = 链顶就是 current（它死了但其子进程仍活着）
-                    // 这正是孤儿根的特征：current 死了，它的子进程（监听者）还活着
+            let pp = match parent_opt {
+                None => return Ok(Some(current)),
+                Some(p) => p,
+            };
+
+            match lookup(pp) {
+                ProcessLookup::NotFound => {
+                    // 父进程已死：current 自身已验证是 converter.py 且父已死 → current 即孤儿根
                     return Ok(Some(current));
                 }
-            };
-            if !cmdline.contains("converter.py") {
-                return Ok(None);
-            }
-            match parent_pid {
-                None => return Ok(Some(current)),       // 父已死 = 孤儿根
-                Some(pp) => {
-                    if !process_alive(pp) {
-                        // 父已死：爬到父看看它是不是 converter.py 链的
-                        match process_info(pp) {
-                            Ok((parent_cmdline, _)) => {
-                                if parent_cmdline.contains("converter.py") {
-                                    current = pp;
-                                    continue;
-                                }
-                                // 父不是 converter.py 且已死 = current 是孤儿根
-                                return Ok(Some(current));
-                            }
-                            Err(_) => {
-                                // 父已死（process_info Err）= current 是孤儿根
-                                return Ok(Some(current));
-                            }
-                        }
-                    }
-                    // 父活着：若父也是 converter.py，说明父也是孤儿链成员（它的父已死），继续爬
-                    let (parent_cmdline, _) = process_info(pp)?;
+                ProcessLookup::QueryFailed(e) => {
+                    return Err(format!("查询父进程 {pp} 失败，为防误杀已中止孤儿清理: {e}"));
+                }
+                ProcessLookup::Alive { cmdline: parent_cmdline, parent_pid: grand_parent } => {
                     if parent_cmdline.contains("converter.py") {
                         current = pp;
+                        parent_opt = grand_parent;
                         continue;
                     }
-                    // 父是 GUI / 别的管理进程且活着 = 被正常管理，不是孤儿
+                    // 父进程存活且非 converter.py（= GUI 或其他管理进程），属正常管理，非孤儿
                     return Ok(None);
                 }
             }
@@ -557,8 +561,12 @@ mod orphan_killer {
         Ok(None)
     }
 
-    /// 取进程的命令行 + 父 PID；进程已死返回 Err。
-    fn process_info(pid: u32) -> Result<(String, Option<u32>), String> {
+    fn climb_to_orphan_root(start_pid: u32) -> Result<Option<u32>, String> {
+        climb_to_orphan_root_with(start_pid, process_info)
+    }
+
+    /// 取进程的命令行 + 父 PID；区分存活、不存在（__DEAD__）与查询失败（Fail-Closed）。
+    fn process_info(pid: u32) -> ProcessLookup {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
@@ -568,48 +576,36 @@ mod orphan_killer {
                  if (-not $p) {{ '__DEAD__' }} \
                  else {{ $p.ParentProcessId.ToString() + '|' + $p.CommandLine }}"
             );
-            let output = Command::new("powershell")
+            let output = match Command::new("powershell")
                 .creation_flags(CREATE_NO_WINDOW)
                 .args(["-NoProfile", "-Command", &script])
                 .output()
-                .map_err(|e| format!("查询进程 {pid} 信息失败: {e}"))?;
+            {
+                Ok(o) => o,
+                Err(e) => return ProcessLookup::QueryFailed(format!("执行 powershell 查询失败: {e}")),
+            };
+
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return ProcessLookup::QueryFailed(format!("powershell 查询退出码非零: {err}"));
+            }
+
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if text == "__DEAD__" {
-                return Err(format!("进程 {pid} 已退出"));
+                return ProcessLookup::NotFound;
             }
             match text.split_once('|') {
-                Some((pp, cmd)) => Ok((
-                    cmd.to_string(),
-                    pp.parse::<u32>().ok().filter(|&x| x != 0),
-                )),
-                None => Err(format!("进程 {pid} 信息解析失败: {text:?}")),
+                Some((pp, cmd)) => ProcessLookup::Alive {
+                    cmdline: cmd.to_string(),
+                    parent_pid: pp.parse::<u32>().ok().filter(|&x| x != 0),
+                },
+                None => ProcessLookup::QueryFailed(format!("进程 {pid} 信息解析失败: {text:?}")),
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
             let _ = pid;
-            Err("非 Windows 平台不支持".into())
-        }
-    }
-
-    fn process_alive(pid: u32) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let output = Command::new("powershell")
-                .creation_flags(CREATE_NO_WINDOW)
-                .args([
-                    "-NoProfile", "-Command",
-                    &format!("if (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction SilentlyContinue) {{ 'YES' }} else {{ 'NO' }}"),
-                ])
-                .output();
-            matches!(output, Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "YES")
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = pid;
-            false
+            ProcessLookup::QueryFailed("非 Windows 平台不支持".into())
         }
     }
 }
@@ -2025,5 +2021,139 @@ mod test_snapshot_query_tests {
                    vec!["--no-snapshots".to_string(), "--snapshots-keep".to_string(), "200".to_string()]);
         assert_eq!(snapshot_cli_args(true, 500),
                    vec!["--snapshots".to_string(), "--snapshots-keep".to_string(), "500".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod orphan_climb_tests {
+    use super::orphan_killer::{climb_to_orphan_root_with, ProcessLookup};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_climb_real_world_chain_4344_9180_9284_dead() {
+        // 4344(converter.py) -> 9180(converter.py) -> 9284(dead)
+        // 预期返回孤儿根 9180（9180 是 converter 且父已死）
+        let mut map = HashMap::new();
+        map.insert(4344, ProcessLookup::Alive {
+            cmdline: "python.exe converter.py --usage-log".into(),
+            parent_pid: Some(9180),
+        });
+        map.insert(9180, ProcessLookup::Alive {
+            cmdline: "python.exe converter.py --desensitize".into(),
+            parent_pid: Some(9284),
+        });
+        map.insert(9284, ProcessLookup::NotFound);
+
+        let res = climb_to_orphan_root_with(4344, |pid| {
+            map.get(&pid).cloned().unwrap_or(ProcessLookup::NotFound)
+        });
+        assert_eq!(res, Ok(Some(9180)));
+    }
+
+    #[test]
+    fn test_climb_chain_with_alive_gui_is_not_orphan() {
+        // 4344(converter) -> 9180(converter) -> 9284(活 GUI workbuddy2api.exe)
+        // 链路顶端有活着的 GUI 管理，不是孤儿，不杀
+        let mut map = HashMap::new();
+        map.insert(4344, ProcessLookup::Alive {
+            cmdline: "python.exe converter.py".into(),
+            parent_pid: Some(9180),
+        });
+        map.insert(9180, ProcessLookup::Alive {
+            cmdline: "python.exe converter.py".into(),
+            parent_pid: Some(9284),
+        });
+        map.insert(9284, ProcessLookup::Alive {
+            cmdline: "workbuddy2api.exe".into(),
+            parent_pid: None,
+        });
+
+        let res = climb_to_orphan_root_with(4344, |pid| {
+            map.get(&pid).cloned().unwrap_or(ProcessLookup::NotFound)
+        });
+        assert_eq!(res, Ok(None));
+    }
+
+    #[test]
+    fn test_climb_fails_closed_when_listener_query_fails() {
+        // 4344 查询抛出系统级错误（WMI 挂/PS 异常）：严格 Fail-Closed 返回 Err，绝不得杀 PID
+        let res = climb_to_orphan_root_with(4344, |_| {
+            ProcessLookup::QueryFailed("WMI RPC server unavailable".into())
+        });
+        assert!(res.is_err(), "监听进程查询失败必须返回 Err");
+        let err = res.unwrap_err();
+        assert!(err.contains("防误杀已中止孤儿清理"));
+    }
+
+    #[test]
+    fn test_climb_fails_closed_when_parent_query_fails() {
+        // 4344 正常，但其父进程 9180 查询报错：严格 Fail-Closed 返回 Err，绝不盲目当成孤儿根杀掉
+        let res = climb_to_orphan_root_with(4344, |pid| {
+            if pid == 4344 {
+                ProcessLookup::Alive {
+                    cmdline: "python.exe converter.py".into(),
+                    parent_pid: Some(9180),
+                }
+            } else {
+                ProcessLookup::QueryFailed("Access Denied".into())
+            }
+        });
+        assert!(res.is_err(), "祖先查询失败必须 Fail-Closed 返回 Err");
+        let err = res.unwrap_err();
+        assert!(err.contains("防误杀已中止孤儿清理"));
+    }
+
+    #[test]
+    fn test_climb_returns_none_for_non_converter_process() {
+        // 8787 端口被 nginx.exe 占用：不是 converter.py，直接放行不杀
+        let res = climb_to_orphan_root_with(5000, |_| {
+            ProcessLookup::Alive {
+                cmdline: "nginx.exe -g daemon off;".into(),
+                parent_pid: Some(1),
+            }
+        });
+        assert_eq!(res, Ok(None));
+    }
+
+    #[test]
+    fn test_climb_returns_none_when_start_pid_already_dead() {
+        // 监听者瞬间已退出
+        let res = climb_to_orphan_root_with(4344, |_| ProcessLookup::NotFound);
+        assert_eq!(res, Ok(None));
+    }
+
+    #[test]
+    fn test_climb_single_level_orphan() {
+        // 9180(converter) -> 9284(dead)
+        let res = climb_to_orphan_root_with(9180, |pid| {
+            if pid == 9180 {
+                ProcessLookup::Alive {
+                    cmdline: "python.exe converter.py".into(),
+                    parent_pid: Some(9284),
+                }
+            } else {
+                ProcessLookup::NotFound
+            }
+        });
+        assert_eq!(res, Ok(Some(9180)));
+    }
+
+    #[test]
+    fn test_climb_cycle_defense() {
+        // A -> B -> A 环路：步数上限防环退出，返回 None
+        let res = climb_to_orphan_root_with(100, |pid| {
+            if pid == 100 {
+                ProcessLookup::Alive {
+                    cmdline: "converter.py".into(),
+                    parent_pid: Some(200),
+                }
+            } else {
+                ProcessLookup::Alive {
+                    cmdline: "converter.py".into(),
+                    parent_pid: Some(100),
+                }
+            }
+        });
+        assert_eq!(res, Ok(None));
     }
 }

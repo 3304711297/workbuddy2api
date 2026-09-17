@@ -662,3 +662,26 @@ test('脚本必须内置可见进度窗（Hermes 同款体验，不得是后台�
   // 窗体必须置顶（GUI 已退出，窗口是唯一可见面）
   assert.ok(/TopMost\s*=\s*\$true/.test(handoff), '进度窗未置顶');
 });
+
+test('回滚阶段必须严格检查外部命令退出码并受控拉起（防假回滚与拉起损坏产物）', () => {
+  // 外部评审 P1 锁定：Invoke-Logged 内部只 return 退出码，不抛异常。
+  // 若使用 | Out-Null 吞掉退出码，外部 try/catch 会失效，导致 reset/build 失败却谎报「已回滚」。
+  assert.ok(
+    !/Invoke-Logged[^\n]*reset[^\n]*\|\s*Out-Null/.test(handoff),
+    'git reset 回滚被 | Out-Null 丢弃退出码：必须检查返回值以确认源码是否恢复'
+  );
+  assert.ok(
+    !/Invoke-Logged[^\n]*cargo[^\n]*\|\s*Out-Null/.test(handoff),
+    'cargo build 回滚重建被 | Out-Null 丢弃退出码：必须检查返回值以确认产物是否重新生成'
+  );
+  assert.ok(
+    !/Invoke-Logged[^\n]*npm[^\n]*\|\s*Out-Null/.test(handoff),
+    'npm run build 回滚重建被 | Out-Null 丢弃退出码：必须检查返回值'
+  );
+
+  // 回滚未完全成功（源码或重建失败）时，严禁无脑拉起损坏的应用 exe
+  assert.ok(
+    /if\s*\(\$rolledBack\)\s*\{[\s\S]*?Start-WorkBuddy/.test(handoff),
+    '回滚拉起必须在 if ($rolledBack) 守卫内：回滚未完全成功时绝不得拉起应用'
+  );
+});

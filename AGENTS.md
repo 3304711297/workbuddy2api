@@ -244,6 +244,13 @@ workbuddy2api.exe (GUI)
   被 `?` 传播成整个清理失败——用户看到「停止失败: 进程 9284 已退出」。
   正确语义：process_info Err = 链顶已死 = current 就是孤儿根（它的子进程还活着），
   返回 Some(current) 而非传播错误。
+  ⚠️ **爬链查询 Fail-Closed 铁律（外部评审 P1 采纳，第五轮修复）**：
+  `process_info` 必须通过 `ProcessLookup` 明确区分 `Alive` / `NotFound` / `QueryFailed`
+  三种语义，**绝不能把任何 Err 模糊当成「进程死亡」**——那会让端口监听者在 WMI/PowerShell
+  查询偶发异常时直接绕过 `converter.py` 身份匹配而被 `taskkill /F /T` 误杀！
+  起始端口监听者必须严格包含 `converter.py`；监听者或祖先查询若抛出系统错误（`QueryFailed`），
+  必须**一律 Fail-Closed 返回 Err 中止清理，严禁 kill**。
+  契约单测：`proxy.rs::orphan_climb_tests`（8 条覆盖全链路与 Fail-Closed 场景）。
   端口超时未释放时**必须中止更新**（`Throw-Failure 'port-not-released'`，外部评审 P1 采纳，
   推翻早先的 WARN 宽容策略）：uvicorn 端口被占的实测行为是 `create_server` 抛
   `OSError`（WinError 10048）→ `sys.exit(STARTUP_FAILURE=3)`——新版内核**必然起不来**，
@@ -254,6 +261,12 @@ workbuddy2api.exe (GUI)
   ⚠️ 启动确认失败进入回滚前，必须先按**本次 `Start-WorkBuddy` 返回的 PID** 终止新版 GUI
   并确认退出——它活着就持有 exe 文件锁，回滚的 `cargo build` 会撞占用。禁止按进程名
   全杀（会误杀用户手动另开的实例）。
+  ⚠️ **回滚命令退出码必须严格检查，严禁吞码与无脑拉起（外部评审 P1 采纳）**：
+  `Invoke-Logged` 只 `return $code` 不抛异常，外部使用 `| Out-Null` 会让 `try/catch`
+  彻底失效，导致 `git reset` 或 `cargo build` 失败却谎报「已回滚」。
+  必须检查每个命令的退出码；`$rolledBack` 必须满足「源码 reset 成功 + 旧版产物重建成功」。
+  回滚未完全成功时，严禁无脑拉起损坏或半截的 exe（避免将用户反复推入崩溃循环）。
+  契约锁定：`tests/test_app_update_contract.test.js`。
   ⚠️ **stash 恢复必须晚于所有回滚点（实测复现的数据丢失路径，改动必读）**：
   旧写法在第 6 步（产物校验后）就提前 `stash pop`，一旦启动确认失败触发
   `git reset --hard $previousSha`，刚弹回的用户改动会被一并抹掉，而 catch 分支的
