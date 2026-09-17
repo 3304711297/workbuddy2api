@@ -48,15 +48,15 @@ jobs:
         run: |
           COUNT="${{ steps.check.outputs.update_count }}"
           TITLE="🔔 [Upstream Watch] 社区反代借鉴项目有新提交（${COUNT} 项待评估）"
-          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number')
-          if [ -n "$EXISTING" ]; then
+          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
             echo "更新已存在的 Issue #$EXISTING"
-            gh issue edit "$EXISTING" --title "$TITLE" --body-file upstream-report.md
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file upstream-report.md || true
           else
             gh issue create \
               --title "$TITLE" \
               --body-file upstream-report.md \
-              --label "upstream-watch"
+              --label "upstream-watch" || true
           fi
 
       - name: Auto-close when caught up
@@ -64,9 +64,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number')
-          if [ -n "$EXISTING" ]; then
-            gh issue close "$EXISTING" --comment "✅ 所有借鉴源基线已与上游一致，自动收口。下次有新提交会自动重新开 Issue。"
+          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            gh issue close "$EXISTING" --comment "✅ 所有借鉴源基线已与上游一致，自动收口。下次有新提交会自动重新开 Issue。" || true
           else
             echo "无待跟进项，也无未关闭 Issue，跳过。"
           fi
