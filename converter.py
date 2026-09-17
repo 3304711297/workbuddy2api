@@ -361,24 +361,38 @@ def _auth_is_expired(auth: dict) -> bool:
     return time.time() * 1000 >= (expires_at - 60_000)
 
 
-def _read_all_accounts() -> tuple[str, dict[str, dict]]:
-    """读取 accounts.json 中的活跃 UID 与所有账号字典。"""
+_accounts_cache: tuple[str, dict[str, dict]] = ("", {})
+_accounts_sig: tuple[float, int] = (0.0, 0)
+
+
+def _read_all_accounts(force: bool = False) -> tuple[str, dict[str, dict]]:
+    """读取 accounts.json 中的活跃 UID 与所有账号字典（按 mtime+size 签名缓存）。"""
+    global _accounts_sig, _accounts_cache
     acc_path = _accounts_file()
-    if not acc_path.is_file():
+    try:
+        st = acc_path.stat()
+    except OSError:
+        _accounts_sig = (0.0, 0)
+        _accounts_cache = ("", {})
         return "", {}
+    sig = (st.st_mtime, st.st_size)
+    if not force and sig == _accounts_sig and _accounts_cache[1]:
+        return _accounts_cache
     try:
         cfg = json.loads(acc_path.read_text(encoding="utf-8"))
         active_uid = cfg.get("active_uid") or ""
         accounts = cfg.get("accounts") or {}
         if isinstance(accounts, dict):
-            return active_uid, accounts
+            _accounts_cache = (active_uid, accounts)
     except Exception:
         pass
-    return "", {}
+    _accounts_sig = sig
+    return _accounts_cache
 
 
 def _set_active_account(target_uid: str) -> bool:
     """原子更新 accounts.json 的 active_uid。"""
+    global _accounts_sig
     acc_path = _accounts_file()
     if not acc_path.is_file():
         return False
@@ -391,6 +405,7 @@ def _set_active_account(target_uid: str) -> bool:
         with open(tmp_acc, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         os.replace(tmp_acc, acc_path)
+        _accounts_sig = (0.0, 0)
         return True
     except Exception as e:
         _log(f"切换 active_uid 失败: {e}")
@@ -804,15 +819,29 @@ def _model_settings_file() -> str:
     return wb_file
 
 
-def _load_model_settings() -> dict:
-    p = _model_settings_file()
-    if os.path.exists(p):
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+_model_settings_cache: dict = {}
+_model_settings_sig: tuple[float, int] = (0.0, 0)
+
+
+def _load_model_settings(force: bool = False) -> dict:
+    global _model_settings_sig, _model_settings_cache
+    p = Path(_model_settings_file())
+    try:
+        st = p.stat()
+    except OSError:
+        _model_settings_sig = (0.0, 0)
+        _model_settings_cache = {}
+        return {}
+    sig = (st.st_mtime, st.st_size)
+    if not force and sig == _model_settings_sig and _model_settings_cache:
+        return _model_settings_cache
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        _model_settings_cache = data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    _model_settings_sig = sig
+    return _model_settings_cache
 
 
 # ---------------------------------------------------------------------------
@@ -1686,16 +1715,17 @@ app.add_middleware(RequestBodyLimitMiddleware)
 _LOG_LOCK = threading.Lock()
 
 
+_RE_BEARER = re.compile(r'(Bearer\s+)[A-Za-z0-9_\-\.]{8,}')
+_RE_SENSITIVE_KEYS = re.compile(
+    r'("?(?:accessToken|refreshToken|token|api[_-]?key|password)"?\s*[:=]\s*["\']?)[^"\'\s,{}]+(["\']?)',
+    re.IGNORECASE,
+)
+
+
 def _sanitize_log_text(text: str) -> str:
     """脱敏日志中的 Token、密钥和敏感认证头。"""
-    text = re.sub(r'(Bearer\s+)[A-Za-z0-9_\-\.]{8,}', r'\1***', text)
-    text = re.sub(
-        r'("?(?:accessToken|refreshToken|token|api[_-]?key|password)"?\s*[:=]\s*["\']?)[^"\'\s,{}]+(["\']?)',
-        r'\1***\2',
-        text,
-        flags=re.IGNORECASE,
-    )
-    return text
+    text = _RE_BEARER.sub(r'\1***', text)
+    return _RE_SENSITIVE_KEYS.sub(r'\1***\2', text)
 
 
 def _log(msg: str, level: str = "info"):
@@ -1868,6 +1898,7 @@ def _record_usage(model: str, ok: bool, t0: float, *,
 
 
 _SNAP_LOCK = threading.Lock()
+_SNAP_LINE_COUNT: int = -1
 
 # 快照上下文（任务局部）：三聊天端点入口 set(端点, 原始请求体），
 # _record_usage 在所有完成路径统一透传落快照——错误路径无需逐个手工接线。
@@ -1937,17 +1968,30 @@ def _record_snapshot(endpoint, model, ok, t0, *,
             "replay": bool(replay),
         }
         keep = int(CONFIG.get("snapshots_keep") or 200)
+        global _SNAP_LINE_COUNT
         with _SNAP_LOCK:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    lines = fh.readlines()
-                if len(lines) > 2 * keep:
-                    with open(path, "w", encoding="utf-8") as fh:
-                        fh.writelines(lines[-keep:])
-            except OSError:
-                pass
+            if _SNAP_LINE_COUNT < 0:
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        _SNAP_LINE_COUNT = sum(1 for _ in fh)
+                except OSError:
+                    _SNAP_LINE_COUNT = 1
+            else:
+                _SNAP_LINE_COUNT += 1
+            if _SNAP_LINE_COUNT > 2 * keep:
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        lines = fh.readlines()
+                    if len(lines) > 2 * keep:
+                        with open(path, "w", encoding="utf-8") as fh:
+                            fh.writelines(lines[-keep:])
+                        _SNAP_LINE_COUNT = len(lines[-keep:])
+                    else:
+                        _SNAP_LINE_COUNT = len(lines)
+                except OSError:
+                    pass
         return sid
     except Exception:
         return None
@@ -2384,14 +2428,35 @@ class AccountRotator:
         1. 到期分层：优先消耗最快过期的额度（日粒度 YYYY-MM-DD），避免资产过期作废；
         2. 未知到期日：作为兜底档排在最后。
         """
-        ready = self.get_candidate_uids(model)
+        all_accs = self.get_all_accounts()
+        if not all_accs:
+            return []
+        ready = [uid for uid, _ in all_accs if not _is_account_cooldown(uid, model)]
         if len(ready) <= 1:
             return ready
 
+        acc_map = dict(all_accs)
         now = int(time.time())
         items = []
         for uid in ready:
-            exp = self.get_account_expire_at(uid)
+            session = acc_map.get(uid)
+            exp = 0
+            if isinstance(session, dict):
+                credit = session.get("credit") or {}
+                if isinstance(credit, dict):
+                    for k in ("soonest_expire_at", "expire_at", "soonestExpireAt", "expireAt"):
+                        if k in credit:
+                            ts = _parse_expiry_timestamp(credit[k])
+                            if ts > 0:
+                                exp = ts
+                                break
+                if exp == 0:
+                    for k in ("soonest_expire_at", "expire_at"):
+                        if k in session:
+                            ts = _parse_expiry_timestamp(session[k])
+                            if ts > 0:
+                                exp = ts
+                                break
             if exp > now:
                 day_key = time.strftime("%Y-%m-%d", time.localtime(exp))
                 items.append((uid, exp, day_key))
@@ -3370,10 +3435,14 @@ async def openai_responses(
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
                 converter_inst = ResponsesStreamConverter(model=mapped_model)
+                buf = ""
                 async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
                     try:
-                        text = chunk.decode("utf-8", errors="replace")
-                        for line in text.split("\n"):
+                        text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                        buf += text
+                        lines = buf.split("\n")
+                        buf = lines.pop()
+                        for line in lines:
                             line_s = line.strip()
                             if not line_s or not line_s.startswith("data:"):
                                 continue
@@ -3389,6 +3458,18 @@ async def openai_responses(
                                 pass
                     except Exception:
                         pass
+                if buf.strip():
+                    line_s = buf.strip()
+                    if line_s.startswith("data:"):
+                        data_part = line_s[5:].strip()
+                        if data_part != "[DONE]":
+                            try:
+                                chunk_json = json.loads(data_part)
+                                res_sse = converter_inst.feed_chunk(chunk_json)
+                                if res_sse:
+                                    yield res_sse.encode("utf-8")
+                            except Exception:
+                                pass
                 finish_sse = converter_inst.finish()
                 if finish_sse:
                     yield finish_sse.encode("utf-8")
@@ -4174,40 +4255,9 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     coal = _ReasoningCoalescer()
     line_buf = _SseLineBuffer()
 
-    def _record_event_stats(cleaned: bytes):
-        """从清洗后的 SSE 事件里解析统计信息（usage/finish/tool_names/审核拦截）。"""
-        nonlocal finish_reason, saw_filter, ttft_ms
-        text_repr = cleaned.decode("utf-8", "replace")
-        if "content-filter" in text_repr or "敏感" in text_repr or "审核" in text_repr:
-            saw_filter = True
-        for ln in cleaned.split(b"\n"):
-            s = ln.lstrip()
-            if not s.startswith(b"data:"):
-                continue
-            d = s[5:].lstrip()
-            if d == b"[DONE]":
-                continue
-            try:
-                obj = json.loads(d)
-            except Exception:
-                continue
-            if obj.get("usage"):
-                usage.update(obj["usage"])
-            for ch in obj.get("choices") or []:
-                if ch.get("finish_reason"):
-                    finish_reason = ch["finish_reason"]
-                delta = ch.get("delta") or {}
-                # 首个含内容的 delta 即 TTFT（与桌面端 test_chat 的口径一致）
-                if ttft_ms is None and t0 and delta.get("content"):
-                    ttft_ms = int((time.time() - t0) * 1000)
-                for tc in delta.get("tool_calls") or []:
-                    nm = (tc.get("function") or {}).get("name")
-                    if nm:
-                        tool_names.append(nm)
-
     def _feed_and_coalesce(chunk: bytes):
-        """字节 chunk → 行缓冲 → 完整事件清洗 → reasoning 合并 → (转发事件列表)。"""
-        nonlocal buf
+        """字节 chunk → 行缓冲 → 单趟事件解析/统计/清洗 → reasoning 合并 → (转发事件列表)。"""
+        nonlocal buf, finish_reason, saw_filter, ttft_ms
         for line in line_buf.feed(chunk):
             buf += line + b"\n"
         # buf 现在累积了完整行；按空行切完整 SSE 事件
@@ -4216,13 +4266,73 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             evt, buf = buf.split(b"\n\n", 1)
             events.append(evt)
         out: list[bytes] = []
+        strip_empty = CONFIG.get("strip_empty_delta")
+        coalesce_rc = CONFIG.get("coalesce_reasoning")
+
         for evt in events:
-            cleaned_lines = []
+            # 1. 纯注释帧/控制行（如 : ping 或 : fallback），直接原样放行，零 JSON 开销
+            if evt.startswith(b":"):
+                out.append(evt + b"\n\n")
+                continue
+
+            cleaned_lines: list[bytes] = []
+            any_changed = False
+
             for ln in evt.split(b"\n"):
-                cleaned_lines.append(_maybe_sanitize_line(ln.decode("utf-8", "replace")))
-            cleaned = ("\n".join(cleaned_lines) + "\n\n").encode("utf-8")
-            _record_event_stats(cleaned)
-            out += coal.feed(cleaned)
+                if not ln:
+                    continue
+                s = ln.lstrip()
+                if not s.startswith(b"data:"):
+                    cleaned_lines.append(ln)
+                    continue
+
+                payload = s[5:].strip()
+                if not payload or payload in (b"[DONE]", b"[done]"):
+                    cleaned_lines.append(b"data: [DONE]")
+                    continue
+
+                # 检查风控特征（直接字节比对，避免额外 decode 开销）
+                if b"content-filter" in payload or b"\xe6\x95\x8f\xe6\x84\x9f" in payload or b"\xe5\xae\xa1\xe6\xa0\xb8" in payload:
+                    saw_filter = True
+
+                try:
+                    obj = json.loads(payload)
+                except Exception:
+                    cleaned_lines.append(ln)
+                    continue
+
+                # 统计信息单趟就地提取（消灭二次全量 JSON 反序列化）
+                if obj.get("usage"):
+                    usage.update(obj["usage"])
+                for ch in obj.get("choices") or []:
+                    if ch.get("finish_reason"):
+                        finish_reason = ch["finish_reason"]
+                    delta = ch.get("delta") or {}
+                    if ttft_ms is None and t0 and delta.get("content"):
+                        ttft_ms = int((time.time() - t0) * 1000)
+                    for tc in delta.get("tool_calls") or []:
+                        nm = (tc.get("function") or {}).get("name")
+                        if nm:
+                            tool_names.append(nm)
+
+                # 空 delta 清洗（若未改变则保留原行 bytes，避免 dumps 序列化）
+                if strip_empty:
+                    changed, new_obj = _sanitize_delta_obj(obj)
+                    if changed:
+                        any_changed = True
+                        cleaned_lines.append(b"data: " + json.dumps(new_obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                    else:
+                        cleaned_lines.append(ln)
+                else:
+                    cleaned_lines.append(ln)
+
+            # 事件组装与 reasoning 处理
+            cleaned_evt = b"\n".join(cleaned_lines) + b"\n\n" if any_changed else (evt + b"\n\n")
+            if not coalesce_rc:
+                out.append(cleaned_evt)
+            else:
+                out += coal.feed(cleaned_evt)
+
         return out
 
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
