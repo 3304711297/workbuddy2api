@@ -26,8 +26,8 @@ export async function loadModelsMatrix() {
   try {
     const list = await invokeTauri('models_fetch_all');
     rawModelsList = (list || []).map(m => {
-      // 过滤掉无实际业务区分意义的内部 craft 标签
-      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft');
+      // 仅保留 agent 来源端标签（CodeBuddy / WorkBuddy / 双端），过滤其余冗余业务标签
+      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft' && ['CodeBuddy', 'WorkBuddy', '双端'].includes(t));
       return m;
     });
     updateTagFilterDropdown();
