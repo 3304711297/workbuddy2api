@@ -960,12 +960,12 @@ mod tests {
     #[test]
     fn build_sha_is_baked_at_compile_time() {
         // build.rs 必须把构建提交注入二进制：这是「本 exe 是哪个提交构建的」唯一真源。
-        // 值为短 sha（7-40 位十六进制）；无 git 环境构建时退化为 "unknown"（不 fail 构建）。
+        // 比较与缓存必须使用完整 40 位 SHA；无 git 构建回退 unknown。
         let sha = build_sha();
         assert!(!sha.is_empty(), "WORKBUDDY2API_BUILD_SHA 未注入（build.rs 失效）");
         let ok = sha == "unknown"
-            || (sha.len() >= 7 && sha.len() <= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert!(ok, "构建 sha 形状异常：{sha:?}（应为短 sha 或 unknown）");
+            || (sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(ok, "构建 sha 形状异常：{sha:?}（应为完整 40 位 sha 或 unknown）");
     }
 
     #[test]

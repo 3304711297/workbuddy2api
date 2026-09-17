@@ -19,15 +19,17 @@ use std::process::Command;
 ///
 /// 不 fail 构建：源码包（无 .git）也必须能编译，此时版本判定退化为「未知」，
 /// 由上层决定如何提示，而不是让整个构建崩掉。
-fn git_short_sha() -> String {
-    let out = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output();
+fn git_full_sha() -> String {
+    let out = Command::new("git").args(["rev-parse", "HEAD"]).output();
     match out {
         Ok(o) if o.status.success() => {
             let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if sha.is_empty() {
-                "unknown".into()
-            } else {
+            // 完整 40 位校验：update.rs 用它直接与远端 tip SHA 比较，
+            // 短 sha 会恒不等 → 同 tip 也必打 compare，失败时误报「有更新」。
+            if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
                 sha
+            } else {
+                "unknown".into()
             }
         }
         _ => "unknown".into(),
@@ -35,7 +37,7 @@ fn git_short_sha() -> String {
 }
 
 fn main() {
-    let sha = git_short_sha();
+    let sha = git_full_sha();
     println!("cargo:rustc-env=WORKBUDDY2API_BUILD_SHA={sha}");
 
     // HEAD 变化（切分支）与分支引用变化（新提交）时都要重编，避免 sha 陈旧：
