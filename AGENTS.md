@@ -558,3 +558,15 @@ workbuddy2api.exe (GUI)
   引导面板采用等宽代码微凹槽与胶囊分段切换 Tab（`snippet-tab-pills` 就地切换 Bash/PS/JSON）。
   所有视觉改动必须保持既有 202 条前端契约全绿，严禁破坏既有 DOM 元素 ID 与键盘无障碍焦点规范。
 
+- **签名缓存提交流程与测试数据隔离（2026-09-17 踩坑沉淀，改动必读）**：
+  1. **签名提交原则（解析成功才提交新签名）**：
+     所有基于 `(mtime, size)` 的签名缓存（`load_app_settings` / `_read_all_accounts` / `_load_model_settings` / `_load_availability`），
+     必须在 `json.loads` 成功且校验数据结构合法后才更新 `_sig = sig`。若文件处于并发半写或暂时损坏状态，
+     解析异常时绝不得更新签名，防止把异常状态当成 fresh 缓存死锁；下次读取会自然重试。契约锁定：`tests/test_perf_and_hotpath_optimizations.py`。
+  2. **测试数据隔离铁律**：
+     本地/单元测试绝对禁止读写 `%LOCALAPPDATA%/workbuddy2api/accounts.json` 等真实用户数据路径；
+     必须通过 pytest `tmp_path` 或 monkeypatch 隔离，严禁将 mock token 写进宿主真实配置导致客户端报 401。
+  3. **模型标签极简口径**：
+     控制台模型表标签列仅保留 Agent 来源端标识（`CodeBuddy` / `WorkBuddy` / `双端`），
+     上游业务修饰标签（主力/深度推理/高智商等）一律过滤剔除。
+
