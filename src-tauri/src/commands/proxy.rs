@@ -483,52 +483,107 @@ mod orphan_killer {
         }
     }
 
-    /// 校验该 PID 是「孤儿 converter」：命令行含 converter.py 且父进程已死。
-    fn is_orphan_converter(pid: u32) -> Result<bool, String> {
+    pub fn find_and_kill_orphan(port: u16) -> Result<Option<u32>, String> {
+        let Some(listener_pid) = find_listener_pid(port)? else {
+            return Ok(None);
+        };
+        // ⚠️ 从监听者向上爬祖先链，找「父已死」的最顶层 converter.py 进程——
+        // 那才是真正的孤儿根。实测链式孤儿：GUI 9284(死)→9180(converter.py 根孤儿)
+        // →4344(子进程,父活着)。杀 4344 会被 taskkill 拦，且语义也不对——
+        // 4344 只是子进程，根在 9180。taskkill /T 杀 9180 会连带 4344。
+        let Some(orphan_root) = climb_to_orphan_root(listener_pid)? else {
+            // 链路顶端有活着的父进程 = 被某个仍存活的 GUI 正常管理，不是孤儿
+            return Ok(None);
+        };
+        kill_process_tree_by_pid(orphan_root)?;
+        // 有界等待确认端口释放（孤儿死后子进程/句柄释放可能有延迟）
+        for _ in 0..10 {
+            if matches!(find_listener_pid(port)?, None) {
+                return Ok(Some(orphan_root));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Err(format!("孤儿内核根（PID {orphan_root}）已终止但端口 {port} 仍未释放"))
+    }
+
+    /// 沿祖先链向上爬，返回链顶「父进程已死」的 converter.py 进程 PID。
+    /// 若链顶父进程仍活着（= 有活 GUI 在管理），返回 None。
+    fn climb_to_orphan_root(start_pid: u32) -> Result<Option<u32>, String> {
+        let mut current = start_pid;
+        for _ in 0..8 {
+            // 防环路上限
+            let (cmdline, parent_pid) = process_info(current)?;
+            if !cmdline.contains("converter.py") {
+                return Ok(None);
+            }
+            match parent_pid {
+                None => return Ok(Some(current)),       // 父已死 = 孤儿根
+                Some(pp) => {
+                    if process_alive(pp) {
+                        // 父活着 = 被正常管理，不是孤儿链
+                        return Ok(None);
+                    }
+                    current = pp;
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 取进程的命令行 + 父 PID；进程已死返回 Err。
+    fn process_info(pid: u32) -> Result<(String, Option<u32>), String> {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             let script = format!(
-                "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; \
-                 if (-not $p) {{ 'GONE' }} \
-                 elseif ($p.CommandLine -notmatch 'converter.py') {{ 'NOT-CONVERTER' }} \
-                 else {{ \
-                   $parent = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p.ParentProcessId) -ErrorAction SilentlyContinue; \
-                   if ($parent) {{ 'PARENT-ALIVE' }} else {{ 'ORPHAN' }} \
-                 }}"
+                "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction SilentlyContinue; \
+                 if (-not $p) {{ '__DEAD__' }} \
+                 else {{ $p.ParentProcessId.ToString() + '|' + $p.CommandLine }}"
             );
             let output = Command::new("powershell")
                 .creation_flags(CREATE_NO_WINDOW)
                 .args(["-NoProfile", "-Command", &script])
                 .output()
-                .map_err(|e| format!("校验进程身份失败: {e}"))?;
-            Ok(String::from_utf8_lossy(&output.stdout).trim() == "ORPHAN")
+                .map_err(|e| format!("查询进程 {pid} 信息失败: {e}"))?;
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if text == "__DEAD__" {
+                return Err(format!("进程 {pid} 已退出"));
+            }
+            match text.split_once('|') {
+                Some((pp, cmd)) => Ok((
+                    cmd.to_string(),
+                    pp.parse::<u32>().ok().filter(|&x| x != 0),
+                )),
+                None => Err(format!("进程 {pid} 信息解析失败: {text:?}")),
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {
             let _ = pid;
-            Ok(false)
+            Err("非 Windows 平台不支持".into())
         }
     }
 
-    pub fn find_and_kill_orphan(port: u16) -> Result<Option<u32>, String> {
-        let Some(pid) = find_listener_pid(port)? else {
-            return Ok(None);
-        };
-        if !is_orphan_converter(pid)? {
-            // 端口被「不是孤儿 converter」的进程占着：不是本工具的孤儿，绝不动它
-            return Ok(None);
+    fn process_alive(pid: u32) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let output = Command::new("powershell")
+                .creation_flags(CREATE_NO_WINDOW)
+                .args([
+                    "-NoProfile", "-Command",
+                    &format!("if (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction SilentlyContinue) {{ 'YES' }} else {{ 'NO' }}"),
+                ])
+                .output();
+            matches!(output, Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "YES")
         }
-        kill_process_tree_by_pid(pid)?;
-        // 有界等待确认端口释放（孤儿死后子进程/句柄释放可能有延迟）
-        for _ in 0..10 {
-            if matches!(find_listener_pid(port)?, None) {
-                return Ok(Some(pid));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = pid;
+            false
         }
-        Err(format!("孤儿内核（PID {pid}）已终止但端口 {port} 仍未释放"))
     }
 }
 
