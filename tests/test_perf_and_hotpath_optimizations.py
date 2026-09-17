@@ -125,3 +125,29 @@ def test_snapshot_line_counter_rotation(tmp_path, monkeypatch):
 
     lines = snap_file.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) <= 6
+
+
+def test_cache_signature_does_not_commit_on_corrupt_read(tmp_path, monkeypatch):
+    """P2 边界测试：文件半写/损坏时读取失败，绝不提交新签名；写好后下次能正确重试。"""
+    settings_file = tmp_path / "model_settings.json"
+    monkeypatch.setattr(converter, "_model_settings_file", lambda: str(settings_file))
+    converter._model_settings_cache = {"initial": 1}
+    converter._model_settings_sig = (1.0, 10)
+
+    # 1. 模拟写入了一个损坏/半写的 JSON
+    time.sleep(0.02)
+    settings_file.write_text('{"bad_json": ', encoding="utf-8")
+    st = settings_file.stat()
+    corrupt_sig = (st.st_mtime, st.st_size)
+
+    # 读取失败，返回旧缓存
+    cached = converter._load_model_settings()
+    assert cached == {"initial": 1}
+    # 关键断言：签名不得被更新为损坏文件的签名！
+    assert converter._model_settings_sig != corrupt_sig
+
+    # 2. 外部完成写入，补齐了合法 JSON（保持相同的 mtime/size 窗口或正常写入）
+    settings_file.write_text('{"fixed": true}', encoding="utf-8")
+    re_read = converter._load_model_settings()
+    assert re_read == {"fixed": True}
+    assert converter._model_settings_sig == (settings_file.stat().st_mtime, settings_file.stat().st_size)

@@ -332,10 +332,11 @@ def load_app_settings(force: bool = False) -> dict:
         return _settings_cache
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        _settings_cache = data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            _settings_cache = data
+            _settings_sig = sig
     except Exception as e:
         _log(f"读取 settings.json 失败，沿用上次配置：{e}", level="debug")
-    _settings_sig = sig
     return _settings_cache
 
 
@@ -384,9 +385,9 @@ def _read_all_accounts(force: bool = False) -> tuple[str, dict[str, dict]]:
         accounts = cfg.get("accounts") or {}
         if isinstance(accounts, dict):
             _accounts_cache = (active_uid, accounts)
+            _accounts_sig = sig
     except Exception:
         pass
-    _accounts_sig = sig
     return _accounts_cache
 
 
@@ -837,10 +838,11 @@ def _load_model_settings(force: bool = False) -> dict:
         return _model_settings_cache
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        _model_settings_cache = data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            _model_settings_cache = data
+            _model_settings_sig = sig
     except Exception:
         pass
-    _model_settings_sig = sig
     return _model_settings_cache
 
 
@@ -874,11 +876,14 @@ def _load_availability(force: bool = False) -> dict:
         return _availability_cache
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        _availability_cache = data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            _availability_cache = data
+            _availability_sig = sig
+        else:
+            _availability_cache = {}
     except Exception as e:
         _log(f"读取 model_availability.json 失败，按空映射处理：{e}", level="debug")
         _availability_cache = {}
-    _availability_sig = sig
     return _availability_cache
 
 
