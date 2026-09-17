@@ -804,9 +804,9 @@ class TestAnthropicStreamTranslator:
         # message_start
         # content_block_start (index 0)
         # content_block_delta (index 0)
-        # content_block_stop (index 0)
         # content_block_start (index 1)
         # content_block_delta (index 1)
+        # content_block_stop (index 0)
         # content_block_stop (index 1)
         # message_delta
         # message_stop
@@ -814,16 +814,18 @@ class TestAnthropicStreamTranslator:
             "message_start",
             "content_block_start",
             "content_block_delta",
-            "content_block_stop",
             "content_block_start",
             "content_block_delta",
+            "content_block_stop",
             "content_block_stop",
             "message_delta",
             "message_stop",
         ]
         assert parsed[1]["data"]["index"] == 0
-        assert parsed[3]["data"]["index"] == 0
+        assert parsed[2]["data"]["index"] == 0
+        assert parsed[3]["data"]["index"] == 1
         assert parsed[4]["data"]["index"] == 1
+        assert parsed[5]["data"]["index"] == 0
         assert parsed[6]["data"]["index"] == 1
 
     def test_feed_line_sse_parsing(self):

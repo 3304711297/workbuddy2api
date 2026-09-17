@@ -76,6 +76,7 @@ class AnthropicStreamTranslator:
         self.active_tool_name: Optional[str] = None
         self._thinking_sealed: bool = False
         self._known_tools: Dict[int, Dict[str, Any]] = {}
+        self._tool_blocks: Dict[int, Dict[str, Any]] = {}
 
         self._message_start_emitted: bool = False
         self._message_delta_emitted: bool = False
@@ -122,7 +123,31 @@ class AnthropicStreamTranslator:
             return "stop_sequence"
         return "end_turn"
 
+    def _close_all_tool_blocks(self) -> List[str]:
+        events: List[str] = []
+        for tc_idx in sorted(self._tool_blocks.keys()):
+            block = self._tool_blocks[tc_idx]
+            if not block.get("closed"):
+                block["closed"] = True
+                events.append(
+                    _format_sse(
+                        "content_block_stop",
+                        {
+                            "type": "content_block_stop",
+                            "index": block["index"],
+                        },
+                    )
+                )
+        if self.active_block_type == "tool_use":
+            self.active_block_type = None
+            self.active_tool_index = None
+            self.active_tool_id = None
+            self.active_tool_name = None
+        return events
+
     def _close_active_block(self) -> List[str]:
+        if self.active_block_type == "tool_use":
+            return self._close_all_tool_blocks()
         events: List[str] = []
         if self.active_block_type is not None:
             if self.active_block_type == "thinking":
@@ -285,6 +310,7 @@ class AnthropicStreamTranslator:
             # If thinking or text was active, close it
             if self.active_block_type in ("thinking", "text"):
                 events.extend(self._close_active_block())
+            self.active_block_type = "tool_use"
 
             for tc in tool_calls:
                 tc_idx = tc.get("index", 0)
@@ -296,33 +322,43 @@ class AnthropicStreamTranslator:
                 if fn.get("name"):
                     meta["name"] = fn["name"]
 
-                # If starting a new tool block
-                if self.active_block_type != "tool_use" or self.active_tool_index != tc_idx:
-                    events.extend(self._close_active_block())
-                    self.active_block_type = "tool_use"
+                block = self._tool_blocks.get(tc_idx)
+                if block is None:
+                    # 首次遇到该工具：分配 Anthropic block index 并发射 content_block_start
+                    tool_id = meta.get("id") or tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                    tool_name = meta.get("name") or fn.get("name", "")
+                    block = {
+                        "index": self.current_block_index,
+                        "id": tool_id,
+                        "name": tool_name,
+                        "closed": False,
+                    }
+                    self._tool_blocks[tc_idx] = block
                     self.active_tool_index = tc_idx
-                    self.active_tool_id = meta.get("id") or tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-                    self.active_tool_name = meta.get("name") or fn.get("name", "")
+                    self.active_tool_id = tool_id
+                    self.active_tool_name = tool_name
+                    self.current_block_index += 1
+
                     events.append(
                         _format_sse(
                             "content_block_start",
                             {
                                 "type": "content_block_start",
-                                "index": self.current_block_index,
+                                "index": block["index"],
                                 "content_block": {
                                     "type": "tool_use",
-                                    "id": self.active_tool_id,
-                                    "name": self.active_tool_name,
+                                    "id": block["id"],
+                                    "name": block["name"],
                                     "input": {},
                                 },
                             },
                         )
                     )
                 else:
-                    if tc.get("id") and not self.active_tool_id:
-                        self.active_tool_id = tc["id"]
-                    if fn.get("name") and not self.active_tool_name:
-                        self.active_tool_name = fn["name"]
+                    if tc.get("id") and not block.get("id"):
+                        block["id"] = tc["id"]
+                    if fn.get("name") and not block.get("name"):
+                        block["name"] = fn["name"]
 
                 args_delta = fn.get("arguments")
                 if args_delta:
@@ -332,7 +368,7 @@ class AnthropicStreamTranslator:
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
-                                "index": self.current_block_index,
+                                "index": block["index"],
                                 "delta": {
                                     "type": "input_json_delta",
                                     "partial_json": args_delta,
@@ -345,6 +381,7 @@ class AnthropicStreamTranslator:
         if _is_terminal_finish_reason(finish_reason):
             self._finish_reason = str(finish_reason).strip()
             events.extend(self._close_active_block())
+            events.extend(self._close_all_tool_blocks())
 
             if not self._message_delta_emitted:
                 stop_reason = self._map_finish_reason(finish_reason)
@@ -409,6 +446,7 @@ class AnthropicStreamTranslator:
 
         # Close any active block
         events.extend(self._close_active_block())
+        events.extend(self._close_all_tool_blocks())
 
         # Emit message_delta if not yet emitted
         if not self._message_delta_emitted:
