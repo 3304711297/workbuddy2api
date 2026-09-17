@@ -290,16 +290,28 @@ fn get_app_settings(state: State<'_, AppConfigState>) -> Result<AppConfig, Strin
     Ok(guard.clone())
 }
 
+pub(crate) fn save_app_settings_with_writer<F>(
+    settings: AppConfig,
+    state_lock: &std::sync::Mutex<AppConfig>,
+    writer: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&AppConfig) -> Result<(), String>,
+{
+    // 关键一致性保证：先获取互斥锁，在持锁保护下执行写盘与内存同步，
+    // 彻底串行化并发保存请求；写盘若失败直接返回 Err，内存严格保持原值
+    let mut guard = state_lock.lock().map_err(|e| e.to_string())?;
+    writer(&settings)?;
+    *guard = settings;
+    Ok("设置已成功保存".into())
+}
+
 #[tauri::command]
 fn save_app_settings(
     settings: AppConfig,
     state: State<'_, AppConfigState>,
 ) -> Result<String, String> {
-    // 严格先原子写盘成功，再更新内存状态；写盘失败绝不分叉内存
-    save_app_config(&settings)?;
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    *guard = settings;
-    Ok("设置已成功保存".into())
+    save_app_settings_with_writer(settings, &state.0, save_app_config)
 }
 
 pub fn update_tray_status<R: tauri::Runtime>(
@@ -704,5 +716,99 @@ mod window_resize_tests {
         let state = WindowSizeState::new(30);
         state.update(1024.0, 768.0);
         assert_eq!(state.get_latest(), (1024.0, 768.0));
+    }
+
+    #[test]
+    fn test_save_app_settings_failure_retains_memory() {
+        let initial_cfg = AppConfig {
+            port: 8787,
+            ..AppConfig::default()
+        };
+        let lock = Mutex::new(initial_cfg);
+
+        let new_cfg = AppConfig {
+            port: 9999,
+            ..AppConfig::default()
+        };
+
+        // 模拟磁盘写入失败
+        let res = save_app_settings_with_writer(new_cfg, &lock, |_| Err("模拟磁盘不可写".into()));
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "模拟磁盘不可写");
+
+        // 核心断言：写盘失败时内存绝对不被污染，严格保持原配置
+        let current = lock.lock().unwrap();
+        assert_eq!(current.port, 8787);
+    }
+
+    #[test]
+    fn test_save_app_settings_success_updates_memory() {
+        let initial_cfg = AppConfig {
+            port: 8787,
+            ..AppConfig::default()
+        };
+        let lock = Mutex::new(initial_cfg);
+
+        let new_cfg = AppConfig {
+            port: 9090,
+            ..AppConfig::default()
+        };
+
+        let written = Arc::new(Mutex::new(Vec::<u16>::new()));
+        let written_clone = written.clone();
+        let res = save_app_settings_with_writer(new_cfg.clone(), &lock, |c| {
+            written_clone.lock().unwrap().push(c.port);
+            Ok(())
+        });
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "设置已成功保存");
+        assert_eq!(*written.lock().unwrap(), vec![9090]);
+
+        // 内存成功更新为新配置
+        let current = lock.lock().unwrap();
+        assert_eq!(current.port, 9090);
+    }
+
+    #[test]
+    fn test_save_app_settings_concurrent_serialization() {
+        let initial_cfg = AppConfig {
+            port: 8787,
+            ..AppConfig::default()
+        };
+        let lock = Arc::new(Mutex::new(initial_cfg));
+        let disk_log = Arc::new(Mutex::new(Vec::<u16>::new()));
+
+        let mut handles = Vec::new();
+        for port in [9001, 9002, 9003, 9004] {
+            let lock_clone = lock.clone();
+            let disk_log_clone = disk_log.clone();
+            handles.push(std::thread::spawn(move || {
+                let cfg = AppConfig {
+                    port,
+                    ..AppConfig::default()
+                };
+                let _ = save_app_settings_with_writer(cfg, &lock_clone, |c| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    disk_log_clone.lock().unwrap().push(c.port);
+                    Ok(())
+                });
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let disk = disk_log.lock().unwrap();
+        assert_eq!(disk.len(), 4);
+        let final_disk_port = *disk.last().unwrap();
+
+        // 核心并发断言：持锁串行化后，内存最终值必须严格等于最后一次写入磁盘的值，绝不产生分叉
+        let memory_port = lock.lock().unwrap().port;
+        assert_eq!(
+            memory_port, final_disk_port,
+            "并发写盘后内存必须与磁盘最后落盘记录严格一致"
+        );
     }
 }
