@@ -331,10 +331,11 @@ fn read_hermes_endpoint_from_mapping(root: &Mapping, our_port: Option<u16>) -> H
 /// 会误判为未配置（真实线上场景，2026-09-16 修）。回环反代地址出现在配置的
 /// 四个落点中任意一个，即视为已接入。
 fn hermes_is_configured(snapshot: &HermesEndpointSnapshot) -> bool {
+    // 严格匹配（回环 + 本工具端口 + /v1）：顶层或任意落点命中即算接入
     if snapshot.proxy_registered {
         return true;
     }
-    !snapshot.base_url.is_empty() && (!snapshot.provider.is_empty() || !snapshot.model.is_empty())
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +635,24 @@ mod tests {
         assert!(
             hermes_is_configured(&snapshot),
             "providers 里存在本工具反代时，「已接入配置」徽章必须点亮"
+        );
+    }
+
+    #[test]
+    fn configured_flag_requires_our_proxy_not_any_custom_endpoint() {
+        // 宽松 fallback 回归钉子：base_url 指向其它本地服务（18080 网关）时，
+        // 即使 provider/model 齐全，也不得判「已接入本工具」——
+        // 旧 fallback（任意非空 base_url 即 true）会点亮误导性的接入徽章。
+        let value: Value = serde_yaml::from_str(
+            "model:\n  provider: cpa\n  default: some-model\n  base_url: http://127.0.0.1:18080/v1\n",
+        )
+        .unwrap();
+        let root = value.as_mapping().unwrap();
+        let snapshot = read_hermes_endpoint_from_mapping(root, Some(8787));
+        assert!(!snapshot.proxy_registered, "18080 不是本工具端口");
+        assert!(
+            !hermes_is_configured(&snapshot),
+            "指向其它本地服务的配置不得判为「已接入本工具」"
         );
     }
 
