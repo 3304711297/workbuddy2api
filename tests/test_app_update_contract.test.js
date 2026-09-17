@@ -684,10 +684,28 @@ test('回滚阶段必须严格检查外部命令退出码并受控拉起（防�
     /if\s*\(\$rolledBack\)\s*\{[\s\S]*?Start-WorkBuddy/.test(handoff),
     '回滚拉起必须在 if ($rolledBack) 守卫内：回滚未完全成功时绝不得拉起应用'
   );
+});
 
-  // stash pop 在回滚分支中必须严格收口在 reset 成功的条件内，reset 失败绝不得触碰 stash（防二次污染现场）
+test('回滚时 stash pop 必须在旧版重建完成之后（防本地未完成改动破坏构建或污染版本指纹）', () => {
+  // 必须保证：reset -> npm/cargo build -> stash pop -> Start-WorkBuddy
+  // 严禁在 reset 和 回滚后 Rust 重建之间出现 git stash pop
+  const rollbackResetIdx = handoff.indexOf("What '回滚'");
+  assert.ok(rollbackResetIdx > 0, '未找到回滚 reset 调用');
+  const rollbackBuildIdx = handoff.indexOf("What '回滚后 Rust 重建'");
+  assert.ok(rollbackBuildIdx > 0, '未找到回滚后 Rust 重建代码');
+  assert.ok(rollbackBuildIdx > rollbackResetIdx, '重建必须在 reset 之后');
+
+  const intermediateCode = handoff.slice(rollbackResetIdx, rollbackBuildIdx);
   assert.ok(
-    /if\s*\(\$resetCode\s*-eq\s*0\)[\s\S]*?git stash pop/.test(handoff),
-    '回滚中的 stash pop 必须置于 git reset 成功的守卫内：reset 失败绝不得触碰 stash'
+    !/git stash pop/.test(intermediateCode),
+    '回滚中 git stash pop 出现在重建之前：本地未提交改动会污染旧版构建产物与版本指纹'
+  );
+
+  // 回滚中的 stash pop 必须在重建成功之后执行
+  const rollbackPopIdx = handoff.indexOf('stash', rollbackBuildIdx);
+  assert.ok(rollbackPopIdx > rollbackBuildIdx, '回滚中的 stash pop 必须在 Rust 重建之后');
+  assert.ok(
+    /if\s*\(\$rollbackRebuildOk\s*-and\s*\$stashed\)[\s\S]*?git stash pop/.test(handoff),
+    '回滚中的 stash pop 必须置于重建成功（rollbackRebuildOk）的守卫内：构建失败绝不恢复 stash'
   );
 });

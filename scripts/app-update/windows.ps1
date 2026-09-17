@@ -597,17 +597,8 @@ catch {
             $resetCode = Invoke-Logged -FilePath 'git' -Arguments @('reset', '--hard', $previousSha) -What '回滚'
             if ($resetCode -eq 0) {
                 $rollbackSourceRestored = $true
-                # 仅当 reset 成功将源码干净还原后，才尝试恢复工作区改动；
-                # 若 reset 失败，绝不得碰 stash，以免改动在破损工作树中冲突导致二次污染现场。
-                if ($stashed) {
-                    $stashCode = Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop'
-                    if ($stashCode -ne 0) {
-                        $rollbackStashRestored = $false
-                        Write-Log "git stash pop 恢复失败（退出码 $stashCode），改动仍保留在 stash 中" 'WARN'
-                    }
-                }
             } else {
-                Write-Log "git reset --hard 回滚失败（退出码 $resetCode），跳过 stash pop 以免污染现场" 'ERROR'
+                Write-Log "git reset --hard 回滚失败（退出码 $resetCode），放弃回滚并保留 stash" 'ERROR'
             }
         } catch {
             Write-Log "回滚过程出错：$_" 'ERROR'
@@ -617,7 +608,8 @@ catch {
     }
 
     if ($rollbackSourceRestored) {
-        # 源码已回旧版，但 exe 可能已被新版覆盖 → 必须重建，否则拉起的是坏 exe
+        # 源码已回旧版，必须在纯净 previousSha 下重新构建旧版产物，
+        # 严禁在构建前 pop stash（防止未完成代码破坏构建或污染版本指纹）
         try {
             Write-State -Phase 'rolling-back' -Message '正在重新构建回滚后的版本'
             Push-Location $InstallRoot
@@ -641,6 +633,24 @@ catch {
             Write-Log "回滚后重建失败：$_" 'ERROR'
         } finally {
             Pop-Location -ErrorAction SilentlyContinue
+        }
+
+        # 仅当旧版产物成功重新构建后，才恢复用户改动；
+        # 确保旧版 EXE 是纯 previousSha，且 stash pop 即使冲突也不会破坏已构建的产物。
+        if ($rollbackRebuildOk -and $stashed) {
+            try {
+                Push-Location $InstallRoot
+                $stashCode = Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop'
+                if ($stashCode -ne 0) {
+                    $rollbackStashRestored = $false
+                    Write-Log "git stash pop 恢复失败（退出码 $stashCode），改动仍保留在 stash 中" 'WARN'
+                }
+            } catch {
+                $rollbackStashRestored = $false
+                Write-Log "git stash pop 过程出错：$_" 'WARN'
+            } finally {
+                Pop-Location -ErrorAction SilentlyContinue
+            }
         }
     }
 

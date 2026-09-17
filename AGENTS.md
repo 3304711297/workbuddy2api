@@ -269,16 +269,18 @@ workbuddy2api.exe (GUI)
   必须检查每个命令的退出码；`$rolledBack` 必须满足「源码 reset 成功 + 旧版产物重建成功」。
   回滚未完全成功时，严禁无脑拉起损坏或半截的 exe（避免将用户反复推入崩溃循环）。
   契约锁定：`tests/test_app_update_contract.test.js`。
-  ⚠️ **stash 恢复必须晚于所有回滚点且仅在 reset 成功时才恢复（实测复现的数据丢失与二次污染路径，改动必读）**：
-  旧写法在第 6 步（产物校验后）就提前 `stash pop`，一旦启动确认失败触发
-  `git reset --hard $previousSha`，刚弹回的用户改动会被一并抹掉，而 catch 分支的
-  第二次 pop 只得到「No stash entries found」——用户未提交的工作**静默丢失**。
-  提前 pop 对构建/启动毫无影响（exe 早已编译完成），纯属引灾。正确时序：
+  ⚠️ **stash 恢复必须晚于所有回滚点与重建完成（实测复现的数据丢失、构建破坏与指纹污染路径，改动必读）**：
+  旧写法在第 6 步（产物校验后）提前 pop，启动失败 reset 会直接抹掉改动（数据静默丢失）；
+  而在回滚路径中，**stash pop 必须晚于旧版 npm/cargo 重建完成**：
+  ① **防拖垮构建**：未提交改动可能是实验性/写一半的代码，构建前 pop 会导致原本干净的旧版也构建失败；
+  ② **防版本指纹撒谎**：`build.rs` 注入的 `WORKBUDDY2API_BUILD_SHA` 取自 HEAD（previousSha），
+  若构建前混入 stash 改动，编译产物即为「previousSha + 本地未提交代码」，破坏版本指纹真实性。
+  正确时序：
   **成功路径** pop 放在启动确认通过之后（唯一不会再回滚的点）；
   **「无更新」早退路径** pop 在 `needsRebuild` 分支内（该路径不回滚）；
-  **回滚路径** pop 必须在 `reset --hard` 之后，且**必须严格嵌套在 reset 成功（exit code 0）的守卫内**——
-  若 reset 失败，**绝不得触碰 stash**，未提交改动安全保留在 stash 中，避免在破损工作树二次冲突致污染现场。
-  契约锁定：`tests/test_app_update_contract.test.js` 的 stash 时序与成功守卫断言。
+  **回滚路径** 必须先完成 `git reset --hard` + `npm run build` + `cargo tauri build`，确认旧版产物成功重建（`$rollbackRebuildOk`）后，才执行 `git stash pop`。
+  若 reset 或重建失败，**绝不得触碰 stash**，改动安全保留在 stash 堆栈中，避免二次污染破损现场。
+  契约锁定：`tests/test_app_update_contract.test.js`（断言回滚中的 stash pop 必须在 Rust 重建之后，且严禁在 reset 与 rebuild 之间出现 pop）。
   ⚠️ **「是否需要重建」的基准是「工作树 vs 运行中的产物」，不是「工作树 vs 远端」**：
   用户可能已手动 pull 过、或上次更新中断，此时工作树已领先而远端无新提交；
   只看远端会得出「无需重建」→ 点了更新却什么都没发生。脚本为此接收
