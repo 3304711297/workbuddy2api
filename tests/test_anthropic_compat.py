@@ -575,6 +575,23 @@ class TestAnthropicStreamTranslator:
         # Verify message_stop
         assert parsed[6]["data"]["type"] == "message_stop"
 
+    def test_error_chunk_emits_anthropic_error_and_prevents_normal_stop(self):
+        """上游错误 chunk 必须转换成 Anthropic error 事件，且禁止输出 message_stop/message_delta。"""
+        translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")
+        raw_events = []
+        raw_events.extend(translator.feed_chunk({
+            "error": {"message": "rate limit exceeded", "type": "upstream_error", "code": 429}
+        }))
+        raw_events.extend(translator.finalize())
+        parsed = parse_sse_events(raw_events)
+        event_types = [p["event"] for p in parsed]
+        assert "error" in event_types
+        assert "message_stop" not in event_types
+        assert "message_delta" not in event_types
+        err_event = next(p for p in parsed if p["event"] == "error")
+        assert err_event["data"]["type"] == "error"
+        assert err_event["data"]["error"]["message"] == "rate limit exceeded"
+
     def test_reasoning_followed_by_text_stream(self):
         """Verify thinking block begins at index 0 and closes cleanly before text starts at index 1."""
         translator = AnthropicStreamTranslator(model="deepseek-v4.1-flash")

@@ -242,10 +242,32 @@ class ResponsesStreamConverter:
         self._content = ""
         self._tool_calls: dict[int, dict] = {}
         self._usage: dict | None = None
+        self._failed = False
 
     def feed_chunk(self, chunk: dict) -> str:
         """处理已解析的单个 ChatCompletions JSON chunk，输出 Responses SSE 行。"""
         events: list[str] = []
+
+        if self._failed:
+            return ""
+
+        # 上游错误 chunk 拦截
+        if "error" in chunk and isinstance(chunk["error"], dict):
+            self._failed = True
+            err_data = chunk["error"]
+            err_msg = str(err_data.get("message") or "upstream error")
+            err_code = str(err_data.get("code") or "502")
+            if not self._emitted_created:
+                resp = self._build_response_obj("in_progress")
+                events.append(self._fmt("response.created", {"response": resp}))
+                self._emitted_created = True
+            resp_failed = self._build_response_obj("failed")
+            resp_failed["error"] = {
+                "message": err_msg,
+                "code": err_code,
+            }
+            events.append(self._fmt("response.failed", {"response": resp_failed}))
+            return "".join(events)
 
         if chunk.get("model"):
             self.model = chunk["model"]
@@ -334,7 +356,9 @@ class ResponsesStreamConverter:
         return "".join(events)
 
     def finish(self) -> str:
-        """流式结束，输出收尾事件（output_text.done、output_item.done、completed）。"""
+        """流结束时补齐未关闭的 item/part 及发送 response.completed 事件。"""
+        if self._failed:
+            return ""
         events: list[str] = []
 
         if self._emitted_content_part:

@@ -117,6 +117,19 @@ def test_responses_stream_converter():
     assert text_deltas[0]["item_id"].startswith("msg_")
 
 
+def test_responses_stream_converter_handles_error_chunk_without_completed():
+    """上游错误 chunk 转换为 error/failed 事件，且禁止输出 response.completed。"""
+    stream_conv = ResponsesStreamConverter(model="deepseek-v4-pro")
+    err_chunk = {
+        "error": {"message": "upstream connection error", "type": "upstream_error", "code": 502}
+    }
+    ev = stream_conv.feed_chunk(err_chunk)
+    finish_ev = stream_conv.finish()
+    all_ev = ev + finish_ev
+    assert "response.failed" in all_ev or "error" in all_ev
+    assert "response.completed" not in all_ev
+
+
 def test_chat_response_to_responses_object():
     """测试非流式 Chat 响应对象转换为 Responses 规范对象。"""
     chat_resp = {

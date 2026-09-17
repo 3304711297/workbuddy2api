@@ -148,6 +148,29 @@ class AnthropicStreamTranslator:
         if self._finished:
             return []
 
+        # 处理上游错误 chunk（由 _err_event 发出）
+        if "error" in chunk and isinstance(chunk["error"], dict):
+            err_data = chunk["error"]
+            err_type = "invalid_request_error"
+            code = err_data.get("code")
+            if code in (429, "429"):
+                err_type = "rate_limit_error"
+            elif code in (500, 502, 503, "500", "502", "503"):
+                err_type = "api_error"
+            self._finished = True
+            return [
+                _format_sse(
+                    "error",
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": err_type,
+                            "message": str(err_data.get("message") or "upstream error"),
+                        },
+                    },
+                )
+            ]
+
         events: List[str] = []
 
         # Update model if not explicitly specified at init
