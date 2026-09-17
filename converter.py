@@ -1242,10 +1242,11 @@ _BLOCKED_IMAGE_HOSTS = {
     "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
     "metadata", "metadata.google.internal", "metadata.azure.internal",
 }
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 
 def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """判定 IP 是否为可安全访问的公网地址（拒绝回环/私网/链路本地/保留段）。"""
+    """判定 IP 是否为可安全访问的公网地址（拒绝回环/私网/链路本地/保留段/CGNAT）。"""
     return not (
         ip.is_private
         or ip.is_loopback
@@ -1253,7 +1254,8 @@ def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or ip.is_multicast
         or ip.is_reserved
         or ip.is_unspecified
-        # IPv4 共享地址段 / 云元数据 169.254.0.0/16 已被 is_link_local 覆盖
+        # IPv4 共享地址段 (RFC 6598 100.64.0.0/10) 在 Python 3.11/3.12 的 is_private 与 is_link_local 均为 False
+        or (isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_NETWORK)
         or (isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None
             and not _ip_is_public(ip.ipv4_mapped))
     )
@@ -1348,13 +1350,43 @@ async def _url_to_data_uri(url: str, timeout: float = 15.0) -> str:
         # 逐跳手动跟随重定向，每一跳都重做 SSRF 校验（防「公网跳内网」）
         current = url
         for _ in range(5):
-            ok, reason = _url_is_safe_for_fetch(current)
-            if not ok:
-                _log(f"🚫 远程图片下载被拒绝 ({reason}): {current[:80]}", level="warning")
-                return url
+            from urllib.parse import urlsplit
+            parts = urlsplit(current)
+            orig_host = (parts.hostname or "").strip()
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+            
+            # DNS 解析并在公网 IP 中取已验证的 IP 建立直连，防 DNS rebinding
+            try:
+                ip_literal = ipaddress.ip_address(orig_host)
+                if not _ip_is_public(ip_literal):
+                    _log(f"🚫 远程图片禁止访问内网/保留地址: {ip_literal}", level="warning")
+                    return url
+                connect_ip = str(ip_literal)
+            except ValueError:
+                resolved_ips = _resolve_host_ips(orig_host)
+                if not resolved_ips:
+                    _log(f"🚫 远程图片域名无法解析: {orig_host}", level="warning")
+                    return url
+                for ip in resolved_ips:
+                    if not _ip_is_public(ip):
+                        _log(f"🚫 远程图片域名 {orig_host} 解析到内网/保留地址: {ip}", level="warning")
+                        return url
+                public_ips = [ip for ip in resolved_ips if _ip_is_public(ip)]
+                if not public_ips:
+                    _log(f"🚫 远程图片域名无有效公网 IP: {orig_host}", level="warning")
+                    return url
+                connect_ip = str(public_ips[0])
 
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
-                async with c.stream("GET", current, headers={"User-Agent": USER_AGENT}) as r:
+            # 构造直连 URL 与连接扩展
+            target_host = f"[{connect_ip}]" if ":" in connect_ip else connect_ip
+            connect_url = parts._replace(netloc=f"{target_host}:{port}").geturl()
+
+            host_hdr = f"{orig_host}:{port}" if parts.port else orig_host
+            req_headers = {"User-Agent": USER_AGENT, "Host": host_hdr}
+            req_extensions = {"sni_hostname": orig_host}
+
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as c:
+                async with c.stream("GET", connect_url, headers=req_headers, extensions=req_extensions) as r:
                     if r.status_code in (301, 302, 303, 307, 308):
                         loc = r.headers.get("location")
                         if not loc:
@@ -3092,10 +3124,8 @@ async def chat_completions(request: Request,
     if collected is None:
         raise HTTPException(status_code=502, detail={"error": {"message": "failed to collect upstream response", "type": "upstream_error"}})
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
-    if fallback_reason is None:
-        # 记 mapped 后的正式名（body["model"]），别名（gpt-4o→gpt-5.6-luna）成功时
-        # 需解除的是正式名的预标记；记别名行会写进 /v1/models 不存在的 id。
-        _mark_model_available(body["model"], uid=uid)  # 运行时学习：该账号成功调用过
+    # 成功证据归实际调用的正式名（含别名映射与 fallback），不覆盖原模型的 11102。
+    _mark_model_available(body["model"], uid=uid)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
@@ -3334,9 +3364,7 @@ async def anthropic_messages(
             raise
 
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
-    if fallback_reason is None:
-        # 记 mapped 后的正式名（body["model"]），别名成功须解除正式名的预标记
-        _mark_model_available(body["model"], uid=uid)  # 运行时学习：该账号成功调用过
+    _mark_model_available(body["model"], uid=uid)  # 实际成功模型，含 fallback
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
@@ -3535,7 +3563,7 @@ async def openai_responses(
             raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "api_error"}})
 
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
-    if fallback_reason is None:
+    if collected is not None:
         _mark_model_available(body["model"], uid=uid)
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
@@ -3886,7 +3914,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     if fallback_tried:
         req_m = requested_model or model_name
         yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
-    elif curr_uid:
+    if curr_uid:
         _mark_model_available(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
     async for chunk in _pseudo_stream_response(collected, model_name, t0, rid, ttft_ms,
                                               retry_count=retry_count, retry_reason=retry_reason,
@@ -4410,9 +4438,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             return
 
     # 流结束：输出完成日志
-    if fallback_tried:
-        _mark_model_unavailable(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
-    elif err_msg is None and curr_uid:
+    if err_msg is None and curr_uid:
         _mark_model_available(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
     elapsed = time.time() - t0 if t0 else 0
     tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
