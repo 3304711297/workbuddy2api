@@ -154,9 +154,12 @@ test('脚本必须做启动确认，失败则回滚（防止把用户留在崩�
   );
   // 确认必须同时覆盖「进程存活」与「服务可用」两个层面
   assert.ok(/HasExited/.test(handoff), '启动确认未检查进程是否立即退出');
+  // 探活必须存在，且 URL 必须精确指向免鉴权的 /health（勿改回 /v1/models：
+  // 它走 _check_auth，配密钥用户探活恒 401 → 误判 startup-unhealthy → 错误回滚）。
+  // 端点契约的独立对拍在下方「探活端点必须免鉴权」用例；此处锁「变量存在 + 精确拼装」。
   assert.ok(
-    /PROXY_HEALTH_URL|v1\/models/.test(handoff),
-    '启动确认未做 8787 反代探活（GUI 活着但内核没起来不算成功）'
+    /PROXY_HEALTH_URL = "http:\/\/127\.0\.0\.1:\$Port\/health"/.test(handoff),
+    '启动确认未做反代探活，或探活 URL 不是由 $Port 拼装的免鉴权 /health（GUI 活着但内核没起来不算成功）'
   );
   // 确认失败必须走回滚，而不是照常 exit 0
   assert.ok(
