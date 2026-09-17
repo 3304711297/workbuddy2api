@@ -59,7 +59,7 @@
   - **局域网访问（可选）**：设置页可开启「允许局域网内其它设备访问」（`--host 0.0.0.0`），并自动探测本机局域网 IPv4 展示可复制地址（如 `http://192.168.x.x:8787/v1`），供手机 / 平板 / 其它电脑直连；出于安全默认关闭（仅 `127.0.0.1` 监听）。无鉴权密钥时前端**拒绝开启**且内核亦会 `exit 1`——双重守卫确保服务绝不无鉴权暴露（对标 `router-for-me/EasyCLIProxyAPI` 的网络设置，但刻意不提供 `--unsafe-expose` 放行开关）；
   - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
   - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
-  - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`）。中间件在 ASGI `receive` 层按块累计，**超限立即熔断**（不等 body 读完），既防大包拖垮本地内存也防被上游连坐拦截（借鉴 `linguo2625469/workbuddy2api-panel`）；
+  - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`）。中间件在 ASGI `receive` 层按块累计，**超限立即熔断**（不等 body 读完），既防大包拖垮本地内存也防被上游连坐拦截（借鉴 `linguo2625469/workbuddy2api-panel`，源自 `Sliverkiss/workbuddy2api`）；
   - **多模态远程图片自动转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`（直接传 http 链接报错 400）。网关自动异步下载远程图片并内联嵌入，彻底解除视觉模型的多模态输入限制；下载前经 SSRF 守卫（拒绝回环/私网/元数据地址、重定向逐跳复检）并施加单图 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`）（借鉴 `neipor/codebuddy-cli2api`）；
   - **官方客户端 User-Agent 仿真**：出站请求智能仿真官方客户端标识（国内版 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 触发 10085 拦截与官网使用端归因失真，亦支持 `WORKBUDDY2API_USER_AGENT` 动态配置（借鉴 `ardeyouxipianyi` 与 `turbomind66`）。
 
@@ -321,7 +321,7 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
 - 以下安全与协议兼容优秀实践借鉴自开源生态（2026-09 横向对比采纳）：
   - **OpenAI Responses 协议原生端点 (`POST /v1/responses`)**（借鉴 [ShouZhuo0413/codebuddy2api](https://github.com/ShouZhuo0413/codebuddy2api) 与 [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api)，MIT）：引入 `responses_compat.py`，原生支持 Codex CLI 等长上下文 Agent 的双向协议转换与流式事件状态机；
   - **按积分到期日分层选号调度**（借鉴 [momo0410/workbuddy-switch-gateway](https://github.com/momo0410/workbuddy-switch-gateway)，MIT）：引入日粒度到期日分层，多账号调度优先消耗快要过期的额度，避免资产过期浪费；
-  - **413 请求体超限安全防护**（借鉴 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)，MIT）：`converter.py` 引入大小守卫，秒拒超大报文保护本地与上游；
+  - **413 请求体超限安全防护**（借鉴 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 与 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT）：`converter.py` 引入大小守卫，秒拒超大报文保护本地与上游；
   - **官方客户端 User-Agent 规范仿真**（借鉴 [ardeyouxipianyi/workbuddy2api-intl](https://github.com/ardeyouxipianyi/workbuddy2api-intl) 与 [turbomind66/workbuddy2api-python](https://github.com/turbomind66/workbuddy2api-python)，MIT）：出站请求智能仿真官方客户端标识，并支持环境变量动态自定义。
 - 本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。
 
@@ -331,4 +331,4 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
 
 本项目基于 [MIT License](LICENSE) 开源。
 
-本仓库包含从 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api)、[DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)、[IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)、[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)、[ardeyouxipianyi/workbuddy2api-intl](https://github.com/ardeyouxipianyi/workbuddy2api-intl) 与 [turbomind66/workbuddy2api-python](https://github.com/turbomind66/workbuddy2api-python)（均 MIT）移植或借鉴的代码，其版权声明、借鉴范围与移植差异详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本仓库包含从 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api)、[DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)、[IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)、[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)、[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)、[ardeyouxipianyi/workbuddy2api-intl](https://github.com/ardeyouxipianyi/workbuddy2api-intl)、[turbomind66/workbuddy2api-python](https://github.com/turbomind66/workbuddy2api-python)、[momo0410/workbuddy-switch-gateway](https://github.com/momo0410/workbuddy-switch-gateway)、[ShouZhuo0413/codebuddy2api](https://github.com/ShouZhuo0413/codebuddy2api)、[hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api) 与 [neipor/codebuddy-cli2api](https://github.com/neipor/codebuddy-cli2api)（均 MIT）移植或借鉴的代码与架构设计，其版权声明、借鉴范围与移植差异详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
