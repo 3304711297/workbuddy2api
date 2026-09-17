@@ -413,10 +413,15 @@ export function initUpdateCheck() {
   const entry = el('update-entry');
   if (!entry) return;
 
-  // 入口点击：一律打开弹窗并现场检查（不再跳转发布页——本项目不用 Release 发版）
+  // 入口点击：一律打开弹窗并**强制实时**检查（force=true 绕过 Rust 侧缓存）。
+  // ⚠️ 必须传 force: true：「检查更新」的用户语义就是「现在去 GitHub 问一次」；
+  // 缓存键只含「exe 构建提交 + 分支」，不含远端 tip——远端推了新提交而 exe 未变时，
+  // 缓存键照旧命中，会把启动静默检查时缓存的「已是最新」原样奉还（真实踩到：
+  // exe=3d094fc、远端已到 514fad9，点检查更新仍显示「已是最新」且根本没发请求）。
+  // 24h 缓存只服务于下方启动静默检查（避免每次启动都打 GitHub API）。
   const onClick = () => {
     openOverlay();
-    runCheck({ silent: false, force: false });
+    runCheck({ silent: false, force: true });
   };
   entry.addEventListener('click', onClick);
   entry.addEventListener('keydown', (e) => {

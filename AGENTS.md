@@ -19,8 +19,8 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：193 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：72 passed
+npm test                                          # 前端：195 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：73 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -168,8 +168,13 @@ workbuddy2api.exe (GUI)
   ⚠️ **`ahead_by == 0` 但 tip 不同 ⇒ 本地领先，必须判「无更新」**——报成「有更新」会诱导
   用户用远端覆盖掉自己的提交，这是本模块最危险的误报。`compare` 失败（限流/本地独有提交 404）
   时 `behind = None`，UI 显示「有更新、数量未知」，**绝不编造数字**。
-  结果缓存 TTL：成功 24h / 失败 1h，**以「本地 HEAD + 分支」为键**——更新或切分支后
-  立即失效，不会残留假的「有更新」。
+  结果缓存 TTL：**有更新 24h / 无更新 10min / 失败 1h**，以「本地 HEAD + 分支」为键——
+  更新或切分支后立即失效。⚠️ **键里没有远端 tip，「无更新」必须短缓存**：远端推了新提交
+  而本机 exe 未变时键照旧命中，长缓存会把远端新提交挡在门外，弹窗复读启动时的
+  「已是最新」且不发请求（真实踩到：exe=3d094fc、远端已到 514fad9，点「检查更新」
+  毫无反应）。双保险：前端入口点击必须传 `force: true` 实时实查（`update-check.js`
+  的入口 onClick；启动静默检查保持走缓存以省 API）。契约锁定：
+  `tests/test_app_update_contract.test.js` 的缓存 TTL 与 force 断言。
 
   ⚠️ **健康检查端口不得写死 8787**（与 Hermes 检测同一条铁律）：端口可配置，用户配成 9000 时
   新版会正常监听 9000，而写死 8787 的探活必然失败 → 90s 后误判 `startup-unhealthy`

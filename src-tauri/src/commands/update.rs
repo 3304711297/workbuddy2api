@@ -21,8 +21,11 @@ use super::shared::{atomic_write_file, env_compat, local_app_dir};
 
 const DEFAULT_BRANCH: &str = "main";
 const SLUG: &str = "3304711297/workbuddy2api";
-/// 检测结果缓存 TTL：成功 24h、失败 1h（失败重试更勤，但不会每次轮询都打 API）
+/// 检测结果缓存 TTL：有更新 24h、无更新 10min、失败 1h。
+/// 失败重试更勤；「无更新」必须短（见 cache_is_fresh 的文档——键里没有远端 tip，
+/// 长缓存会把远端新提交挡在门外，让「检查更新」变成复读旧答案）。
 const CHECK_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+const CHECK_CLEAN_TTL_MS: i64 = 10 * 60 * 1000;
 const CHECK_FAILURE_TTL_MS: i64 = 60 * 60 * 1000;
 
 /// 一条待展示的 commit（弹窗变更列表的一行）
@@ -186,15 +189,26 @@ fn parse_rfc3339_secs(value: &str) -> Option<i64> {
 }
 
 /// 缓存是否仍然有效。缓存以「本地 HEAD + 分支」为键——
-/// 一旦应用了更新或切了分支，HEAD 变化即刻失效，24h TTL 不会残留假的「有更新」。
+/// 一旦应用了更新或切了分支，HEAD 变化即刻失效，TTL 内不会残留假的「有更新」。
+///
+/// ⚠️ **键里没有远端 tip，这是有意的妥协，但因此 TTL 必须短**：
+/// 远端推了新提交而本机 exe 未变时，缓存键照旧命中——「已是最新」的旧结果会被
+/// 原样奉还，用户点「检查更新」却根本没发请求（真实踩到：exe=3d094fc、远端已到
+/// 514fad9，弹窗仍显示「已是最新」）。因此：
+/// - 「有更新」可缓存较久（24h）：用户下一步是点「立即更新」，不会反复实查；
+/// - 「无更新」只缓存 10 分钟：它是「不需要动作」的答案，过期代价只是多一次 API；
+/// - 失败缓存 1h：失败重试更勤。
+/// 前端入口点击另传 `force: true` 实时实查，双保险（见 update-check.js onClick）。
 fn cache_is_fresh(cached: &AppUpdateInfo, current_sha: &str, branch: &str, now: i64) -> bool {
     if cached.current_sha != current_sha || cached.branch != branch {
         return false;
     }
     let ttl = if cached.error.is_some() {
         CHECK_FAILURE_TTL_MS
-    } else {
+    } else if cached.update_available {
         CHECK_TTL_MS
+    } else {
+        CHECK_CLEAN_TTL_MS
     };
     now - cached.fetched_at < ttl
 }
@@ -754,22 +768,59 @@ mod tests {
 
     #[test]
     fn cache_is_fresh_is_keyed_on_head_and_branch() {
-        let base = AppUpdateInfo {
+        // 「有更新」结果：TTL 24h
+        let available = AppUpdateInfo {
             supported: true,
             branch: "main".into(),
             current_sha: SHA_A.into(),
+            update_available: true,
             fetched_at: 1_000_000,
             ..Default::default()
         };
         let now = 1_000_000 + CHECK_TTL_MS - 1;
-        assert!(cache_is_fresh(&base, SHA_A, "main", now));
+        assert!(cache_is_fresh(&available, SHA_A, "main", now));
 
         // HEAD 变化（刚应用完更新）→ 立即失效，不残留「有更新」
-        assert!(!cache_is_fresh(&base, SHA_B, "main", now));
+        assert!(!cache_is_fresh(&available, SHA_B, "main", now));
         // 分支变化 → 失效
-        assert!(!cache_is_fresh(&base, SHA_A, "dev", now));
+        assert!(!cache_is_fresh(&available, SHA_A, "dev", now));
         // 过期 → 失效
-        assert!(!cache_is_fresh(&base, SHA_A, "main", 1_000_000 + CHECK_TTL_MS));
+        assert!(!cache_is_fresh(&available, SHA_A, "main", 1_000_000 + CHECK_TTL_MS));
+    }
+
+    #[test]
+    fn cache_clean_result_expires_sooner_than_available() {
+        // ⚠️ 「无更新」必须比「有更新」短得多：缓存键里没有远端 tip，
+        // 远端推了新提交而本机 exe 未变时键照旧命中——24h 的「已是最新」
+        // 会把远端新提交挡在门外，用户点检查更新等于没查（真实踩到：
+        // exe=3d094fc、远端已到 514fad9，弹窗仍显示「已是最新」）。
+        let clean = AppUpdateInfo {
+            supported: true,
+            branch: "main".into(),
+            current_sha: SHA_A.into(),
+            update_available: false,
+            fetched_at: 1_000_000,
+            ..Default::default()
+        };
+        // 10 分钟内有效（省 API），超过即失效（保时效）
+        assert!(cache_is_fresh(&clean, SHA_A, "main", 1_000_000 + CHECK_CLEAN_TTL_MS - 1));
+        assert!(!cache_is_fresh(
+            &clean,
+            SHA_A,
+            "main",
+            1_000_000 + CHECK_CLEAN_TTL_MS
+        ));
+        // 同一时刻「有更新」仍有效（24h）——它不会骗人：用户下一步就是点更新
+        let available = AppUpdateInfo {
+            update_available: true,
+            ..clean.clone()
+        };
+        assert!(cache_is_fresh(
+            &available,
+            SHA_A,
+            "main",
+            1_000_000 + CHECK_CLEAN_TTL_MS
+        ));
     }
 
     #[test]
@@ -782,10 +833,11 @@ mod tests {
             error: Some("HTTP 429".into()),
             ..Default::default()
         };
-        // 失败缓存 1h 后即失效，好让用户重试；成功缓存同样时刻仍有效
+        // 失败缓存 1h 后即失效，好让用户重试；「有更新」成功缓存同样时刻仍有效
         assert!(!cache_is_fresh(&failed, SHA_A, "main", CHECK_FAILURE_TTL_MS));
         let good = AppUpdateInfo {
             error: None,
+            update_available: true,
             ..failed.clone()
         };
         assert!(cache_is_fresh(&good, SHA_A, "main", CHECK_FAILURE_TTL_MS));

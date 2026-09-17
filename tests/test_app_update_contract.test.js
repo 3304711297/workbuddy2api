@@ -101,6 +101,58 @@ test('检测结果缓存以 HEAD + 分支为键（更新后立即可失效）', 
   );
 });
 
+test('「无更新」缓存必须短于「有更新」（键里没有远端 tip，长缓存会挡住新提交）', () => {
+  // 真实踩到：exe=3d094fc、远端已到 514fad9，24h 的「已是最新」缓存让
+  // 「检查更新」根本不发请求，弹窗复读启动时的旧答案。缓存键不含远端 tip
+  // 是有意妥协，因此「无更新」TTL 必须短（10min）；「有更新」可 24h——
+  // 它不会骗人，用户下一步就是点「立即更新」。
+  const idx = updateRsCode.indexOf('const CHECK_CLEAN_TTL_MS');
+  assert.ok(idx > -1, '缺少「无更新」专用 TTL 常量 CHECK_CLEAN_TTL_MS');
+  const ttlBlock = updateRsCode.slice(
+    updateRsCode.indexOf('const CHECK_TTL_MS'),
+    updateRsCode.indexOf('const CHECK_FAILURE_TTL_MS')
+  );
+  const ms = (name) => {
+    const m = updateRsCode.match(new RegExp(`const ${name}[^=]*=\\s*([^;]+);`));
+    assert.ok(m, `未找到常量 ${name}`);
+    // 仅支持本文件现有的「N * 单位」纯数字表达式，出现非常量运算即红
+    return m[1];
+  };
+  const cleanTtl = eval(ms('CHECK_CLEAN_TTL_MS')); // eslint-disable-line no-eval -- 测试文件内受控常量
+  const availTtl = eval(ms('CHECK_TTL_MS')); // eslint-disable-line no-eval
+  assert.ok(cleanTtl < availTtl, '「无更新」TTL 必须 < 「有更新」TTL');
+  assert.ok(cleanTtl <= 30 * 60 * 1000, '「无更新」TTL 超过 30 分钟：远端新提交会被旧缓存挡住');
+
+  // cache_is_fresh 必须按 update_available 分流 TTL
+  const fnBody = updateRsCode.slice(updateRsCode.indexOf('fn cache_is_fresh'), updateRsCode.indexOf('fn decide'));
+  assert.ok(
+    /cached\.update_available/.test(fnBody) && /CHECK_CLEAN_TTL_MS/.test(fnBody),
+    'cache_is_fresh 未按「有/无更新」分流 TTL'
+  );
+});
+
+test('「检查更新」入口点击必须绕过缓存实时实查（force: true）', () => {
+  // 入口点击的用户语义是「现在去 GitHub 问一次」。若传 force: false，
+  // 会命中 Rust 侧磁盘缓存，远端推新后仍显示「已是最新」且毫无反应（真实踩到）。
+  // 锚点用绑定处的独特注释（runCheck 函数体内也出现 el('update-entry')，
+  // 不能作锚点）；锁定的是 init 里入口的 onClick。
+  const anchor = updateJs.indexOf('入口点击：一律打开弹窗并**强制实时**检查');
+  assert.ok(anchor > -1, '未找到入口点击绑定处的注释锚点（init 的 onClick 可能被改动）');
+  const section = updateJs.slice(anchor, anchor + 400);
+  assert.ok(
+    /runCheck\(\{\s*silent:\s*false,\s*force:\s*true\s*\}\)/.test(section),
+    '入口点击未传 force: true：会吃到磁盘缓存，远端推新后显示「已是最新」'
+  );
+  // 兜底：runCheck 定义处默认值必须是 force: false（静默检查不吃 API 额度）
+  const defIdx = updateJs.indexOf('async function runCheck(');
+  const defSection = updateJs.slice(defIdx, defIdx + 120);
+  assert.ok(
+    /force\s*=\s*false/.test(defSection),
+    'runCheck 默认值不是 force: false：启动静默检查会绕过缓存打 API'
+  );
+  // 启动静默检查保持走缓存（避免每次启动都打 GitHub API），不在此断言范围内。
+});
+
 test('apply_app_update 已注册到 Tauri 命令表', () => {
   assert.ok(
     /commands::apply_app_update/.test(libRs),
