@@ -121,6 +121,12 @@ export function initSettings() {
     if (sideBadge) sideBadge.textContent = `:${val}`;
     const endpoint = document.getElementById('endpoint-url');
     if (endpoint) endpoint.value = `http://127.0.0.1:${val}/v1`;
+    const epChat = document.getElementById('ep-url-chat');
+    if (epChat) epChat.textContent = `http://127.0.0.1:${val}/v1/chat/completions`;
+    const epMsg = document.getElementById('ep-url-messages');
+    if (epMsg) epMsg.textContent = `http://127.0.0.1:${val}/v1/messages`;
+    const epResp = document.getElementById('ep-url-responses');
+    if (epResp) epResp.textContent = `http://127.0.0.1:${val}/v1/responses`;
     // 硬编码示例（接入代码块 / 兼容端点文案）同步改写，避免复制到旧端口
     applyPortToStaticExamples(val);
   };

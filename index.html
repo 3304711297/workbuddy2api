@@ -182,42 +182,58 @@
         
         <!-- 1. 服务看板页面 (Dashboard) -->
         <section id="panel-dashboard" class="panel-page active">
-          <!-- 状态与接入网关卡片网格 -->
-          <div class="grid-2">
-            <!-- 运行状态卡 -->
+          <!-- 双列控制中心：左侧服务状态与控制，右侧端点速览 (对标 EasyCLIProxyAPI) -->
+          <div class="dashboard-hero-grid">
+            <!-- 左列：运行状态卡 -->
             <div class="card status-card">
               <div class="card-header-flex">
-                <h3 class="card-title">反代服务状态</h3>
-                <span id="dash-status-badge" class="badge badge-stopped">已停止</span>
-              </div>
-              <div class="metric-row">
-                <div class="metric-item">
-                  <span class="metric-label">监听端口</span>
-                  <span id="dash-port" class="metric-value mono">8787</span>
+                <div>
+                  <h3 class="card-title">反代服务状态</h3>
+                  <p class="card-desc" style="margin-bottom: 0;">本地网关生命周期与监听状态</p>
                 </div>
-                <div class="metric-item">
-                  <span class="metric-label">运行架构</span>
-                  <span id="dash-mode" class="metric-value">检测中…</span>
-                </div>
-                <div class="metric-item">
-                  <span class="metric-label">脱敏状态</span>
-                  <span id="dash-desensitize" class="metric-value text-success">已启用</span>
+                <div class="state-pill stopped" id="dash-status-pill">
+                  <span id="side-dot-clone" class="dot dot-stopped"></span>
+                  <span id="dash-status-badge" class="badge badge-stopped">已停止</span>
                 </div>
               </div>
+
+              <dl class="panel-detail-grid">
+                <div class="panel-detail-row">
+                  <dt>监听端口</dt>
+                  <dd><span id="dash-port" class="metric-value mono">8787</span></dd>
+                </div>
+                <div class="panel-detail-row">
+                  <dt>运行架构</dt>
+                  <dd><span id="dash-mode" class="metric-value mono">检测中…</span></dd>
+                </div>
+                <div class="panel-detail-row">
+                  <dt>脱敏防护</dt>
+                  <dd><span id="dash-desensitize" class="metric-value text-success">已启用</span></dd>
+                </div>
+                <div class="panel-detail-row">
+                  <dt>活跃账号</dt>
+                  <dd><span id="dash-active-account" class="truncate font-medium">—</span></dd>
+                </div>
+              </dl>
+
               <div class="divider"></div>
               <div class="card-footer-info">
-                <span>当前活跃账号：<strong id="dash-active-account">—</strong></span>
+                <span>支持协议：<strong id="dash-protocol-badge" class="badge badge-info">协议检测中</strong></span>
                 <span id="dash-health-time" class="muted">—</span>
               </div>
             </div>
 
-            <!-- API 端点一键复制卡 -->
+            <!-- 右列：API 端点快速接入卡片组 -->
             <div class="card">
               <div class="card-header-flex">
-                <h3 class="card-title">本地接入端点</h3>
-                <span id="dash-protocol-badge" class="badge badge-info">协议检测中</span>
+                <div>
+                  <h3 class="card-title">本地接入端点</h3>
+                  <p class="card-desc" style="margin-bottom: 0;">标准 OpenAI / Anthropic / Responses 协议直连</p>
+                </div>
               </div>
-              <div class="copy-input-group">
+
+              <!-- 基础 Base URL 与 API Key 快速复制 -->
+              <div class="copy-input-group" style="margin-top: 4px;">
                 <label class="field-label" for="endpoint-url">Base URL</label>
                 <div class="input-with-btn">
                   <input id="endpoint-url" class="input mono" type="text" readonly value="http://127.0.0.1:8787/v1" />
@@ -225,10 +241,40 @@
                 </div>
               </div>
               <div class="copy-input-group" style="margin-top: 10px;">
-                <label class="field-label" for="endpoint-key">API Key (本地固定)</label>
+                <label class="field-label" for="endpoint-key">客户端鉴权密钥 (API Key)</label>
                 <div class="input-with-btn">
                   <input id="endpoint-key" class="input mono" type="text" readonly value="local" />
                   <button class="btn btn-sm btn-copy" data-copy="endpoint-key">复制</button>
+                </div>
+              </div>
+
+              <!-- 三大协议速览卡片行 (带端口联动与一键复制) -->
+              <div class="endpoint-grid">
+                <div class="endpoint-card">
+                  <div class="endpoint-header">
+                    <span class="endpoint-title">OpenAI Chat</span>
+                    <span class="endpoint-tag">POST</span>
+                  </div>
+                  <div class="endpoint-path" id="ep-url-chat">http://127.0.0.1:8787/v1/chat/completions</div>
+                  <button class="btn btn-sm btn-secondary" data-copy="ep-url-chat" style="width: 100%; font-size: 11px;">复制完整端点</button>
+                </div>
+
+                <div class="endpoint-card">
+                  <div class="endpoint-header">
+                    <span class="endpoint-title">Anthropic</span>
+                    <span class="endpoint-tag">POST</span>
+                  </div>
+                  <div class="endpoint-path" id="ep-url-messages">http://127.0.0.1:8787/v1/messages</div>
+                  <button class="btn btn-sm btn-secondary" data-copy="ep-url-messages" style="width: 100%; font-size: 11px;">复制完整端点</button>
+                </div>
+
+                <div class="endpoint-card">
+                  <div class="endpoint-header">
+                    <span class="endpoint-title">Responses</span>
+                    <span class="endpoint-tag">POST</span>
+                  </div>
+                  <div class="endpoint-path" id="ep-url-responses">http://127.0.0.1:8787/v1/responses</div>
+                  <button class="btn btn-sm btn-secondary" data-copy="ep-url-responses" style="width: 100%; font-size: 11px;">复制完整端点</button>
                 </div>
               </div>
             </div>

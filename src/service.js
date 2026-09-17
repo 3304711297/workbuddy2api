@@ -113,11 +113,16 @@ function updateServiceStatus(isRunning, data = null, seq = _healthSeq) {
   if (btnStop) btnStop.disabled = !isRunning;
   if (btnRestart) btnRestart.disabled = !isRunning;
 
+  const dashPill = document.getElementById('dash-status-pill');
+  const cloneDot = document.getElementById('side-dot-clone');
+
   if (isRunning) {
     sideDot.className = 'dot dot-running';
     sideText.textContent = '服务运行中';
     dashBadge.className = 'badge badge-running';
     dashBadge.textContent = '运行中';
+    if (dashPill) dashPill.className = 'state-pill running';
+    if (cloneDot) cloneDot.className = 'dot dot-running';
     if (dashMode) dashMode.textContent = RUNTIME_MODE_LABEL;
 
     // 昵称是异步取的：期间可能已停止服务或有更新检查发出，
@@ -133,6 +138,8 @@ function updateServiceStatus(isRunning, data = null, seq = _healthSeq) {
     sideText.textContent = '服务已停止';
     dashBadge.className = 'badge badge-stopped';
     dashBadge.textContent = '已停止';
+    if (dashPill) dashPill.className = 'state-pill stopped';
+    if (cloneDot) cloneDot.className = 'dot dot-stopped';
     if (dashMode) dashMode.textContent = '—';
     dashActive.textContent = '—';
     sideUser.textContent = '未在线';
