@@ -426,9 +426,109 @@ pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Resu
             Err(err)
         }
     } else {
-        use tauri::Emitter;
-        let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
-        Ok("not-running".into())
+        // handle 为空 = 本 GUI 从未启动过内核。但端口上可能仍有**孤儿内核**在监听
+        // （上一个 GUI 退出后 converter.py 无父进程退出检测，变孤儿继续占端口，
+        // 实测：GUI 9284 已死而其 converter 链 9180→4344 仍监听 8787）。
+        // 此时用户点「停止」理应能清掉它，否则状态卡永远显示「运行中」且关不掉。
+        match orphan_killer::find_and_kill_orphan(crate::load_app_config().port) {
+            Ok(Some(pid)) => {
+                rotate_proxy_log_if_oversized();
+                use tauri::Emitter;
+                let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
+                Ok(format!("已清理残留的孤儿内核进程（PID {pid}）"))
+            }
+            Ok(None) => {
+                use tauri::Emitter;
+                let _ = app.emit("proxy-status-changed", serde_json::json!({ "running": false }));
+                Ok("not-running".into())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// 孤儿内核清理：找到监听指定端口、命令行含 converter.py、且父进程已死的 python
+/// 进程并杀掉整个进程树。三重校验缺一不可——只按端口杀会误伤无辜监听者，
+/// 只按命令行杀会误杀别的 GUI 的正常子进程。
+mod orphan_killer {
+    use super::*;
+
+    /// 用 PowerShell Get-NetTCPConnection 找监听端口的 PID（Rust 无标准库方案，
+    /// netstat 解析脆弱；Get-NetTCPConnection 自 Win8 起内置且输出结构化）。
+    fn find_listener_pid(port: u16) -> Result<Option<u32>, String> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let script = format!(
+                "(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"
+            );
+            let output = Command::new("powershell")
+                .creation_flags(CREATE_NO_WINDOW)
+                .args(["-NoProfile", "-Command", &script])
+                .output()
+                .map_err(|e| format!("查询端口监听者失败: {e}"))?;
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if text.is_empty() {
+                return Ok(None);
+            }
+            text.parse::<u32>()
+                .map(Some)
+                .map_err(|e| format!("端口监听者 PID 解析失败（{text:?}）: {e}"))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = port;
+            Ok(None)
+        }
+    }
+
+    /// 校验该 PID 是「孤儿 converter」：命令行含 converter.py 且父进程已死。
+    fn is_orphan_converter(pid: u32) -> Result<bool, String> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let script = format!(
+                "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; \
+                 if (-not $p) {{ 'GONE' }} \
+                 elseif ($p.CommandLine -notmatch 'converter.py') {{ 'NOT-CONVERTER' }} \
+                 else {{ \
+                   $parent = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p.ParentProcessId) -ErrorAction SilentlyContinue; \
+                   if ($parent) {{ 'PARENT-ALIVE' }} else {{ 'ORPHAN' }} \
+                 }}"
+            );
+            let output = Command::new("powershell")
+                .creation_flags(CREATE_NO_WINDOW)
+                .args(["-NoProfile", "-Command", &script])
+                .output()
+                .map_err(|e| format!("校验进程身份失败: {e}"))?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim() == "ORPHAN")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = pid;
+            Ok(false)
+        }
+    }
+
+    pub fn find_and_kill_orphan(port: u16) -> Result<Option<u32>, String> {
+        let Some(pid) = find_listener_pid(port)? else {
+            return Ok(None);
+        };
+        if !is_orphan_converter(pid)? {
+            // 端口被「不是孤儿 converter」的进程占着：不是本工具的孤儿，绝不动它
+            return Ok(None);
+        }
+        kill_process_tree_by_pid(pid)?;
+        // 有界等待确认端口释放（孤儿死后子进程/句柄释放可能有延迟）
+        for _ in 0..10 {
+            if matches!(find_listener_pid(port)?, None) {
+                return Ok(Some(pid));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Err(format!("孤儿内核（PID {pid}）已终止但端口 {port} 仍未释放"))
     }
 }
 

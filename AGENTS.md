@@ -224,6 +224,14 @@ workbuddy2api.exe (GUI)
   **没有父进程退出检测**（实测：GUI 退出后它变孤儿继续存活并占着端口），若只判
   「最终可用」，会出现「新版 GUI 启动即崩 → 旧内核仍响应 2xx → 误判成功」，
   把崩溃版本当成功留在盘上。先等端口消失可证明旧内核确实退了，此后 2xx 必来自新进程。
+  ⚠️ **孤儿内核与「停止」按钮（实测踩到的用户困惑）**：converter.py 无父进程退出检测，
+  GUI 退出/被更新脚本终止后它变孤儿继续占 8787。新 GUI 启动时健康检查探到 200 → 状态卡
+  显示「运行中」，但「停止」按钮走 `proxy_stop` 只杀本 GUI `ProxyHandle` 里的 child
+  （handle 为空）→ 返回 not-running 而端口仍被占 → 3s 轮询又探到 200 → 状态跳回
+  「运行中」，用户永远关不掉。修复：`proxy_stop` 的 handle-空分支新增孤儿清理
+  （`orphan_killer::find_and_kill_orphan`）：按端口找监听 PID → 校验命令行含 converter.py
+  → 校验其父进程已死（三重校验，防误伤无辜监听者/别的 GUI 的正常子进程）→ 杀进程树
+  → 有界等待端口释放。端口被「非孤儿 converter」占用时不动它。
   端口超时未释放时**必须中止更新**（`Throw-Failure 'port-not-released'`，外部评审 P1 采纳，
   推翻早先的 WARN 宽容策略）：uvicorn 端口被占的实测行为是 `create_server` 抛
   `OSError`（WinError 10048）→ `sys.exit(STARTUP_FAILURE=3)`——新版内核**必然起不来**，
