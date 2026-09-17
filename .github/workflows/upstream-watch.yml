@@ -1,0 +1,72 @@
+name: Upstream Watch
+
+on:
+  schedule:
+    # 每周一、三、五 UTC 01:00（北京时间 09:00）巡检
+    - cron: '0 1 * * 1,3,5'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'tools/upstream-sources.json'
+      - 'tools/check-upstream.py'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Check upstream sources schema
+        run: python tools/check-upstream.py --lint
+
+      - name: Compare against upstreams
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/check-upstream.py
+
+      - name: Ensure upstream-watch label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh label create upstream-watch --color "d93f0b" --description "社区借鉴项目上游更新待评估" --force || true
+
+      - name: Create or update tracking issue
+        if: steps.check.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT="${{ steps.check.outputs.update_count }}"
+          TITLE="🔔 [Upstream Watch] 社区反代借鉴项目有新提交（${COUNT} 项待评估）"
+          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            echo "更新已存在的 Issue #$EXISTING"
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file upstream-report.md
+          else
+            gh issue create \
+              --title "$TITLE" \
+              --body-file upstream-report.md \
+              --label "upstream-watch"
+          fi
+
+      - name: Auto-close when caught up
+        if: steps.check.outputs.has_updates == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --comment "✅ 所有借鉴源基线已与上游一致，自动收口。下次有新提交会自动重新开 Issue。"
+          else
+            echo "无待跟进项，也无未关闭 Issue，跳过。"
+          fi

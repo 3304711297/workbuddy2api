@@ -58,3 +58,6 @@ target-*/
 .vscode/
 *.bak
 *.tmp
+
+# 看门巡检临时报告（仅用于 CI 生成 Issue，不入库）
+upstream-report.md

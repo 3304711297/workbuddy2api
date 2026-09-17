@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
+  "updated_at": "2026-09-17",
+  "sources": {
+    "wb2api-upstream-xiaofan": {
+      "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
+      "repo": "xiaofan6ya/workbuddy2api",
+      "branch": "main",
+      "last_synced_commit": "56bb51c3",
+      "last_synced_sha": "56bb51c3e390c52f20668b5a8e0cb20b22037746",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 X-Device-Token 注入方案）",
+      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。"
+    },
+    "wb2api-upstream-distpub": {
+      "name": "workbuddy2api 增强 fork（DistPub，借鉴雷达）",
+      "repo": "DistPub/workbuddy2api",
+      "branch": "main",
+      "last_synced_commit": "3e6b223a",
+      "last_synced_sha": "3e6b223a4c27ff98c9a14e25039e32fec3e33487",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 reasoning 合并器/空段清洗/品牌词脱敏）",
+      "note": "xiaofan6ya 的活跃 fork（内置 Turing SDK/macOS 适配/content_localizer 敏感词定位）；已吸收 reasoning 合并器与品牌词脱敏；监控整仓新提交。"
+    },
+    "c2api-upstream-iceean": {
+      "name": "codebuddy2api 衍生库（IceeAn，借鉴雷达）",
+      "repo": "IceeAn/codebuddy2api",
+      "branch": "main",
+      "last_synced_commit": "894bc3ac",
+      "last_synced_sha": "894bc3ac645198ff804533afad981e0c3a2c38c7",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Claude 客户端指纹脱敏思路，P0 已落地）",
+      "note": "腾讯 copilot 系反代的活跃衍生库（MIT，25★），含凭证轮换/令牌管理/多账号调度等 workbuddy2api 已补齐的能力；监控整仓新提交，出现可采纳改进时评估摘樱桃。【合规红线】上游 xueyue33/codebuddy2api 无 LICENSE（all rights reserved），MIT 仅覆盖 IceeAn 自 bce86ded 起独立重写的当前树；只借鉴思路不整文件搬运，若取代码须出自当前树并在 THIRD_PARTY_NOTICES.md 署名 IceeAn。"
+    },
+    "wb2api-upstream-momo": {
+      "name": "workbuddy-switch-gateway（momo0410，借鉴雷达）",
+      "repo": "momo0410/workbuddy-switch-gateway",
+      "branch": "main",
+      "last_synced_commit": "50e88ae0",
+      "last_synced_sha": "50e88ae046294713eaeb4ee6f06a011dca42b474",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
+      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。"
+    },
+    "wb2api-upstream-linguo": {
+      "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
+      "repo": "linguo2625469/workbuddy2api-panel",
+      "branch": "main",
+      "last_synced_commit": "d3488bec",
+      "last_synced_sha": "d3488bec8fbe5804d6e0f6dd956eda2c890650e9",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。"
+    },
+    "wb2api-upstream-turbomind": {
+      "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
+      "repo": "turbomind66/workbuddy2api-python",
+      "branch": "main",
+      "last_synced_commit": "de677e1f",
+      "last_synced_sha": "de677e1f817febf638d9fe2566e2cfee6254810f",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其出站 User-Agent 仿真与可配置环境变量）",
+      "note": "Go 原版 workbuddy2api 的 Python 3 完整重写（FastAPI/SSE/多账号/熔断）；已借鉴其官方客户端 UA 仿真思路（CLI/2.63.2）；监控整仓新提交。"
+    },
+    "wb2api-upstream-joy4fire": {
+      "name": "Workbuddy2API 增强版（Joy4Fire，借鉴雷达）",
+      "repo": "Joy4Fire/Workbuddy2API",
+      "branch": "main",
+      "last_synced_commit": "620b55c9",
+      "last_synced_sha": "620b55c994f1c9c7b960caee1eec051c518eb359",
+      "absorbed": "借鉴雷达（横向对比与特性雷达）",
+      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。"
+    },
+    "wb2api-upstream-shouzhuo": {
+      "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
+      "repo": "ShouZhuo0413/codebuddy2api",
+      "branch": "main",
+      "last_synced_commit": "984dc46b",
+      "last_synced_sha": "984dc46b960211de21a3b12fef588045d5c7547c",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议双向转换与流式语义状态机）",
+      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。"
+    },
+    "wb2api-upstream-ardeyou": {
+      "name": "workbuddy2api-intl 国际版（ardeyouxipianyi，借鉴雷达）",
+      "repo": "ardeyouxipianyi/workbuddy2api-intl",
+      "branch": "main",
+      "last_synced_commit": "7c93b46a",
+      "last_synced_sha": "7c93b46a9e3e3b3e6c0245a4918e7e17cb1db0c4",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范）",
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。"
+    },
+    "wb2api-upstream-hawklithm": {
+      "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
+      "repo": "hawklithm/workbuddy2api",
+      "branch": "main",
+      "last_synced_commit": "ae726126",
+      "last_synced_sha": "ae7261267785710f020dff69b43d864e4d72587e",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议与多轮消息互转经验）",
+      "note": "轻量协议代理，原生支持 Claude Code CLI、Codex CLI 与 DeepSeek Harness；已借鉴其 Responses 与 Claude 协议边缘流式处理经验；监控整仓新提交。"
+    },
+    "wb2api-upstream-icebears": {
+      "name": "workbuddy2api 配额感知版（icebears111，借鉴雷达）",
+      "repo": "icebears111/workbuddy2api",
+      "branch": "main",
+      "last_synced_commit": "0ced9aba",
+      "last_synced_sha": "0ced9aba59bdf114620f51ae94916a03cb1a3a4c",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 11140 内容安全审核拦截防误判机制与配额调度参考）",
+      "note": "多账号网关配额感知分支，含并发拉取配额、配额感知故障转移、签到调度与 Web 管理；监控整仓新提交。"
+    },
+    "wb2api-upstream-ventourf": {
+      "name": "WorkBuddy2api 混合架构版（VentourF，借鉴雷达）",
+      "repo": "VentourF/WorkBuddy2api",
+      "branch": "main",
+      "last_synced_commit": "ed6c2d9e",
+      "last_synced_sha": "ed6c2d9e5b7b9b7e7d6928e469ba1f618a803975",
+      "absorbed": "借鉴雷达（横向对比与上游错误分类参考）",
+      "note": "含 Python/Node 双入口与多账号调度、429 Retry-After 与 6004 重置时间解析、自动令牌刷新；监控整仓新提交。"
+    },
+    "wb2api-upstream-xyw": {
+      "name": "WorkBuddy2Api 前端凭证管控版（XYW110，借鉴雷达）",
+      "repo": "XYW110/WorkBuddy2Api",
+      "branch": "main",
+      "last_synced_commit": "00243f58",
+      "last_synced_sha": "00243f5848f623aa209c8ce126749caf2daf2032",
+      "absorbed": "借鉴雷达（横向对比与凭证启停管控参考）",
+      "note": "支持前端凭证启用/停用与多账号管理的衍生实现；监控整仓新提交。"
+    },
+    "wb2api-upstream-practice019": {
+      "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
+      "repo": "Practice019/workbuddy2api",
+      "branch": "main",
+      "last_synced_commit": "ed8a0b35",
+      "last_synced_sha": "ed8a0b35b2e957380f2d5ee1639d675685d8205f",
+      "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。"
+    },
+    "wb2api-upstream-sliverkiss": {
+      "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
+      "repo": "Sliverkiss/workbuddy2api",
+      "branch": "main",
+      "last_synced_commit": "9d1a21bd",
+      "last_synced_sha": "9d1a21bdcb143527a4d1a0937c4495c026dbd783",
+      "absorbed": "借鉴雷达（横向对比与加权调度/多账号池核心架构参考）",
+      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。"
+    },
+    "wb2api-upstream-neipor": {
+      "name": "codebuddy-cli2api 全协议网关（neipor，借鉴雷达）",
+      "repo": "neipor/codebuddy-cli2api",
+      "branch": "main",
+      "last_synced_commit": "316ac7fb",
+      "last_synced_sha": "316ac7fb140d8e3d01ab808ab4be8134b4d1e5ae",
+      "absorbed": "借鉴雷达（多模态图片转Data-URI机制、Prompt Cache亲和性调度与扩展资源端点参考）",
+      "note": "纯标准库实现全协议网关（OpenAI/Anthropic/Gemini/Codex）；首创多模态图片远程 URL 自动下载转 Data-URI（解官方400限制）、前缀哈希亲和性会话保持（极大提升Prompt Cache命中率）、透传ASR/TTS/WebSearch/WebFetch端点；监控整仓新提交。"
+    },
+    "wb2api-upstream-windoc": {
+      "name": "codebuddy-gateway 容器网关（WindoC，借鉴雷达）",
+      "repo": "WindoC/codebuddy-gateway",
+      "branch": "main",
+      "last_synced_commit": "e26411c6",
+      "last_synced_sha": "e26411c6cf054b4b1c13f7dde1c20ca44a4d804d",
+      "absorbed": "借鉴雷达（官方 Agent SDK 容器化桥接模式参考）",
+      "note": "基于 CodeBuddy Agent SDK (@tencent-ai/agent-sdk) 桥接的容器化 REST 网关，支持持久化凭证与 MCP tools 自动映射；监控整仓新提交。"
+    },
+    "wb2api-upstream-orangeboy": {
+      "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
+      "repo": "orangeboyChen/codebuddy2api",
+      "branch": "main",
+      "last_synced_commit": "45227c54",
+      "last_synced_sha": "45227c5417ae41a995e9276d4993ad43ef8ca5f8",
+      "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考）",
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。"
+    },
+    "wb2api-upstream-hanhan": {
+      "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
+      "repo": "HanHan666666/codebuddy2openai",
+      "branch": "main",
+      "last_synced_commit": "7eda3c17",
+      "last_synced_sha": "7eda3c17f1aa0354b2fe7e22f4b6c21796c0d08a",
+      "absorbed": "借鉴雷达（基座代码来源，fork 关系已于 2026-09-13 自助脱离）",
+      "note": "workbuddy2api 脱离 fork 前的上游基座（LICENSE 基座声明）；基座已深度二次开发，上游近 3 个月无更新，仅作上游复活感知，出现可采纳改进时评估摘樱桃。"
+    }
+  }
+}
