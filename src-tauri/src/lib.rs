@@ -280,7 +280,7 @@ pub fn load_app_config() -> AppConfig {
 pub fn save_app_config(cfg: &AppConfig) -> Result<(), String> {
     let p = config_file_path();
     let raw = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&p, raw).map_err(|e| e.to_string())?;
+    commands::shared::atomic_write_file(&p, &raw).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -295,9 +295,10 @@ fn save_app_settings(
     settings: AppConfig,
     state: State<'_, AppConfigState>,
 ) -> Result<String, String> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    *guard = settings.clone();
+    // 严格先原子写盘成功，再更新内存状态；写盘失败绝不分叉内存
     save_app_config(&settings)?;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    *guard = settings;
     Ok("设置已成功保存".into())
 }
 

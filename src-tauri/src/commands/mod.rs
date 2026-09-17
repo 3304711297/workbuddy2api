@@ -16,7 +16,7 @@ mod agents;
 mod auth;
 mod billing;
 mod proxy;
-mod shared;
+pub(crate) mod shared;
 mod update;
 
 // 功能子模块按原始可见性整体再导出。
