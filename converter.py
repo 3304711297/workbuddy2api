@@ -2273,6 +2273,16 @@ def _is_unauthorized_model_error(status_code: int, err_text: str) -> bool:
     )
 
 
+def _is_content_policy_violation(status_code: int, err_text: str) -> bool:
+    """上游 11140 内容审核拒绝（"内容未通过安全审核，请调整后重试" / request illegal）。
+
+    此类错误为用户侧输入命中上游安全策略，与账号额度/网络无关。
+    严禁触发切号重试（换号重试同样被拦且增加账号风险），严禁计入账号冷却。
+    """
+    t = err_text or ""
+    return ("11140" in t) or ("内容未通过安全审核" in t) or ("未通过安全审核" in t)
+
+
 # ---------------------------------------------------------------------------
 # 降级事件观测（内存环形记录，随内核重启清零；/api/rate_limit 暴露给消费端）
 # ---------------------------------------------------------------------------
@@ -2561,6 +2571,9 @@ class AccountRotator:
 
     def record_failure_and_failover(self, current_uid: str, model: str, status_code: int, err_text: str) -> tuple[str, dict] | None:
         """处理 429/6004；若开启 failover/roundrobin 且有备用账号，自动切号并返回 (new_uid, new_headers)。"""
+        # 内容审核拦截（11140）为用户请求内容违规，严禁切号重试与冷却
+        if _is_content_policy_violation(status_code, err_text):
+            return None
         is_rate_limited = (
             (status_code == 429)
             or ("6004" in (err_text or ""))
@@ -3076,6 +3089,11 @@ async def chat_completions(request: Request,
                             err_str = raw.decode('utf-8', 'replace')
                             _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
                             _log(f"[{rid}] ── ERROR BODY ──\n{err_str}", level="debug")
+                            if _is_content_policy_violation(r.status_code, err_str):
+                                _log(f"[{rid}] ⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
+                                _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
+                                              requested_model=model_name, fallback_reason=fallback_reason)
+                                raise HTTPException(status_code=400, detail=_safe_err_raw(raw, r.status_code))
                             _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
@@ -3321,6 +3339,14 @@ async def anthropic_messages(
                             raw = await r.aread()
                             err_str = raw.decode('utf-8', 'replace')
                             _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
+                            if _is_content_policy_violation(r.status_code, err_str):
+                                _log(f"[{rid}] ⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
+                                _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
+                                              requested_model=model_name, fallback_reason=fallback_reason)
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail={"type": "error", "error": {"type": "invalid_request_error", "message": "上游内容安全审核未通过 (11140)，请调整提示词后重试"}},
+                                )
                             _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
@@ -3540,6 +3566,11 @@ async def openai_responses(
                             raw = await r.aread()
                             err_str = raw.decode("utf-8", "replace")
                             _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str, 200)}")
+                            if _is_content_policy_violation(r.status_code, err_str):
+                                _log(f"[{rid}] ⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
+                                _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
+                                              requested_model=model_name, fallback_reason=fallback_reason)
+                                raise HTTPException(status_code=400, detail=_safe_err_raw(raw, r.status_code))
                             _record_rate_limit(model_name, err_str, uid=uid, status_code=r.status_code)
                             if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                                 fallback_tried = True
@@ -3852,6 +3883,14 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         raw = await r.aread()
                         err_str = raw.decode("utf-8", "replace")
                         _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
+                        if _is_content_policy_violation(r.status_code, err_str):
+                            _log(f"{prefix}⚠️ 上游内容安全审核拦截 (11140)，不切号直接返回客户端")
+                            _record_usage(actual_model, False, t0, error="HTTP 400 (11140 content rejected)",
+                                          retry_count=retry_count, retry_reason=retry_reason,
+                                          requested_model=requested_model or model_name,
+                                          fallback_reason=fallback_reason)
+                            yield _err_event(raw, 400)
+                            return
                         _record_rate_limit(model_name, err_str, uid=curr_uid, status_code=r.status_code)
                         if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
                             fallback_tried = True
@@ -3945,9 +3984,30 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
 
 def _safe_err_raw(raw: bytes, status: int) -> dict:
     try:
-        return json.loads(raw.decode("utf-8", "replace"))
+        data = json.loads(raw.decode("utf-8", "replace"))
+        if isinstance(data, dict):
+            code = data.get("code")
+            msg = data.get("msg") or data.get("message") or ""
+            if code == 11140 or "11140" in str(code) or "安全审核" in str(msg):
+                return {
+                    "error": {
+                        "message": f"上游内容安全审核未通过 (11140): {msg or '请调整提示词后重试'}",
+                        "type": "invalid_request_error",
+                        "code": 11140,
+                    }
+                }
+        return data
     except Exception:
-        return {"error": {"message": raw.decode("utf-8", "replace")[:500], "type": "upstream_error", "code": status}}
+        text = raw.decode("utf-8", "replace")[:500]
+        if "11140" in text or "安全审核" in text:
+            return {
+                "error": {
+                    "message": "上游内容安全审核未通过 (11140)，请调整提示词后重试",
+                    "type": "invalid_request_error",
+                    "code": 11140,
+                }
+            }
+        return {"error": {"message": text, "type": "upstream_error", "code": status}}
 
 
 # ---------------------------------------------------------------------------
@@ -4526,10 +4586,10 @@ def _safe_err(r: httpx.Response) -> dict:
 
 def _err_event(msg: bytes, status: int) -> bytes:
     # 以 OpenAI SSE 错误 chunk 形式返回
-    import json as _json, time as _time
-    chunk = {
-        "error": {"message": msg.decode("utf-8", "replace")[:500], "type": "upstream_error", "code": status},
-    }
+    import json as _json
+    chunk = _safe_err_raw(msg, status)
+    if "error" not in chunk:
+        chunk = {"error": chunk}
     return f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
