@@ -131,12 +131,17 @@ function renderClaudeGuide(port) {
       ${field('原生端点路径', `${baseUrl}/v1/messages`)}
       ${field('推荐模型', 'deepseek-v4.1-flash')}
       <div class="zguide-field">
-        <span class="zguide-label">Bash 终端直连命令（点击复制）</span>
-        <pre class="zguide-value" data-copy="${esc(bashCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(bashCmd)}</pre>
-      </div>
-      <div class="zguide-field">
-        <span class="zguide-label">PowerShell 直连命令（点击复制）</span>
-        <pre class="zguide-value" data-copy="${esc(psCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(psCmd)}</pre>
+        <div class="snippet-tab-header">
+          <span class="zguide-label">终端直连命令（点击复制）</span>
+          <div class="snippet-tab-pills">
+            <button type="button" class="snippet-pill active" data-tab="bash">Bash</button>
+            <button type="button" class="snippet-pill" data-tab="ps">PowerShell</button>
+          </div>
+        </div>
+        <div class="snippet-panes">
+          <pre class="zguide-value snippet-pane" data-pane="bash" data-copy="${esc(bashCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(bashCmd)}</pre>
+          <pre class="zguide-value snippet-pane hidden" data-pane="ps" data-copy="${esc(psCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(psCmd)}</pre>
+        </div>
       </div>
       <ol class="zguide-steps">
         <li>内核已内置 Anthropic Messages API，兼容 Claude Code CLI 等工具</li>
@@ -178,16 +183,19 @@ function renderCodexGuide(port) {
       ${field('API Key 值（本地固定）', 'local')}
       ${field('推荐模型', 'deepseek-v4.1-flash')}
       <div class="zguide-field">
-        <span class="zguide-label">config.toml 配置片段（点击复制）</span>
-        <pre class="zguide-value" data-copy="${esc(tomlSnippet)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(tomlSnippet)}</pre>
-      </div>
-      <div class="zguide-field">
-        <span class="zguide-label">Bash 终端直连命令（点击复制）</span>
-        <pre class="zguide-value" data-copy="${esc(bashCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(bashCmd)}</pre>
-      </div>
-      <div class="zguide-field">
-        <span class="zguide-label">PowerShell 直连命令（点击复制）</span>
-        <pre class="zguide-value" data-copy="${esc(psCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(psCmd)}</pre>
+        <div class="snippet-tab-header">
+          <span class="zguide-label">配置与命令（点击复制）</span>
+          <div class="snippet-tab-pills">
+            <button type="button" class="snippet-pill active" data-tab="toml">config.toml</button>
+            <button type="button" class="snippet-pill" data-tab="bash">Bash</button>
+            <button type="button" class="snippet-pill" data-tab="ps">PowerShell</button>
+          </div>
+        </div>
+        <div class="snippet-panes">
+          <pre class="zguide-value snippet-pane" data-pane="toml" data-copy="${esc(tomlSnippet)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(tomlSnippet)}</pre>
+          <pre class="zguide-value snippet-pane hidden" data-pane="bash" data-copy="${esc(bashCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(bashCmd)}</pre>
+          <pre class="zguide-value snippet-pane hidden" data-pane="ps" data-copy="${esc(psCmd)}" title="点击复制" style="white-space: pre-wrap; font-size: 11px; margin: 0;">${esc(psCmd)}</pre>
+        </div>
       </div>
       <ol class="zguide-steps">
         <li>内核已内置 OpenAI Responses API（<code>POST /v1/responses</code>），兼容 Codex CLI 等 Responses 协议客户端</li>
@@ -272,6 +280,21 @@ export function initAgentActions() {
     el.classList.add('copied');
     showToast(ok ? '已复制' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
     setTimeout(() => el.classList.remove('copied'), 1500);
+  });
+
+  // 代码片段分段切换 Tab（点击切换 Bash / PowerShell / config.toml，对标 EasyCLIProxyAPI）
+  document.addEventListener('click', (ev) => {
+    const pill = ev.target.closest('.snippet-pill');
+    if (!pill) return;
+    const header = pill.closest('.snippet-tab-header');
+    const field = header?.closest('.zguide-field');
+    if (!field) return;
+
+    const tab = pill.dataset.tab;
+    header.querySelectorAll('.snippet-pill').forEach((p) => p.classList.toggle('active', p === pill));
+    field.querySelectorAll('.snippet-pane').forEach((pane) => {
+      pane.classList.toggle('hidden', pane.dataset.pane !== tab);
+    });
   });
 
   document.getElementById('btn-refresh-agents')?.addEventListener('click', loadAgentsStatus);

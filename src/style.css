@@ -1365,7 +1365,9 @@ body {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1374,11 +1376,15 @@ body {
 .modal-card {
   width: min(440px, 92vw);
   background: var(--bg-modal);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius);
-  padding: 18px 20px;
-  box-shadow: var(--shadow-modal);
-  animation: slideUp 0.18s ease;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  box-shadow: 0 24px 48px -8px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  animation: modalPop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes modalPop {
+  from { opacity: 0; transform: scale(0.96) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
 .modal-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
@@ -1564,11 +1570,27 @@ body {
 .usage-stat-card .metric-value { font-size: 20px; font-weight: 700; }
 .usage-sub { font-size: 12px; }
 
-/* 48 小时趋势图（手写 SVG，颜色全部走主题变量） */
-.usage-chart-wrap { width: 100%; height: 180px; margin-top: 8px; }
+/* 48 小时趋势图（手写 SVG，高质感深色凹陷底与柱体微光） */
+.usage-chart-wrap {
+  width: 100%;
+  height: 180px;
+  margin-top: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius);
+  border: 1px solid var(--border-pkg);
+  padding: 10px 14px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
 .usage-chart-wrap svg { width: 100%; height: 100%; display: block; }
-.usage-bar { fill: url(#usage-grad); transition: opacity 0.15s; cursor: default; }
-.usage-bar:hover { opacity: 0.8; }
+.usage-bar {
+  fill: url(#usage-grad);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+}
+.usage-bar:hover {
+  fill: #60a5fa;
+  filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.8));
+}
 .usage-grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 6; }
 .usage-base-line { stroke: var(--border-light); stroke-width: 1; }
 .usage-empty-text { fill: var(--text-muted); font-size: 14px; }
@@ -1578,6 +1600,42 @@ body {
   margin-top: 6px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* 代码片段分段切换 Tab (对标 EasyCLIProxyAPI Snippet Tabs) */
+.snippet-tab-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+.snippet-tab-pills {
+  display: inline-flex;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 2px;
+}
+.snippet-pill {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+}
+.snippet-pill:hover {
+  color: var(--text-primary);
+}
+.snippet-pill.active {
+  background: var(--primary-subtle);
+  color: var(--primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 /* 侧栏底部更新入口 */
