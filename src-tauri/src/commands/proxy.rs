@@ -519,11 +519,20 @@ mod orphan_killer {
             match parent_pid {
                 None => return Ok(Some(current)),       // 父已死 = 孤儿根
                 Some(pp) => {
-                    if process_alive(pp) {
-                        // 父活着 = 被正常管理，不是孤儿链
-                        return Ok(None);
+                    if !process_alive(pp) {
+                        current = pp;   // 父也是死的 → 继续向上爬
+                        continue;
                     }
-                    current = pp;
+                    // 父活着：若父也是 converter.py，说明整条链的祖先仍活着的
+                    // 那个是链顶——但链顶不是 GUI（GUI 是 workbuddy2api.exe）。
+                    // 父是 converter.py 且活着 = 它自己也是孤儿（它的父已死），继续爬。
+                    let (parent_cmdline, _) = process_info(pp)?;
+                    if parent_cmdline.contains("converter.py") {
+                        current = pp;
+                        continue;
+                    }
+                    // 父是 GUI / 别的管理进程且活着 = 被正常管理，不是孤儿
+                    return Ok(None);
                 }
             }
         }

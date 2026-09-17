@@ -229,12 +229,16 @@ workbuddy2api.exe (GUI)
   健康检查探到 200 → 状态卡显示「运行中」，但「停止」按钮走 `proxy_stop` 只杀本 GUI
   `ProxyHandle` 里的 child（handle 为空）→ 返回 not-running 而端口仍被占 → 3s 轮询
   又探到 200 → 状态跳回「运行中」，用户永远关不掉。
-  ⚠️ **链式孤儿（第二轮修复）**：实测孤儿是**两层**——GUI 9284(死)→9180(converter.py
+  ⚠️ **链式孤儿（第三轮修复）**：实测孤儿是**两层**——GUI 9284(死)→9180(converter.py
   链顶孤儿)→4344(子进程,父活着,taskkill /T 对它有父进程保护杀不掉)。从监听者 4344
   直接杀会被 taskkill 拦（"reason: This process can only be terminated forcefully..."）。
-  修复：`climb_to_orphan_root` 沿祖先链向上爬（≤8 步防环），找「命令行含 converter.py
-  且父进程已死」的**链顶**——那才是真正的孤儿根。`taskkill /T /PID <根>` 会连带整棵
-  子树。若链顶父进程仍活着（= 有活 GUI 在管理）则不动。
+  修复：`climb_to_orphan_root` 沿祖先链向上爬（≤8 步防环）。
+  ⚠️ **第二轮爬链的 bug（用户实测仍不行，第三轮修复）**：旧逻辑「父进程活着就返回
+  None」在第一层 4344→9180 就停了——9180 虽是 converter.py 且父 GUI 已死，但因为
+  9180 自己活着，4344 那步就 return None。正确语义：父进程活着时，**检查父是否也是
+  converter.py**——若是，说明父也是孤儿链成员（它的父已死），继续爬；若父不是
+  converter.py（= GUI 活着），才返回 None。实测修正后：4344→9180(converter.py,继续爬)
+  →9180 父死 → 根=9180，taskkill /T 连带 4344。
   端口超时未释放时**必须中止更新**（`Throw-Failure 'port-not-released'`，外部评审 P1 采纳，
   推翻早先的 WARN 宽容策略）：uvicorn 端口被占的实测行为是 `create_server` 抛
   `OSError`（WinError 10048）→ `sys.exit(STARTUP_FAILURE=3)`——新版内核**必然起不来**，
