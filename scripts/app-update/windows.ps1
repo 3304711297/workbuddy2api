@@ -138,7 +138,15 @@ $exePath = Join-Path $InstallRoot 'src-tauri\target\release\workbuddy2api.exe'
 $SHELL_BASELINE_BYTES = 15572992
 # 反代探活地址：端口由 GUI 传入（配置真源 load_app_config().port），**不写死**。
 # GUI 起来后会拉起 converter.py，该端口通即证明整条链路活着。
-$PROXY_HEALTH_URL = "http://127.0.0.1:$Port/v1/models"
+#
+# ⚠️ 必须探 **/health**（免鉴权），不能探 /v1/models：
+# /v1/models 走 converter.py 的 `_check_auth`，配了密钥后无认证请求一律 401。
+# 实测（模拟「密钥已配」的内核）：探 /v1/models 时 Wait-PortReleased 在 0.1s 内
+# 就因 401 误判「端口已释放」（内核其实还活着），且 90s 健康检查必然全 401 →
+# 误判 startup-unhealthy → **把正常的新版回滚掉**。与端口写死是同一类错误。
+# /health 在内核里明确设计为免鉴权（只返回 status/authenticated 两个布尔），
+# 且不依赖凭据可用性 —— 作为「进程活着且 HTTP 在服务」的判据最合适。
+$PROXY_HEALTH_URL = "http://127.0.0.1:$Port/health"
 
 function Start-WorkBuddy {
     param([string]$Reason)
@@ -187,6 +195,8 @@ function Test-ProxyEndpoint {
 }
 
 # 等到探活不再返回 2xx（旧内核确实退出）或超时
+# 等到探活不再返回 2xx（旧内核确实退出）或超时。
+# ⚠️ 依赖 $PROXY_HEALTH_URL 指向**免鉴权**端点，否则会因 401 立刻误判「已释放」。
 function Wait-PortReleased {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
@@ -313,7 +323,12 @@ try {
 
     if (-not $needsRebuild) {
         Write-Log '工作树与运行中的产物一致，无需重建'
-        if ($stashed) { Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop' | Out-Null }
+        # 此路径不重建、不回滚，恢复改动是安全的（与成功路径同理，只是更早返回）。
+        if ($stashed) {
+            if ((Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop') -ne 0) {
+                Write-Log 'stash 恢复冲突，改动仍保存在 git stash 中，请手动 git stash pop' 'WARN'
+            }
+        }
         Write-State -Phase 'done' -Message '已是最新版本，无需更新'
         Start-WorkBuddy -Reason '无更新' | Out-Null
         exit 0
@@ -388,11 +403,11 @@ try {
         Write-Log 'dist/assets 下未找到 index-*.js，跳过资源内嵌校验' 'WARN'
     }
 
-    if ($stashed) {
-        if ((Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop') -ne 0) {
-            Write-Log 'stash 恢复冲突，改动仍保存在 git stash 中，请手动 git stash pop' 'WARN'
-        }
-    }
+    # ⚠️ 此处**刻意不**恢复 stash：见下方第 7 步的说明与 catch 分支的时序。
+    # 曾经的写法在这里提前 `stash pop`，一旦后续启动确认失败触发回滚，
+    # `git reset --hard $previousSha` 会把刚弹回的改动一并抹掉，而 catch 里的
+    # 第二次 pop 只会得到「No stash entries found」——用户未提交的工作**静默丢失**。
+    # 提前 pop 对构建和启动毫无影响（exe 早已编译完成），却换来一条数据丢失路径。
 
     # ── 7. 拉起并等待启动确认（借鉴 EasyCLIProxyAPI 的 ack 等待 + 时序判据） ──
     # 先等旧内核把端口交出来，这样后面探到的 2xx 必然来自新进程，而不是残留的旧内核。
@@ -411,6 +426,16 @@ try {
     $health = Wait-WorkBuddyHealthy -Process $proc -TimeoutSeconds 90
     if ($health.ok) {
         Write-Log "启动确认通过：$($health.reason)"
+        # ✅ 唯一的 stash 恢复点（成功路径）：此刻已完成全部 git 操作且不会再回滚，
+        # 恢复用户改动是安全的。放在更早的位置会让回滚的 reset --hard 抹掉它们；
+        # 放在更晚（本就无更晚）则用户改动会被长期留在 stash 里而不自知。
+        if ($stashed) {
+            if ((Invoke-Logged -FilePath 'git' -Arguments @('stash', 'pop') -What 'git stash pop') -ne 0) {
+                Write-Log 'stash 恢复冲突（新版本可能改动了同一文件），改动仍保存在 git stash 中，请手动 git stash pop' 'WARN'
+            } else {
+                Write-Log '已恢复更新前的未提交改动（git stash pop）'
+            }
+        }
         Write-State -Phase 'done' -Message '更新完成，新版本已启动'
         exit 0
     }

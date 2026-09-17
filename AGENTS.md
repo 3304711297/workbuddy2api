@@ -19,7 +19,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：191 passed（node --test）
+npm test                                          # 前端：193 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：72 passed
 ```
 
@@ -174,15 +174,24 @@ workbuddy2api.exe (GUI)
   ⚠️ **健康检查端口不得写死 8787**（与 Hermes 检测同一条铁律）：端口可配置，用户配成 9000 时
   新版会正常监听 9000，而写死 8787 的探活必然失败 → 90s 后误判 `startup-unhealthy`
   → **把正常的新版回滚掉**。链路：`load_app_config().port` → `-Port` 参数 → 脚本
-  `$PROXY_HEALTH_URL = "http://127.0.0.1:$Port/v1/models"`。脚本的 `Port` 必须是
+  `$PROXY_HEALTH_URL = "http://127.0.0.1:$Port/health"`。脚本的 `Port` 必须是
   **必填参数**（缺失即报错，不得静默退回默认值）；契约测试会扫描脚本可执行代码
   （剥离 `#` 与 `<# #>` 注释后）断言其中不含 8787 字面量。
+
+  ⚠️ **探活必须打 `/health`（免鉴权），绝不能打 `/v1/models`**：`/v1/models` 走
+  `_check_auth`，配了密钥后任何无认证请求一律 401 → 探活恒失败 → 90s 后误判
+  `startup-unhealthy` → **把正常的新版回滚掉**（与端口写死同类，属鉴权维度）。
+  二次伤害：`Wait-PortReleased` 也复用该 URL，401 会让它在 0.1s 内误判「端口已释放」，
+  使「旧内核残留」的时序判据同时失效。`/health` 在内核里明确免鉴权且只返回
+  `status`/`authenticated` 两个布尔，是唯一合适的探活端点。
+  ⚠️ 探活**只证明进程能服务 HTTP**，不证明上游可用 —— 这是刻意的：上游/网络故障
+  不该触发回滚。契约锁定：`tests/test_app_update_contract.test.js` 两条断言。
 
   **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
   `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → 脚本等 GUI 消失后
   `git stash`（若有改动）→ `git fetch` + `git merge --ff-only` → `npm run build`
   → **`cargo tauri build --no-bundle`** → 校验产物（尺寸 > 空壳基准 + `index-*.js` 已内嵌）
-  → 拉起新 exe → **等待启动确认**（进程存活 + `8787/v1/models` 探活，90s 超时）
+  → 拉起新 exe → **等待启动确认**（进程存活 + `<Port>/health` 探活，90s 超时）
   → 确认失败则 `git reset --hard` 回滚 + 重建 + 拉起旧版。
   ⚠️ 启动确认不可省（借鉴 EasyCLIProxyAPI 的 ack 等待）：只 `Start-Process` 就宣布成功，
   会在新版「启动即崩」时把用户反复拉回同一个坏版本，且脚本已退出无从回滚。
@@ -192,6 +201,15 @@ workbuddy2api.exe (GUI)
   「最终可用」，会出现「新版 GUI 启动即崩 → 旧内核仍响应 2xx → 误判成功」，
   把崩溃版本当成功留在盘上。先等端口消失可证明旧内核确实退了，此后 2xx 必来自新进程。
   端口超时未释放时**只 WARN 不失败**——把「旧进程残留」误判成「新版失败」会错误回滚，代价更大。
+  ⚠️ **stash 恢复必须晚于所有回滚点（实测复现的数据丢失路径，改动必读）**：
+  旧写法在第 6 步（产物校验后）就提前 `stash pop`，一旦启动确认失败触发
+  `git reset --hard $previousSha`，刚弹回的用户改动会被一并抹掉，而 catch 分支的
+  第二次 pop 只得到「No stash entries found」——用户未提交的工作**静默丢失**。
+  提前 pop 对构建/启动毫无影响（exe 早已编译完成），纯属引灾。正确时序：
+  **成功路径** pop 放在启动确认通过之后（唯一不会再回滚的点）；
+  **「无更新」早退路径** pop 在 `needsRebuild` 分支内（该路径不回滚）；
+  **回滚路径** pop 在 `reset --hard` 之后。契约锁定：
+  `tests/test_app_update_contract.test.js` 的 stash 时序断言。
   ⚠️ **「是否需要重建」的基准是「工作树 vs 运行中的产物」，不是「工作树 vs 远端」**：
   用户可能已手动 pull 过、或上次更新中断，此时工作树已领先而远端无新提交；
   只看远端会得出「无需重建」→ 点了更新却什么都没发生。脚本为此接收

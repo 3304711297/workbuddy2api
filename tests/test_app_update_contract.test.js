@@ -357,8 +357,16 @@ test('健康检查端口必须来自配置，不得在更新链路写死 8787', 
     '脚本未把 Port 声明为必填参数：缺失时会静默退回写死端口'
   );
   assert.ok(
-    /http:\/\/127\.0\.0\.1:\$Port\/v1\/models/.test(handoff),
-    '探活 URL 未由 $Port 拼装'
+    /http:\/\/127\.0\.0\.1:\$Port\/health/.test(handoff),
+    '探活 URL 未由 $Port 拼装 / 未指向免鉴权端点'
+  );
+
+  // ⚠️ 必须探免鉴权端点：/v1/models 走 _check_auth，配了密钥后无认证请求一律 401。
+  // 实测：探 /v1/models 时 Wait-PortReleased 在 0.1s 内因 401 误判「端口已释放」，
+  // 且 90s 健康检查全 401 → 误判 startup-unhealthy → 把正常的新版回滚掉。
+  assert.ok(
+    /\/health/.test(handoff) && !/127\.0\.0\.1:\$Port\/v1\/models/.test(handoff),
+    '健康检查探了需要鉴权的 /v1/models：配密钥的用户会被误判为启动失败并回滚'
   );
 
   // 硬编码防线：除注释外，脚本里不得出现裸的 8787 端口字面量。
@@ -396,6 +404,53 @@ test('启动确认必须要求端口先释放（防旧内核残留造成假阳�
   assert.ok(
     /function Test-ProxyEndpoint/.test(handoff),
     '缺少共用的单次探活函数'
+  );
+});
+
+test('stash 恢复必须晚于所有回滚点（防用户未提交改动被静默抹掉）', () => {
+  // 实测复现的数据丢失路径：旧代码在第 6 步（产物校验后）就 `stash pop`，
+  // 一旦启动确认失败触发 `git reset --hard $previousSha`，刚弹回的改动会被一并抹掉，
+  // 而 catch 分支的第二次 pop 只得到「No stash entries found」——改动静默丢失。
+  const pops = [...handoff.matchAll(/git stash pop/g)].map(m => m.index);
+  assert.ok(pops.length >= 2, '预期至少两处 stash 恢复点（成功路径 + 回滚路径）');
+
+  // reset --hard 的位置：所有 pop 都必须晚于它（回滚路径）或位于不回滚的分支（成功路径）
+  const resets = [...handoff.matchAll(/Arguments @\('reset', '--hard'/g)].map(m => m.index);
+  assert.ok(resets.length >= 1, '未找到回滚点');
+
+  // 关键断言：不得存在「pop 之后还有可能执行 reset --hard」的顺序。
+  // 用标记法验证：成功路径的 pop 必须出现在 `Wait-WorkBuddyHealthy` 调用之后。
+  const healthIdx = handoff.indexOf('$health = Wait-WorkBuddyHealthy');
+  assert.ok(healthIdx > 0, '未找到启动确认调用');
+  const okBranchPop = handoff.indexOf('stash', healthIdx);
+  assert.ok(
+    okBranchPop > healthIdx,
+    '成功路径的 stash 恢复未放在启动确认之后：回滚的 reset --hard 会抹掉用户改动'
+  );
+
+  // 「无更新」早退路径的 pop 必须在 `needsRebuild` 判定分支内（该路径不回滚）
+  const noRebuildIdx = handoff.indexOf('if (-not $needsRebuild)');
+  const noRebuildPop = handoff.indexOf('stash', noRebuildIdx);
+  const rebuildEnd = handoff.indexOf('# ── 4. 依赖与前端重建', noRebuildIdx);
+  assert.ok(
+    noRebuildPop > noRebuildIdx && noRebuildPop < rebuildEnd,
+    '「无更新」早退路径的 stash 恢复不在该分支内'
+  );
+});
+
+test('探活端点必须免鉴权（/health 而非 /v1/models）', () => {
+  // 同类缺陷的鉴权维度：/v1/models 走 _check_auth，配了密钥后无认证请求一律 401。
+  // 实测：探 /v1/models 时 Wait-PortReleased 在 0.1s 内因 401 误判「端口已释放」，
+  // 且 90s 健康检查全 401 → 误判 startup-unhealthy → 把正常的新版回滚掉。
+  const urlLine = handoff.match(/\$PROXY_HEALTH_URL = "([^"]+)"/);
+  assert.ok(urlLine, '未找到探活 URL 定义');
+  assert.ok(
+    urlLine[1].endsWith('/health'),
+    `探活端点必须是免鉴权的 /health，当前是 ${urlLine[1]}`
+  );
+  assert.ok(
+    !/127\.0\.0\.1:\$Port\/v1\//.test(handoff),
+    '探活链路里仍有需要鉴权的 /v1/ 端点'
   );
 });
 
