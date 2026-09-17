@@ -4485,15 +4485,34 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                            ttft_ms=ttft_ms, error=err_msg,
                            requested_model=req_m,
                            fallback_reason=fallback_reason)
+    except (asyncio.CancelledError, GeneratorExit):
+        # 客户端提前主动断开 / 任务取消 / 生成器被外部关闭
+        req_m = requested_model or model_name
+        _record_usage_once(actual_model, ok=False, t0=t0,
+                           input_tokens=usage.get("prompt_tokens"),
+                           output_tokens=usage.get("completion_tokens"),
+                           ttft_ms=ttft_ms, error="client disconnected",
+                           requested_model=req_m,
+                           fallback_reason=fallback_reason)
+        raise
+    except BaseException as e:
+        # 内部流式解析或未预期代码错误，如实记录 stream error，绝不伪装成客户端断开
+        req_m = requested_model or model_name
+        _record_usage_once(actual_model, ok=False, t0=t0,
+                           input_tokens=usage.get("prompt_tokens"),
+                           output_tokens=usage.get("completion_tokens"),
+                           ttft_ms=ttft_ms, error=f"stream error: {e}",
+                           requested_model=req_m,
+                           fallback_reason=fallback_reason)
+        raise
     finally:
-        # 兜底保障：客户端提前中断、GeneratorExit、CancelledError 退出时，
-        # 确保该请求的用量/生命周期至少且只记账一次（ok=False, error="client disconnected"）
+        # 最终安全网：若仍有其他未记录退出的分支，兜底补记一次
         if not usage_recorded:
             req_m = requested_model or model_name
             _record_usage_once(actual_model, ok=False, t0=t0,
                                input_tokens=usage.get("prompt_tokens"),
                                output_tokens=usage.get("completion_tokens"),
-                               ttft_ms=ttft_ms, error="client disconnected",
+                               ttft_ms=ttft_ms, error="stream ended unexpectedly",
                                requested_model=req_m,
                                fallback_reason=fallback_reason)
 
