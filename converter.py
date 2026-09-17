@@ -4397,88 +4397,105 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     curr_uid = uid
     curr_headers = dict(headers)
 
-    for attempt in range(max_attempts):
-        try:
-            async with _shared_client_ctx(timeout=None) as c:
-                async with c.stream("POST", url, headers=curr_headers, json=body) as r:
-                    if r.status_code != 200:
-                        err = await r.aread()
-                        err_str = err.decode("utf-8", "replace")
-                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
-                        _log(f"{prefix}── ERROR BODY ──\n{err_str}", level="debug")
-                        _record_rate_limit(model_name, err_str, uid=curr_uid, status_code=r.status_code)
-                        if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
-                            fallback_tried = True
-                            fb = GPT_FALLBACK_MAP[body["model"]]
-                            fallback_reason = "11102 unauthorized"
-                            actual_model = fb
-                            _mark_model_unavailable(body["model"], uid=curr_uid)  # 运行时学习
-                            _record_fallback_event(requested_model or model_name, actual_model, fallback_reason)  # 降级感知
-                            req_m = requested_model or model_name
-                            _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
-                            body["model"] = fb
-                            continue
-                        if rotator and attempt < max_attempts - 1:
-                            failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
-                            if failover:
-                                curr_uid, curr_headers = failover
-                                await _failover_jitter(rid)
-                                continue
-                        _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
-                                      requested_model=requested_model or model_name,
-                                      fallback_reason=fallback_reason)
-                        yield _err_event(err, r.status_code)
-                        return
-                    if fallback_tried and not fallback_notified:
-                        fallback_notified = True
-                        req_m = requested_model or model_name
-                        yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
-                    async for chunk in r.aiter_bytes():
-                        if chunk:
-                            if _capture_raw:
-                                raw_parts.append(chunk)
-                            for evt in _feed_and_coalesce(chunk):
-                                yield evt
-                    for evt in coal.flush():
-                        yield evt
-                    break
-        except httpx.HTTPError as e:
-            if rotator and attempt < max_attempts - 1:
-                failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
-                if failover:
-                    curr_uid, curr_headers = failover
-                    await _failover_jitter(rid)
-                    continue
-            _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-            err_msg = f"upstream error: {e}"
-            _record_usage(actual_model, False, t0, error=err_msg,
-                          requested_model=requested_model or model_name,
-                          fallback_reason=fallback_reason)
-            yield _err_event(str(e).encode(), 502)
-            return
+    usage_recorded = False
 
-    # 流结束：输出完成日志
-    if err_msg is None and curr_uid:
-        _mark_model_available(body.get("model", model_name), uid=curr_uid)  # 运行时学习：记 mapped 正式名
-    elapsed = time.time() - t0 if t0 else 0
-    tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
-    req_m = requested_model or model_name
-    model_disp = req_m
-    if actual_model != req_m:
-        model_disp = f"{req_m} (actual: {actual_model}, fallback: {fallback_reason or '11102 unauthorized'})"
-    _log(f"{prefix}◀ RESPONSE {model_disp} | {elapsed:.1f}s | stream finish={finish_reason}{tag}"
-         + (f" | tool_calls={tool_names}" if tool_names else "")
-         + f" | tokens={usage.get('total_tokens', '?')}")
-    # 完整原始 SSE（后端返回的全部内容）
-    _log_payload(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
-    # 用量统计：正常结束 ok=true；上游错误 ok=false（失败也记一行）。
-    # _record_usage 内部整体 try/except 静默失败，绝不影响已返回的流式响应。
-    _record_usage(actual_model, ok=(err_msg is None), t0=t0,
-                  input_tokens=usage.get("prompt_tokens"),
-                  output_tokens=usage.get("completion_tokens"),
-                  ttft_ms=ttft_ms, error=err_msg,
-                  requested_model=req_m,
-                  fallback_reason=fallback_reason)
+    def _record_usage_once(*args, **kwargs):
+        nonlocal usage_recorded
+        if not usage_recorded:
+            usage_recorded = True
+            _record_usage(*args, **kwargs)
+
+    try:
+        for attempt in range(max_attempts):
+            try:
+                async with _shared_client_ctx(timeout=300) as c:
+                    async with c.stream("POST", url, headers=curr_headers, json=body) as r:
+                        if r.status_code != 200:
+                            err = await r.aread()
+                            err_str = err.decode("utf-8", "replace")
+                            _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err_str,200)}")
+                            _log(f"{prefix}── ERROR BODY ──\n{err_str}", level="debug")
+                            _record_rate_limit(model_name, err_str, uid=curr_uid, status_code=r.status_code)
+                            if not fallback_tried and _is_unauthorized_model_error(r.status_code, err_str) and body.get("model") in GPT_FALLBACK_MAP:
+                                fallback_tried = True
+                                fb = GPT_FALLBACK_MAP[body["model"]]
+                                fallback_reason = "11102 unauthorized"
+                                actual_model = fb
+                                _mark_model_unavailable(body["model"], uid=curr_uid)  # 运行时学习
+                                _record_fallback_event(requested_model or model_name, actual_model, fallback_reason)  # 降级感知
+                                req_m = requested_model or model_name
+                                _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
+                                body["model"] = fb
+                                continue
+                            if rotator and attempt < max_attempts - 1:
+                                failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
+                                if failover:
+                                    curr_uid, curr_headers = failover
+                                    await _failover_jitter(rid)
+                                    continue
+                            _record_usage_once(actual_model, False, t0, error=f"HTTP {r.status_code}",
+                                               requested_model=requested_model or model_name,
+                                               fallback_reason=fallback_reason)
+                            yield _err_event(err, r.status_code)
+                            return
+                        if fallback_tried and not fallback_notified:
+                            fallback_notified = True
+                            req_m = requested_model or model_name
+                            yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
+                        async for chunk in r.aiter_bytes():
+                            if chunk:
+                                if _capture_raw:
+                                    raw_parts.append(chunk)
+                                for evt in _feed_and_coalesce(chunk):
+                                    yield evt
+                        for evt in coal.flush():
+                            yield evt
+                        break
+            except httpx.HTTPError as e:
+                if rotator and attempt < max_attempts - 1:
+                    failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
+                    if failover:
+                        curr_uid, curr_headers = failover
+                        await _failover_jitter(rid)
+                        continue
+                _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+                err_msg = f"upstream error: {e}"
+                _record_usage_once(actual_model, False, t0, error=err_msg,
+                                   requested_model=requested_model or model_name,
+                                   fallback_reason=fallback_reason)
+                yield _err_event(str(e).encode(), 502)
+                return
+
+        # 流正常处理结束输出
+        if err_msg is None and curr_uid:
+            _mark_model_available(body.get("model", model_name), uid=curr_uid)
+        elapsed = time.time() - t0 if t0 else 0
+        tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
+        req_m = requested_model or model_name
+        model_disp = req_m
+        if actual_model != req_m:
+            model_disp = f"{req_m} (actual: {actual_model}, fallback: {fallback_reason or '11102 unauthorized'})"
+        _log(f"{prefix}◀ RESPONSE {model_disp} | {elapsed:.1f}s | stream finish={finish_reason}{tag}"
+             + (f" | tool_calls={tool_names}" if tool_names else "")
+             + f" | tokens={usage.get('total_tokens', '?')}")
+        _log_payload(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
+        _record_usage_once(actual_model, ok=(err_msg is None), t0=t0,
+                           input_tokens=usage.get("prompt_tokens"),
+                           output_tokens=usage.get("completion_tokens"),
+                           ttft_ms=ttft_ms, error=err_msg,
+                           requested_model=req_m,
+                           fallback_reason=fallback_reason)
+    finally:
+        # 兜底保障：客户端提前中断、GeneratorExit、CancelledError 退出时，
+        # 确保该请求的用量/生命周期至少且只记账一次（ok=False, error="client disconnected"）
+        if not usage_recorded:
+            req_m = requested_model or model_name
+            _record_usage_once(actual_model, ok=False, t0=t0,
+                               input_tokens=usage.get("prompt_tokens"),
+                               output_tokens=usage.get("completion_tokens"),
+                               ttft_ms=ttft_ms, error="client disconnected",
+                               requested_model=req_m,
+                               fallback_reason=fallback_reason)
 
 
 def _safe_err(r: httpx.Response) -> dict:
