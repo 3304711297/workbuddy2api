@@ -18,9 +18,9 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：199 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：73 passed
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：393 passed 为当前基线
+npm test                                          # 前端：202 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：82 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -208,7 +208,7 @@ workbuddy2api.exe (GUI)
   ⚠️ 探活**只证明进程能服务 HTTP**，不证明上游可用 —— 这是刻意的：上游/网络故障
   不该触发回滚。契约锁定：`tests/test_app_update_contract.test.js` 两条断言。
 
-  **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `DETACHED_PROCESS` 分离拉起
+  **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 分离拉起（严禁使用 `DETACHED_PROCESS`，见第 2 节禁令）
   `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → **脚本自绘置顶进度小窗**
   （WinForms + runspace，Hermes 同款全程可见体验；`Start-ProgressWindow` 起窗、
   `Write-State` 联动刷新、四个出口 `Stop-ProgressWindow`；窗体失败只 WARN 不阻断更新）
@@ -379,7 +379,7 @@ workbuddy2api.exe (GUI)
 - **413 请求体大小保护与官方 User-Agent 仿真（2026-09 横向对比采纳）**：
   - **413 防护**：`MAX_BODY_MB`（环境变量 `WORKBUDDY2API_MAX_BODY_MB`，默认 16MB）。中间件为**纯 ASGI receive 层按块熔断**（`RequestBodyLimitMiddleware`，非 BaseHTTPMiddleware）：① `Content-Length` 快速拒绝（零读取）；② 分块累计一旦超限立即中止读取并返回 413，**不放任 chunked 大包读完进内存**。超限不转发上游、不触发切号、不罚账号。
   - **出站 User-Agent**：出站请求（计费、对话、模型）统一调用 `_get_user_agent(domain)` 仿真官方客户端（国服 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 导致的 10085 违规拦截，并使官网使用端归因正常。亦支持 `WORKBUDDY2API_USER_AGENT`（兼容旧名 `CODEBUDDY2OPENAI_USER_AGENT`）自定义。
-  - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。**安全边界（P0，改动此逻辑必读）**：下载前经 `_url_is_safe_for_fetch` 做 SSRF 校验——仅允许 http(s)，拒绝回环/私网/链路本地/云元数据地址（127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、::1、fe80::/10、0.0.0.0 等），域名解析后逐个 IP 校验；**重定向逐跳重新校验**（防「公网跳内网」）；单图默认 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`，设 0 则完全禁用远程下载），按 `Content-Length` 预判 + 流式累计双保险；响应必须为 `image/*`，否则拒绝内联。
+  - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。**安全边界（P0，改动此逻辑必读）**：下载前经 `_url_is_safe_for_fetch` 做 SSRF 校验——仅允许 http(s)，拒绝回环/私网/链路本地/云元数据地址与 CGNAT 共享地址段（100.64.0.0/10、127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、::1、fe80::/10、0.0.0.0 等），域名解析后逐个 IP 校验；**重定向逐跳重新校验**（防「公网跳内网」）；**TCP/TLS 连接地址强制与已校验公网 IP 绑定**（直连 IP 搭配 Host 头与 sni_hostname 扩展，根除 DNS rebinding 窗口）；单图默认 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`，设 0 则完全禁用远程下载），按 `Content-Length` 预判 + 流式累计双保险；响应必须为 `image/*`，否则拒绝内联。
 
   **Responses / Anthropic 协议层硬约束（2026-09-12 修复，改动相关代码前必读）**：
 
