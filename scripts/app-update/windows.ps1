@@ -97,6 +97,9 @@ $script:ProgressText = '正在准备更新…'
 $script:ProgressDone = $false
 
 function Start-ProgressWindow {
+    # ⚠️ 整个函数体包进 try（P2，外部评审）：窗体是体验增强，
+    # 任何失败（缺 WinForms / runspace 创建失败 / STA 不可用）都必须
+    # 只 WARN 并放行更新流程，绝不能让进度窗反过来成为更新故障点。
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         Add-Type -AssemblyName System.Drawing -ErrorAction Stop
@@ -104,17 +107,18 @@ function Start-ProgressWindow {
         Write-Log "进度窗不可用（缺 WinForms）：$_" 'WARN'
         return
     }
-    # 共享表：主空间写、窗口线程读（Synchronized hashtable 线程安全）
-    $script:ProgressShared = [hashtable]::Synchronized(@{
-        Text = $script:ProgressText
-        Done = $false
-    })
-    $shared = $script:ProgressShared
-    $rs = [runspacefactory]::CreateRunspace()
-    $rs.ApartmentState = 'STA'
-    $rs.Open()
-    $ps = [powershell]::Create()
-    $ps.Runspace = $rs
+    try {
+        # 共享表：主空间写、窗口线程读（Synchronized hashtable 线程安全）
+        $script:ProgressShared = [hashtable]::Synchronized(@{
+            Text = $script:ProgressText
+            Done = $false
+        })
+        $shared = $script:ProgressShared
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'STA'
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
     # 共享表经参数传入窗口线程；线程内只读 Text / Done
     $winScript = @'
 param($shared)
@@ -154,8 +158,12 @@ $timer.Stop()
         param($sender, $event)
         try { Write-Log "进度窗线程错误：$($event.Item)" 'WARN' } catch { }
     })
-    [void]$ps.AddScript($winScript).AddArgument($shared)
-    [void]$ps.BeginInvoke()
+        [void]$ps.AddScript($winScript).AddArgument($shared)
+        [void]$ps.BeginInvoke()
+    } catch {
+        # P2 防线：runspace 创建/启动失败也只 WARN，不放阻断更新
+        Write-Log "进度窗启动失败（不影响更新）：$_" 'WARN'
+    }
 }
 
 function Update-ProgressWindow {
@@ -266,9 +274,13 @@ function Start-WorkBuddy {
     把崩溃版本当成更新成功留在盘上。先等端口消失，可证明旧内核确实退了，
     此后端口上的 2xx 必然来自新启动的进程。
 
-    宽容期设计：给旧进程一段退出时间（默认 30s）。若超时仍未释放，
-    再宽限一轮「最终可用」判定（有上限），避免把「旧内核残留」误判成
-    「新版失败」而触发不必要的回滚——两种情况都不可取，但后者代价更大。
+    ⚠️ 旧内核超时未释放时的处理（外部评审定级 P1，采纳）：等不到端口释放就**不允许
+    进入健康确认**。uvicorn 对端口被占的行为是实测确认的：`loop.create_server` 抛
+    `OSError`（WinError 10048）→ uvicorn 记日志后 `sys.exit(STARTUP_FAILURE=3)`
+    —— 即新版内核**必然起不来**，此后端口上的任何 2xx 都来自残留旧内核，
+    健康检查只会产生「假成功」。所以超时 = 直接 Throw-Failure 'port-not-released'，
+    进入回滚（回滚前会先终止本次拉起的新版 GUI，见 catch 分支），绝不接受
+    来源可疑的 2xx。原则：**「把坏版本宣布成功」比「更新失败并回滚」危险得多**。
 #>
 # 等到探活不再返回 2xx（旧内核确实退出）或超时
 function Test-ProxyEndpoint {
@@ -306,9 +318,14 @@ function Wait-WorkBuddyHealthy {
         [Parameter(Mandatory = $true)]$Process,
         [int]$TimeoutSeconds = 90
     )
+    # ⚠️ 拉起失败（$null）时绝不继续探活：端口上的 2xx 只可能来自残留旧内核，
+    # 继续探只会把「没启动」误判成「启动成功」（外部评审定级 P1）。
+    if (-not $Process) {
+        return @{ ok = $false; reason = '新版应用未能启动（Start-WorkBuddy 返回空）' }
+    }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        if ($Process -and $Process.HasExited) {
+        if ($Process.HasExited) {
             return @{ ok = $false; reason = "新版应用启动后立即退出（退出码 $($Process.ExitCode)）" }
         }
         $probe = Test-ProxyEndpoint -Url $PROXY_HEALTH_URL
@@ -358,6 +375,7 @@ if ($GuiPid -gt 0) {
 
 $previousSha = $null
 $stashed = $false
+$proc = $null   # 本次拉起的新版 GUI 进程；catch 分支按此 PID 精确终止
 
 try {
     Push-Location $InstallRoot
@@ -508,9 +526,12 @@ try {
     if (Wait-PortReleased -Url $PROXY_HEALTH_URL -TimeoutSeconds 30) {
         Write-Log "端口已释放（$PROXY_HEALTH_URL）"
     } else {
-        # 旧内核没退干净：继续等下去只会白耗；标记为「可能残留」但仍带时序判据继续验活。
-        # 这里刻意不判失败——把「旧进程残留」误判成「新版失败」会错误回滚，代价更大。
-        Write-Log "端口在 30 秒内未释放（$PROXY_HEALTH_URL），继续启动并放宽判定" 'WARN'
+        # ⚠️ 旧内核没退干净 → 新版内核**必然**起不来（uvicorn 端口被占时实测行为：
+        # create_server 抛 OSError → sys.exit(STARTUP_FAILURE=3)），此后端口上的
+        # 任何 2xx 都来自残留旧内核，健康确认只会产生假成功 → 直接失败回滚，
+        # 绝不「放宽判定」继续（外部评审定级 P1：把坏版本宣布成功比回滚更危险）。
+        Write-Log "端口在 30 秒内未释放（$PROXY_HEALTH_URL），旧内核疑似残留，中止启动确认" 'ERROR'
+        Throw-Failure 'port-not-released' "旧服务未在 30 秒内释放端口（$PROXY_HEALTH_URL）。为避免把残留旧进程的响应误判为新版本健康，已中止更新。"
     }
 
     Write-State -Phase 'restarting' -Message '正在启动新版本'
@@ -542,6 +563,27 @@ catch {
     $message = $_.Exception.Message
     $kind = $script:FailureKind
     Write-Log "更新失败（$kind）：$message" 'ERROR'
+
+    # ⚠️ 回滚前必须先终止本次拉起的新版 GUI（外部评审定级 P1）：
+    # 健康确认失败时新版 GUI 可能仍活着并持有 exe 文件锁 —— 不先终止，
+    # 后面的 `cargo tauri build` 会因文件占用失败，回滚链路断裂。
+    # 只按**本次 Start-WorkBuddy 返回的 PID** 精确终止，绝不按 exe 名称全杀
+    # （避免误杀用户手动另开的实例）。
+    if ($proc -and -not $proc.HasExited) {
+        Write-Log "终止本次拉起的新版 GUI（PID $($proc.Id)）"
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            # 等它真正退出（含内核子进程释放端口），否则回滚重建仍可能撞文件占用
+            $deadDeadline = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $deadDeadline) {
+                if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 400
+            }
+            Write-Log '新版 GUI 已终止'
+        } catch {
+            Write-Log "终止新版 GUI 失败（继续回滚，重建可能因文件占用失败）：$_" 'WARN'
+        }
+    }
 
     $rolledBack = $false
     if ($previousSha) {
@@ -587,6 +629,7 @@ catch {
         'rust-build-failed' { 'Rust 编译失败，代码可能有问题。' }
         'artifact-suspicious' { '构建产物异常（疑似未内嵌前端），已拒绝使用。' }
         'startup-unhealthy' { '新版本启动后服务不可用，已回滚到更新前的版本。' }
+        'port-not-released' { '旧服务未释放端口（残留进程占用），已中止更新以避免误判。请重启电脑后重试。' }
         default { '请查看日志了解详情。' }
     }
 

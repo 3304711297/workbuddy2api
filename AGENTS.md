@@ -19,7 +19,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：372 passed 为当前基线
-npm test                                          # 前端：197 passed（node --test）
+npm test                                          # 前端：199 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：73 passed
 ```
 
@@ -217,7 +217,16 @@ workbuddy2api.exe (GUI)
   **没有父进程退出检测**（实测：GUI 退出后它变孤儿继续存活并占着端口），若只判
   「最终可用」，会出现「新版 GUI 启动即崩 → 旧内核仍响应 2xx → 误判成功」，
   把崩溃版本当成功留在盘上。先等端口消失可证明旧内核确实退了，此后 2xx 必来自新进程。
-  端口超时未释放时**只 WARN 不失败**——把「旧进程残留」误判成「新版失败」会错误回滚，代价更大。
+  端口超时未释放时**必须中止更新**（`Throw-Failure 'port-not-released'`，外部评审 P1 采纳，
+  推翻早先的 WARN 宽容策略）：uvicorn 端口被占的实测行为是 `create_server` 抛
+  `OSError`（WinError 10048）→ `sys.exit(STARTUP_FAILURE=3)`——新版内核**必然起不来**，
+  此后端口上的任何 2xx 都来自残留旧内核，健康确认只会产生假成功。原则：
+  **「把坏版本宣布成功」比「更新失败并回滚」危险得多**。hint 提示用户重启电脑。
+  ⚠️ 拉起失败（`Start-WorkBuddy` 返回 null）时健康检查必须**立即失败**——绝不能跳过
+  进程检查继续探活（那只会探到残留旧内核的 2xx）。
+  ⚠️ 启动确认失败进入回滚前，必须先按**本次 `Start-WorkBuddy` 返回的 PID** 终止新版 GUI
+  并确认退出——它活着就持有 exe 文件锁，回滚的 `cargo build` 会撞占用。禁止按进程名
+  全杀（会误杀用户手动另开的实例）。
   ⚠️ **stash 恢复必须晚于所有回滚点（实测复现的数据丢失路径，改动必读）**：
   旧写法在第 6 步（产物校验后）就提前 `stash pop`，一旦启动确认失败触发
   `git reset --hard $previousSha`，刚弹回的用户改动会被一并抹掉，而 catch 分支的

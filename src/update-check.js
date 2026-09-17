@@ -261,6 +261,7 @@ const FAILURE_HINTS = {
   'artifact-missing': '构建未产出可执行文件，已拒绝使用。',
   'artifact-suspicious': '构建产物异常（疑似未内嵌前端），已拒绝使用。',
   'startup-unhealthy': '新版本启动后服务不可用，已回滚到更新前的版本。',
+  'port-not-released': '旧服务未释放端口（残留进程占用），已中止更新以避免误判。请重启电脑后重试。',
   unknown: '请查看更新日志了解详情。',
 };
 

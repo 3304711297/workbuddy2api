@@ -451,15 +451,71 @@ test('启动确认必须要求端口先释放（防旧内核残留造成假阳�
     /Wait-PortReleased -Url \$PROXY_HEALTH_URL/.test(handoff),
     '拉起新版前未等待端口释放（诊断结论会指向错误的进程）'
   );
-  // 旧内核退不干净时不得直接判失败 —— 那会把「残留」误判成「新版失败」而错误回滚
+  // ⚠️ 外部评审定级 P1（采纳，推翻旧的 WARN 宽容策略）：uvicorn 端口被占时
+  // 实测行为是 create_server 抛 OSError → sys.exit(STARTUP_FAILURE=3)——
+  // 新版内核必然起不来，端口上的任何 2xx 都来自残留旧内核。超时必须中止
+  // 启动确认进入回滚，绝不允许「放宽判定」后接受来源可疑的 2xx。
   assert.ok(
-    /端口在 30 秒内未释放[\s\S]{0,200}?'WARN'/.test(handoff),
-    '端口未释放时直接失败：会把旧进程残留误判成新版启动失败并错误回滚'
+    /Throw-Failure 'port-not-released'/.test(handoff),
+    '端口未释放时未中止启动确认：会接受残留旧内核的 2xx 造成假成功'
+  );
+  // 「放宽判定」的禁止只查 else 分支体的**可执行行**——解释「为什么不放宽」的
+  // 注释行也含这四个字，直接全文匹配会把注释当违规误报
+  const wrIdx = handoff.indexOf('if (Wait-PortReleased');
+  const elseBody = handoff.slice(
+    wrIdx,
+    handoff.indexOf("Write-State -Phase 'restarting' -Message '正在启动新版本'")
+  );
+  const codeLines = elseBody
+    .split('\n')
+    .filter(l => !l.trimStart().startsWith('#'));
+  assert.ok(
+    !codeLines.some(l => /放宽判定/.test(l)),
+    '仍存在「放宽判定」路径：旧内核残留时继续健康检查必然假成功'
+  );
+  // 失败分级三处对拍：脚本 kind 必须进入失败提示表
+  assert.ok(
+    /'port-not-released'\s*\{/.test(handoff),
+    '失败提示表缺少 port-not-released 的 hint'
   );
   assert.ok(
     /function Test-ProxyEndpoint/.test(handoff),
     '缺少共用的单次探活函数'
   );
+});
+
+test('拉起失败（null 进程）时健康检查必须立即失败，绝不继续探活', () => {
+  // Start-WorkBuddy 返回 null 时，端口上的 2xx 只可能来自残留旧内核；
+  // 旧实现 `if ($Process -and ...)` 会跳过进程检查继续探活 → 假成功（评审 P1）。
+  const fnIdx = handoff.indexOf('function Wait-WorkBuddyHealthy');
+  const fnBody = handoff.slice(fnIdx, handoff.indexOf('function Show-FailureMessage'));
+  assert.ok(
+    /if \(-not \$Process\)/.test(fnBody),
+    'Wait-WorkBuddyHealthy 未对 null 进程做立即失败防御'
+  );
+  // null 防御必须位于探活调用之前（否则防御形同虚设）
+  const nullGuard = fnBody.indexOf('if (-not $Process)');
+  const probeLoop = fnBody.indexOf('$probe = Test-ProxyEndpoint');
+  assert.ok(nullGuard > -1 && probeLoop > nullGuard, 'null 防御不在探活逻辑之前');
+  // 不允许旧的宽容写法「$Process -and $Process.HasExited」（null 时静默跳过进程检查）
+  assert.ok(
+    !/\$Process -and \$Process\.HasExited/.test(fnBody),
+    '仍存在「$Process -and HasExited」宽容写法：null 进程会绕过进程检查继续探活'
+  );
+});
+
+test('启动确认失败回滚前必须先终止本次拉起的新版 GUI（按 PID 精确）', () => {
+  // 新版 GUI 活着时持有 exe 文件锁，不先终止会让回滚的 cargo build 撞占用失败
+  // （Windows 下运行中的 EXE 不能被覆盖）。必须按本次 Start-WorkBuddy 返回的
+  // PID 精确终止，禁止按 exe 名称全杀（避免误杀用户手动另开的实例）。
+  // 锚点取 catch 分支内的注释行（块注释 L282 附近也含相似字样，不能作锚点）
+  const killAnchor = handoff.indexOf('# 健康确认失败时新版 GUI 可能仍活着并持有 exe 文件锁');
+  assert.ok(killAnchor > -1, 'catch 分支缺少终止新版 GUI 的处理块');
+  const stopBlock = handoff.slice(killAnchor, killAnchor + 900);
+  assert.ok(/Stop-Process -Id \$proc\.Id/.test(stopBlock), '未按 $proc.Id 精确终止');
+  assert.ok(!/Stop-Process[^\n]*-Name/.test(stopBlock), '按进程名终止会误杀用户手动另开的实例');
+  // 终止后必须等真正退出再回滚（含内核子进程释放端口与文件句柄）
+  assert.ok(/Get-Process -Id \$proc\.Id/.test(stopBlock), '终止后未确认进程退出');
 });
 
 test('stash 恢复必须晚于所有回滚点（防用户未提交改动被静默抹掉）', () => {
