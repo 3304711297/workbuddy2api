@@ -19,12 +19,26 @@ Tauri v2 桌面应用 + Python 反代内核。
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：423 passed 为当前基线 (含长思考超时与防惊群契约)
+./.venv/Scripts/python.exe tests/run_isolated_tests.py   # 同上，但在「禁真实 DNS/socket + 用户目录指向临时目录 + 清空 WORKBUDDY* 环境变量」下再跑一遍
 npm test                                          # 前端：202 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：85 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
 Hermes 运行时 venv，不是本仓 venv。必须用 `./.venv/Scripts/python.exe`。
+
+⚠️ **改测试或写「看源码做结构/负向断言」的用例前必读（2026-09-18 修复）**：
+① 剥离注释**不能用逐行正则** `line.replace(/\/\/.*$/,'')`——它既会在 LF 下吃掉字符串字面量里的
+`//`（`format!("https://…")` 整行尾部被剪掉，正向断言恒失败），又会在 CRLF 下因 `.` 不匹配 `\r`
+而完全空转（负向断言把注释算进代码，写一句解释性注释即误报）。统一用
+`tests/helpers/strip-rust-comments.mjs`（会跳过字符串/字符字面量，LF/CRLF 结果一致）。
+② 用例**不得依赖真实 DNS / 网络**（如放行 `example.com`）：离线或隔离运行器下，正例会红，
+反例则「因解析失败提前返回」而**空过**——即断言看着绿、其实没验证到那条防线。
+需要走通公网分支时，打桩 `converter._resolve_host_ips`。
+③ 路径断言的期望值要用与实现相同的 `path.join` 推导，别写死 `z:/workbuddy/` 这类正则
+（Windows 下 `path.join('Z:\','workbuddy')` 是 `Z:\workbuddy`，POSIX 下是 `Z:\/workbuddy`）。
+④ 修完三类问题后 `pytest` / 隔离运行器 / `npm test` 在 **LF 与 CRLF 检出下都必须全绿**，
+CI 的 `checks-linux`（LF + 禁网）一档就是为守这条而加。
 
 ### 构建：用户自己跑，助手不要绕
 

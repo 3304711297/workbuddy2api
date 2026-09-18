@@ -16,6 +16,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { stripRustComments } from './helpers/strip-rust-comments.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -27,14 +28,7 @@ const html = readFileSync(join(root, 'index.html'), 'utf8');
 const handoff = readFileSync(join(root, 'scripts', 'app-update', 'windows.ps1'), 'utf8');
 
 // Rust 注释里提到 Release 是在解释「为何不用它」，断言需剥离注释后再看代码。
-function stripRustComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .map(line => line.replace(/\/\/.*$/, ''))
-    .join('\n');
-}
-
+// 剥离实现见 helpers/strip-rust-comments.mjs（含「为什么不能用逐行正则」的说明）。
 const updateRsCode = stripRustComments(updateRs);
 
 test('Rust 侧不得再使用 GitHub Release API 作为更新来源', () => {

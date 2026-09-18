@@ -165,14 +165,27 @@ test('turing_helper 生产链路（findSdkDir 选择与优先级）', async (t) 
 
   await t.test('G. 显式开启盘根扫描后，盘根候选才出现（纯盘符与带冒号两种写法都生效）', () => {
     withEnv({ ...redirectBases(sandbox), WORKBUDDY_TURING_SDK_DIR: undefined, WORKBUDDY_TURING_DRIVES: 'Z,Z:' }, () => {
-      const dirs = collectCandidateDirs().map((d) => d.replace(/\\/g, '/').toLowerCase());
-      const zHits = dirs.filter((d) => /^z:\/(workbuddy)\//.test(d));
-      // 两种写法都归一为 Z:\ → 各自产生 4 条候选（WorkBuddy/workbuddy × 2 相对路径），
-      // 但 add() 去重后总计 4 条（两种写法产生同一批路径）。
-      assert.ok(zHits.length >= 4,
-        '设了 WORKBUDDY_TURING_DRIVES 后应产生盘根候选；实际：' + JSON.stringify(zHits));
+      const norm = (d) => d.replace(/\\/g, '/').toLowerCase();
+      const dirs = collectCandidateDirs().map(norm);
+      // 期望值必须用与实现相同的 path.join 推导，不能写死 `z:/workbuddy/` 正则：
+      // path.join 是平台相关的——Windows 下 path.join('Z:\\','workbuddy') === 'Z:\\workbuddy'，
+      // 而 POSIX 下会得到 'Z:\\/workbuddy'（反斜杠被当普通字符，再补一个分隔符），
+      // 写死正则会让本用例在 Linux/macOS 检出上恒失败（CI 只跑 Windows，故此前未暴露）。
+      // 两种写法（'Z' 与 'Z:'）归一后是同一组路径，add() 去重后应恰好 4 条。
+      const expected = [];
+      const relPaths = [
+        'resources/app.asar.unpacked/native/turing-sdk',
+        'resources/native/turing-sdk',
+      ];
+      for (const base of [path.join('Z:\\', 'workbuddy'), path.join('Z:\\', 'WorkBuddy')]) {
+        for (const rel of relPaths) expected.push(norm(path.join(base, rel)));
+      }
+      const zHits = expected.filter((e) => dirs.includes(e));
+      assert.strictEqual(zHits.length, 4,
+        '设了 WORKBUDDY_TURING_DRIVES 后应产生 4 条盘根候选（两种写法去重后）；实际：' + JSON.stringify(zHits));
       // 反向确认：候选确实来自「显式开启」这一条件，而不是无条件存在
-      assert.ok(zHits.length <= 8, '不应重复铺开（add 去重应生效）；实际：' + JSON.stringify(zHits));
+      const allDriveHits = dirs.filter((d) => /(^|\/)workbuddy\//.test(d) && /^z:/.test(d));
+      assert.ok(allDriveHits.length <= 8, '不应重复铺开（add 去重应生效）；实际：' + JSON.stringify(allDriveHits));
     });
   });
 

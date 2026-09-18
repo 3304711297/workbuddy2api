@@ -13,6 +13,7 @@ tests/test_vision_inlining.py - 多模态远程图片自动转 Data-URI 测试
 """
 
 import base64
+import ipaddress
 from contextlib import asynccontextmanager
 
 import pytest
@@ -25,6 +26,10 @@ from converter import (
 )
 
 FAKE_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+# 域名打桩用的公网 IP：真实取数路径（_url_to_data_uri）会在内部自行解析域名，
+# 若放任真实 DNS，用例就会隐式依赖「能上网 + example.com 能解析」。
+PUBLIC_TEST_IP = "93.184.216.34"
 
 
 class FakeStreamResponse:
@@ -44,6 +49,16 @@ def _install_stream_stub(monkeypatch, response: FakeStreamResponse, safe_overrid
     """把 httpx.AsyncClient.stream 替换为返回固定响应的桩，并放行 SSRF 校验。"""
     if safe_override:
         monkeypatch.setattr(converter, "_url_is_safe_for_fetch", lambda url: (True, ""))
+
+    # DNS 也必须打桩：真实取数路径在 _url_to_data_uri 内部自己解析域名
+    # （_url_is_safe_for_fetch 并无生产调用点），不打桩就会：
+    #   · 离线 / tests/run_isolated_tests.py（deny_dns）下正例恒失败；
+    #   · 反例「通过」的原因是「域名解析失败提前返回原 URL」，而不是被测的那道防线真正生效
+    #     —— 断言看似绿，其实没验证到 SizeGuard / Content-Type 等分支。
+    monkeypatch.setattr(
+        converter, "_resolve_host_ips",
+        lambda host: [ipaddress.ip_address(PUBLIC_TEST_IP)],
+    )
 
     class FakeStreamCtx:
         async def __aenter__(self):
@@ -233,9 +248,13 @@ async def test_redirect_chain_revalidated(monkeypatch):
             return FakeStreamCtx()
 
     # 首跳放行（公网），第二跳由真实守卫判定内网 → 必须拒绝
+    #
+    # 注意：真实防线在 _url_to_data_uri 内部逐跳执行，_url_is_safe_for_fetch 没有生产调用点，
+    # 因此这里必须打桩「DNS 解析」而不是 _url_is_safe_for_fetch——否则首跳会因真实 DNS 是否可用
+    # 而走出不同分支（离线时首跳就提前返回，重定向防线实际没被测到）。
     monkeypatch.setattr(
-        converter, "_url_is_safe_for_fetch",
-        lambda url: (True, "") if "example.com" in url else (False, "内网"),
+        converter, "_resolve_host_ips",
+        lambda host: [ipaddress.ip_address(PUBLIC_TEST_IP)],
     )
     monkeypatch.setattr(converter.httpx, "AsyncClient", FakeAsyncClient)
 

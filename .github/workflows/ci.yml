@@ -70,3 +70,47 @@ jobs:
       - name: Cargo test
         run: cargo test --locked
         working-directory: src-tauri
+
+  # 为什么必须有 Linux 一档（2026-09-18 补）：
+  # Windows 检出是 CRLF、且 CI 机器有网络/DNS，于是下面两类缺陷在 Windows 上「全绿」：
+  #   ① LF 检出才暴露的测试缺陷（例如逐行注释剥离正则遇到 LF 会吃掉字符串里的 `//`）；
+  #   ② 依赖真实 DNS 的用例（离线/禁网运行器下才变红，且反例是「因解析失败而空过」的假绿）。
+  # 只跑 pytest + 前端测试（不含 cargo：Linux 上 Tauri 需要额外系统库，成本不值当）。
+  checks-linux:
+    name: Checks (Linux / LF + no-DNS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -q
+
+      # 仓库自带的强隔离门禁：清空 WORKBUDDY* 环境变量、把用户目录指向临时目录、
+      # 禁真实 DNS/socket。此前它常年红（与用例互相矛盾），故无人接入 CI；现已修复。
+      - name: "Run pytest (isolated: no network, disposable user data)"
+        run: python tests/run_isolated_tests.py
+
+      - name: Three-source sync check (GPT_FALLBACK_MAP <-> GPT_PREMARKED)
+        run: python scripts/check_premarked_sync.py
+
+      - name: Run frontend unit tests
+        run: npm test
