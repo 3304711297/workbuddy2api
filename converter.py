@@ -2393,23 +2393,49 @@ def _upstream_error_code(err_text: str):
     return code
 
 
+def _rate_limit_phrase_hit(text: str) -> bool:
+    """限流语义短语命中判定（仅用于 msg/正文，不含请求元数据）。
+
+    「频率过高」是上游真实下发过的措辞（实测 `{"code": 6004, "msg": "请求频率过高，请稍后再试"}`），
+    与「频率限制 / 使用量超出」同属无歧义整词。
+    """
+    return (
+        ("频率限制" in text)
+        or ("频率过高" in text)
+        or ("使用量超出" in text)
+        or ("429" in text)
+        or ("Too Many Requests" in text)
+        or ("6004" in text)
+    )
+
+
 def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
     """判定上游错误是否属于限流（6004 / 429）。
 
-    **结构化报文以业务 code 为准**：裸子串匹配（`"429" in text`、`"6004" in text`）会命中
+    **结构化报文只看语义字段**：裸子串匹配（`"429" in text`、`"6004" in text`）会命中
     requestId 这类 hex 片段（实测 `...4290-6004-abcd...`），把确定性错误误判成限流 →
-    触发无谓切号与假冷却。故 JSON 报文里只认 `code == 6004`；中文短语是无歧义的整词，
-    两种情形都保留。
+    触发无谓切号与假冷却。规则：
+      - JSON 报文有 `code` → 只认 `code == 6004`（整数与字符串皆可）；
+      - JSON 报文无 `code` → 只看 `msg` / `message` 语义字段（保留历史格式兼容），
+        **绝不扫描整个序列化 JSON**；
+      - 非 JSON 文本才回退宽松子串判据。
+    中文短语「频率限制 / 使用量超出」是无歧义整词，两种情形都保留。
     """
     text = err_text or ""
     if status_code == 429:
         return True
-    cn_hit = ("频率限制" in text) or ("使用量超出" in text)
-    code = _upstream_error_code(text)
-    if code is not None:
-        return str(code) == "6004" or cn_hit
-    # 非结构化（非 JSON / 无 code）时保留既有宽松判据
-    return cn_hit or ("429" in text) or ("Too Many Requests" in text) or ("6004" in text)
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        code = _upstream_error_code(text)
+        if code is not None:
+            return str(code) == "6004"
+        msg = data.get("msg") or data.get("message") or ""
+        msg = msg if isinstance(msg, str) else str(msg)
+        return _rate_limit_phrase_hit(msg)
+    return _rate_limit_phrase_hit(text)
 
 
 def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status_code: int | None = None) -> None:
@@ -4150,11 +4176,36 @@ def _openai_error_body(raw, status: int) -> dict:
     return {"error": {"message": text or f"upstream error (HTTP {status})", "type": "upstream_error", "code": status}}
 
 
+def _anthropic_error_type(status: int) -> str:
+    """Anthropic 官方错误 type 映射（https://platform.claude.com/docs/en/api/errors）。
+
+    必须按状态给准确类型：客户端 SDK 依赖 error.type 做类型化异常与重试策略
+    （429 → rate_limit_error 是可重试信号，误报 api_error 会让客户端错误分类）。
+    流式路径 anthropic_stream.py 对 429 已映射为 rate_limit_error，非流式必须一致。
+    """
+    return {
+        400: "invalid_request_error",
+        401: "authentication_error",
+        402: "billing_error",
+        403: "permission_error",
+        404: "not_found_error",
+        409: "conflict_error",
+        413: "request_too_large",
+        422: "invalid_request_error",
+        429: "rate_limit_error",
+        500: "api_error",
+        502: "api_error",
+        503: "api_error",
+        504: "timeout_error",
+        529: "overloaded_error",
+    }.get(status, "invalid_request_error" if 400 <= status < 500 else "api_error")
+
+
 def _anthropic_error_body(raw, status: int) -> dict:
     """Anthropic 形状的错误体：``{"type": "error", "error": {...}}``。"""
     inner = _openai_error_body(raw, status)["error"]
     err = {
-        "type": "invalid_request_error" if status == 400 else "api_error",
+        "type": _anthropic_error_type(status),
         "message": inner.get("message"),
     }
     if "code" in inner:

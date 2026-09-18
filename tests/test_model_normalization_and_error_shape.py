@@ -218,3 +218,34 @@ def test_rate_limit_code_field_beats_substring_fragments(monkeypatch):
     # 真限流（429 状态）仍必须识别
     _record_rate_limit("m-true", '{"code":6004,"msg":"请求频率过高，请稍后再试"}', uid="u1", status_code=429)
     assert converter._is_account_cooldown("u1", "m-true") is True
+
+
+def test_rate_limit_json_without_code_scans_semantic_fields_only(monkeypatch):
+    """JSON 无 code 时只看 msg/message 语义字段，绝不扫描整个序列化 JSON（防 requestId 误伤）。"""
+    monkeypatch.setattr(converter, "_RATE_LIMIT_STATE", {})
+    monkeypatch.setattr(converter, "_ACCOUNT_COOLDOWNS", {})
+
+    # 无 code + requestId 含 6004 → 必须判为「非限流」
+    _record_rate_limit("m-meta", '{"msg":"model unavailable","requestId":"4290-6004-abcd"}', uid="u2", status_code=400)
+    assert "m-meta" not in converter._RATE_LIMIT_STATE
+    assert converter._is_account_cooldown("u2", "m-meta") is False
+
+    # 历史格式：无 code，但 msg 明确是限流语义 → 必须识别
+    for i, msg in enumerate(('{"msg":"请求频率过高，请稍后再试"}',
+                             '{"msg":"6004 使用量超出频率限制"}',
+                             '{"message":"429 Too Many Requests"}')):
+        _record_rate_limit(f"m-msg{i}", msg, uid="u3", status_code=400)
+        assert converter._is_account_cooldown("u3", f"m-msg{i}") is True, f"漏判历史格式：{msg}"
+
+
+def test_anthropic_error_type_follows_official_status_mapping():
+    """Anthropic 错误 type 必须按官方状态映射（含 401/413/429/504/529），不得一律 api_error。"""
+    from converter import _anthropic_error_body
+
+    cases = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
+             404: "not_found_error", 413: "request_too_large", 429: "rate_limit_error",
+             500: "api_error", 504: "timeout_error", 529: "overloaded_error"}
+    for status, expected in cases.items():
+        body = _anthropic_error_body(b'{"code":6004,"msg":"\xe9\xa2\x91\xe7\x8e\x87\xe9\x99\x90\xe5\x88\xb6"}', status)
+        assert body["type"] == "error"
+        assert body["error"]["type"] == expected, f"HTTP {status} 应为 {expected}，实为 {body['error']['type']}"
