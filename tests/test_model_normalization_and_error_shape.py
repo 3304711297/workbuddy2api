@@ -10,6 +10,7 @@
 3. 非流式错误体经 `raise HTTPException` 被 FastAPI 包成 `{"detail": ...}`，破坏协议形状；
    应为 `{"error": {...}}`（OpenAI）与 `{"type":"error","error":{...}}`（Anthropic）。
 """
+import datetime
 import json
 import time
 from pathlib import Path
@@ -25,6 +26,8 @@ from converter import (
     _openai_error_body,
     _record_rate_limit,
 )
+
+_TZ8 = datetime.timezone(datetime.timedelta(hours=8))
 
 _SSE_OK = (
     'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}\n\n'
@@ -236,6 +239,37 @@ def test_rate_limit_json_without_code_scans_semantic_fields_only(monkeypatch):
                              '{"message":"429 Too Many Requests"}')):
         _record_rate_limit(f"m-msg{i}", msg, uid="u3", status_code=400)
         assert converter._is_account_cooldown("u3", f"m-msg{i}") is True, f"漏判历史格式：{msg}"
+
+
+def test_rate_limit_regex_must_not_bypass_signal_gate(monkeypatch):
+    """_RATE_LIMIT_RE 命中不得绕过 _is_rate_limit_signal 之外——顶层非限流 code 时
+    嵌套 metadata 里的 `code:6004 + 重置时间` 结构绝不许写入假冷却（外部复核发现的 P2 残留）。
+
+    旧实现在 `_RATE_LIMIT_RE.search()` 命中时直接落状态、从不调用 signal 判据，
+    于是顶层 code=11102 的确定性错误只要携带这类嵌套结构就会污染 _RATE_LIMIT_STATE 与
+    _ACCOUNT_COOLDOWNS，后续调度会莫名避让该账号。
+    """
+    monkeypatch.setattr(converter, "_RATE_LIMIT_STATE", {})
+    monkeypatch.setattr(converter, "_ACCOUNT_COOLDOWNS", {})
+
+    nested = json.dumps({
+        "code": 11102,
+        "msg": "model unavailable",
+        "details": {"code": 6004, "msg": "将在 2099-01-01 12:00:00 UTC+8 重置"},
+    }, ensure_ascii=False)
+    assert converter._is_rate_limit_signal(400, nested) is False
+    _record_rate_limit("m-nested", nested, uid="u-nested", status_code=400)
+    assert "m-nested" not in converter._RATE_LIMIT_STATE, "嵌套 code=6004 结构污染了限流状态"
+    assert converter._is_account_cooldown("u-nested", "m-nested") is False, "账号被假冷却"
+
+    # 真限流（顶层 code=6004 且带精确重置时间）仍必须落状态且解析出 resetAtMs
+    real = '{"code":6004,"msg":"您的使用量已超出频率限制，将在 2099-01-01 12:00:00 UTC+8 重置"}'
+    _record_rate_limit("m-real", real, uid="u-real", status_code=400)
+    entry = converter._RATE_LIMIT_STATE.get("m-real")
+    assert entry is not None, "真限流未被记录"
+    expect_ms = int(datetime.datetime.strptime("2099-01-01 12:00:00", "%Y-%m-%d %H:%M:%S")
+                    .replace(tzinfo=_TZ8).timestamp() * 1000)
+    assert entry["resetAtMs"] == expect_ms, "精确重置时间未被解析"
 
 
 def test_anthropic_error_type_follows_official_status_mapping():

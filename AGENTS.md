@@ -400,15 +400,20 @@ workbuddy2api.exe (GUI)
   会被 FastAPI 包成 `{"detail": ...}`，破坏协议形状、客户端解析不到错误原因。中文 `displayMsg.zh`
   优先展示，原始英文 `msg` 保留在 `upstream_message` 字段可追溯。流式路径的 `_err_event` 不受影响。
 
-  ④ **限流判定禁止裸子串匹配**：统一走 `_is_rate_limit_signal()`（JSON 报文只认 `code == 6004`）。
+  ④ **限流判定禁止裸子串匹配**：统一走 `_is_rate_limit_signal()`（JSON 报文有 code 只认 `code == 6004`；
+  无 code 只看 `msg`/`message`；仅非 JSON 文本才回退整串扫）。
   `"429" in text` / `"6004" in text` 会命中 `requestId` 这类 hex 片段（实测 `...4290-6004-abcd...`），
-  把确定性错误误判为限流 → 无谓切号 + 假冷却写进 `_RATE_LIMIT_STATE`。中文短语「频率限制 / 使用量超出」
-  是无歧义整词，可保留；非结构化（非 JSON）文本才回退宽松判据。
+  把确定性错误误判为限流 → 无谓切号 + 假冷却写进 `_RATE_LIMIT_STATE`。中文短语「频率限制 / 频率过高 /
+  使用量超出」是无歧义整词，可保留。
+  ⚠️ **`_record_rate_limit` 必须先过 `_is_rate_limit_signal` 门，再让 `_RATE_LIMIT_RE` 只负责提取 reset 时间**
+  （顺序不可颠倒）：正则扫的是整串，若它先行，顶层 `code=11102` 的错误体只要嵌套携带
+  `details.code=6004 + "将在 … UTC+8 重置"` 就会绕过语义门写入假冷却，让调度无端避让正常账号。
   `_record_rate_limit` 与 `AccountRotator.record_failure_and_failover` 两处必须共用同一判据（曾经只改了一处，
   测试立刻抓到误切号）。
 
-  契约锁定：`tests/test_model_normalization_and_error_shape.py`（10 条，含三端点端到端空模型名断言、
-  确定性 400 上游只调 1 次、无账号可切时不重发、Anthropic 错误体无 detail 包裹、限流子串误判防护）。
+  契约锁定：`tests/test_model_normalization_and_error_shape.py`（13 条，含三端点端到端空模型名断言、
+  确定性 400 上游只调 1 次、无账号可切时不重发、Anthropic 错误体无 detail 包裹且 type 按官方状态映射、
+  限流子串误判防护、嵌套 metadata 不得绕过语义门写入假冷却）。
 
 - **模型页 UI 两条契约（2026-09-18）**：模型 id 必须渲染为原生 `<button class="model-id-copy"
   data-copy-model="<id>">`（点即复制调用名，走 `copyToClipboard` 且失败时报错）——原先只能看不能取，

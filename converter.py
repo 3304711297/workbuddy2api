@@ -2439,17 +2439,17 @@ def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
 
 
 def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status_code: int | None = None) -> None:
-    """从上游错误体里识别 6004/429 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
+    """从上游错误体里识别 6004/429 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。
+
+    ⚠️ 判定顺序：**先过 `_is_rate_limit_signal` 门（结构化报文以顶层语义字段为准），
+    再让 `_RATE_LIMIT_RE` 只负责提取精确重置时间**。反过来的话，正则会在整串里命中
+    嵌套 metadata 的 `code:6004 + 重置时间` 结构（如顶层 code=11102 的错误体携带
+    details.code=6004），绕过语义门写入**假冷却**，让调度无端避让正常账号。
+    """
+    if not _is_rate_limit_signal(status_code, err_text):
+        return
     m = _RATE_LIMIT_RE.search(err_text or "")
-    if not m:
-        if _is_rate_limit_signal(status_code, err_text):
-            # 外部架构审查采纳：未下发精确时刻时注入 ±45s 去相关随机抖动（255s~345s），杜绝多协程在同一毫秒二次惊群
-            jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
-            reset_ms = int((time.time() + jitter_sec) * 1000)
-            reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
-        else:
-            return
-    else:
+    if m:
         try:
             reset_ms = int(
                 datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
@@ -2462,6 +2462,11 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
             reset_ms = int((time.time() + jitter_sec) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
+    else:
+        # 外部架构审查采纳：未下发精确时刻时注入 ±45s 去相关随机抖动（255s~345s），杜绝多协程在同一毫秒二次惊群
+        jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
+        reset_ms = int((time.time() + jitter_sec) * 1000)
+        reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
     now_ms = int(time.time() * 1000)
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)
