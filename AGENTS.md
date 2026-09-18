@@ -380,6 +380,40 @@ workbuddy2api.exe (GUI)
   是否符合 SSE 规范，不要反向去掉注释行。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
+
+- **请求健壮性四条（2026-09-18 修复，改三端点入口/错误路径前必读）**：
+
+  ① **模型名必须经 `_normalize_model_name()` 归一化**，禁止再写 `body.setdefault("model", "auto")`。
+  `setdefault` 只补缺键 —— 客户端「测试连接」常发 `model: ""`（自定义提供商模型列表为空时），
+  空串照原样透传上游会拿到 400 `11102 model [] service info not found`。实测：`""`/`null`/纯空白
+  一律 → `auto`（对齐「缺省即 auto」既有语义），非空字符串原样保留不 trim。三个端点入口各有两处
+  （`body["model"]` 与 `model_name`）都要归一化，漏一处会让日志/映射与实发模型不一致。
+
+  ② **非流式 4xx 严禁「吞异常续圈」重发**：只有 failover **真正切号成功**（`record_failure_and_failover`
+  返回非 None）才允许 `continue`。曾经的写法在 `attempt < max_attempts-1` 时无条件续圈，导致确定性
+  400 被原样重发 —— 实测一次请求打上游 3 次（同 rid 下 3 个不同上游 requestId），且 11102 不限流、
+  failover 返回 None，纯属白烧额度 + 抬风控关联度。不可重试时**直接 `return JSONResponse`**，
+  不要再 `raise HTTPException` 走循环。
+
+  ③ **非流式错误体必须按协议出形状**：用 `_openai_error_body()` / `_anthropic_error_body()`
+  返回 `{"error": {...}}` 与 `{"type":"error","error":{...}}`。`raise HTTPException(detail=...)`
+  会被 FastAPI 包成 `{"detail": ...}`，破坏协议形状、客户端解析不到错误原因。中文 `displayMsg.zh`
+  优先展示，原始英文 `msg` 保留在 `upstream_message` 字段可追溯。流式路径的 `_err_event` 不受影响。
+
+  ④ **限流判定禁止裸子串匹配**：统一走 `_is_rate_limit_signal()`（JSON 报文只认 `code == 6004`）。
+  `"429" in text` / `"6004" in text` 会命中 `requestId` 这类 hex 片段（实测 `...4290-6004-abcd...`），
+  把确定性错误误判为限流 → 无谓切号 + 假冷却写进 `_RATE_LIMIT_STATE`。中文短语「频率限制 / 使用量超出」
+  是无歧义整词，可保留；非结构化（非 JSON）文本才回退宽松判据。
+  `_record_rate_limit` 与 `AccountRotator.record_failure_and_failover` 两处必须共用同一判据（曾经只改了一处，
+  测试立刻抓到误切号）。
+
+  契约锁定：`tests/test_model_normalization_and_error_shape.py`（10 条，含三端点端到端空模型名断言、
+  确定性 400 上游只调 1 次、无账号可切时不重发、Anthropic 错误体无 detail 包裹、限流子串误判防护）。
+
+- **模型页 UI 两条契约（2026-09-18）**：模型 id 必须渲染为原生 `<button class="model-id-copy"
+  data-copy-model="<id>">`（点即复制调用名，走 `copyToClipboard` 且失败时报错）——原先只能看不能取，
+  手抄模型名配进客户端即 11102；模型页标题下**不得**再加功能宣传式副标题（信息在表格列头已体现）。
+  契约锁定：`tests/test_models_copy_and_subtitle.test.js`。
 - **OpenAI Responses 兼容层 (`POST /v1/responses`) 与 Codex 投影压缩**：
   采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机，`responses_projection.py` 最小语义闭包投影压缩）。支持 Codex CLI（`wire_api="responses"`）、OpenCode 等长上下文 Agent 原生直连；自动过滤 harness 模板与冗余 schema description，大幅削减 token 消耗。
 - **DeepSeek 思维链注入与历史一致性回填 (`deepseek_thinking.py`)**：
