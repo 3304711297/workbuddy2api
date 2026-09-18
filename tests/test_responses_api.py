@@ -239,3 +239,164 @@ def test_responses_input_image_conversion():
     m2 = msgs[1]
     assert m2["role"] == "user"
     assert m2["content"] == [{"type": "image_url", "image_url": {"url": "https://example.com/dog.png"}}]
+
+
+# ---------------------------------------------------------------------------
+# Responses 多轮历史中的 reasoning item（Codex CLI 等客户端会把上一轮的思维链
+# 一并回传）。缺这条分支时它既无 role 也不匹配任何既有分支 → 静默落进「其他类型
+# 保底」被整个丢弃，客户端表现为「多轮后思维链消失」，且无任何日志痕迹。
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_item_attaches_to_following_assistant_message():
+    """reasoning 在 assistant 消息之前（Responses 规范输出顺序）→ 挂到该消息上。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "solve math"},
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "let me think about 2+2"}],
+            },
+            {"type": "message", "role": "assistant", "content": "4"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 1, f"不得凭空多出/丢失 assistant 消息：{msgs}"
+    assert assistants[0]["reasoning_content"] == "let me think about 2+2"
+    assert assistants[0]["content"] == "4"
+    # reasoning 不是独立消息，不得泄漏成一条角色不明的记录
+    assert all(m.get("role") in ("system", "user", "assistant", "tool") for m in msgs)
+    assert len(msgs) == 2
+
+
+def test_reasoning_item_after_pending_assistant_stays_on_same_turn():
+    """assistant 消息仍处未定稿（pending）时到来的 reasoning → 归属同一轮，不漂到下一轮。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "solve math"},
+            {"type": "message", "role": "assistant", "content": "4"},
+            {"type": "reasoning", "id": "rs_1", "summary": "先算加法"},
+            {"role": "user", "content": "再加 1"},
+            {"type": "message", "role": "assistant", "content": "5"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 2
+    assert assistants[0]["content"] == "4"
+    assert assistants[0]["reasoning_content"] == "先算加法", "同轮 reasoning 漂到了下一轮"
+    assert "reasoning_content" not in assistants[1]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+
+
+def test_orphan_reasoning_does_not_drift_onto_later_assistant():
+    """reasoning 后紧跟 user 消息（无归属轮次）→ 作废，绝不漂到后面无关的 assistant 上。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "q1"},
+            {"type": "reasoning", "id": "rs_orphan", "summary": "无归属的思维链"},
+            {"role": "user", "content": "q2"},
+            {"type": "message", "role": "assistant", "content": "a2"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 1
+    assert "reasoning_content" not in assistants[0], "孤儿 reasoning 漂到了下游 assistant 上"
+    assert [m["role"] for m in msgs] == ["user", "user", "assistant"]
+
+
+def test_multiple_reasoning_items_in_one_turn_concatenate_in_order():
+    """同一轮出现多条 reasoning → 按出现顺序拼接，不覆盖、不丢失。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "q"},
+            {"type": "reasoning", "id": "rs_1", "summary": "第一步"},
+            {"type": "reasoning", "id": "rs_2", "summary": "第二步"},
+            {"type": "message", "role": "assistant", "content": "a"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["reasoning_content"] == "第一步\n第二步"
+
+
+def test_reasoning_item_summary_list_and_content_fallback():
+    """summary 为数组时逐段拼接；summary 缺失时回退读取 content（字符串/list 两种形态）。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "q1"},
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [
+                    {"type": "summary_text", "text": "第一段"},
+                    {"type": "summary_text", "text": "第二段"},
+                ],
+            },
+            {"type": "message", "role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {
+                "type": "reasoning",
+                "id": "rs_2",
+                "content": [{"type": "reasoning_text", "text": "content 回退路径"}],
+            },
+            {"type": "message", "role": "assistant", "content": "a2"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 2
+    assert assistants[0]["reasoning_content"] == "第一段\n第二段"
+    assert assistants[1]["reasoning_content"] == "content 回退路径"
+
+
+def test_reasoning_item_without_text_does_not_pollute_messages():
+    """空 reasoning（无 summary 也无 content）不得注入空 reasoning_content，也不得留痕。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "hi"},
+            {"type": "reasoning", "id": "rs_empty", "summary": []},
+            {"type": "message", "role": "assistant", "content": "hello"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 1
+    assert "reasoning_content" not in assistants[0]
+    assert len(msgs) == 2
+
+
+def test_reasoning_item_attaches_to_assistant_tool_call_turn():
+    """reasoning 后跟 function_call 轮次 → 挂到该 assistant 的 tool_calls 消息上。"""
+    body = {
+        "model": "deepseek-v4-pro",
+        "input": [
+            {"role": "user", "content": "list files"},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "需要用 shell"}]},
+            {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": '{"cmd":"ls"}'},
+            {"type": "function_call_output", "call_id": "call_1", "output": "file.txt"},
+        ],
+    }
+    msgs = responses_request_to_chat(body)["messages"]
+
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["reasoning_content"] == "需要用 shell"
+    assert assistants[0]["tool_calls"][0]["id"] == "call_1"
+    assert msgs[-1]["role"] == "tool"

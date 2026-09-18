@@ -81,9 +81,10 @@ def _convert_input_items(items: list) -> list[dict]:
     messages: list[dict] = []
     pending_assistant_content: str | None = None
     pending_tool_calls: list[dict] = []
+    pending_reasoning: str = ""
 
     def _flush_assistant():
-        nonlocal pending_assistant_content, pending_tool_calls
+        nonlocal pending_assistant_content, pending_tool_calls, pending_reasoning
         if pending_assistant_content is not None or pending_tool_calls:
             msg: dict[str, Any] = {
                 "role": "assistant",
@@ -91,6 +92,9 @@ def _convert_input_items(items: list) -> list[dict]:
             }
             if pending_tool_calls:
                 msg["tool_calls"] = pending_tool_calls[:]
+            if pending_reasoning:
+                msg["reasoning_content"] = pending_reasoning
+                pending_reasoning = ""
             messages.append(msg)
             pending_assistant_content = None
             pending_tool_calls.clear()
@@ -105,6 +109,9 @@ def _convert_input_items(items: list) -> list[dict]:
         # 1. 简单消息（user, system, developer）
         if item_type in (None, "message") and role in ("user", "system", "developer"):
             _flush_assistant()
+            # 前向 reasoning 若没能挂到任何 assistant 轮次上即作废，
+            # 否则会漂到后面某个毫不相干的 assistant 消息上。
+            pending_reasoning = ""
             mapped_role = "system" if role == "developer" else role
             content = _extract_content(item.get("content", ""))
             messages.append({"role": mapped_role, "content": content})
@@ -125,7 +132,18 @@ def _convert_input_items(items: list) -> list[dict]:
             pending_assistant_content = content
             continue
 
-        # 3. function_call -> 归集至前驱 assistant 消息的 tool_calls
+        # 3. reasoning -> 暂存，随所属 assistant 轮次一并落地（多轮思维链回传）
+        # Responses 客户端（Codex CLI 等）会把上一轮的思维链 item 一并回传。
+        # 规范输出序为 reasoning 紧邻其所属 assistant 消息之前，故暂存后由
+        # _flush_assistant 附着到该轮；同一轮出现多条时顺序拼接。
+        if item_type == "reasoning":
+            text = _extract_reasoning_text(item)
+            if not text:
+                continue
+            pending_reasoning = f"{pending_reasoning}\n{text}" if pending_reasoning else text
+            continue
+
+        # 4. function_call -> 归集至前驱 assistant 消息的 tool_calls
         if item_type == "function_call":
             if pending_assistant_content is None:
                 pending_assistant_content = ""
@@ -145,7 +163,7 @@ def _convert_input_items(items: list) -> list[dict]:
             })
             continue
 
-        # 4. function_call_output -> tool 消息
+        # 5. function_call_output -> tool 消息
         if item_type == "function_call_output":
             _flush_assistant()
             messages.append({
@@ -155,7 +173,7 @@ def _convert_input_items(items: list) -> list[dict]:
             })
             continue
 
-        # 5. 其他类型保底
+        # 6. 其他类型保底
         if role:
             _flush_assistant()
             content = _extract_content(item.get("content", ""))
@@ -163,6 +181,43 @@ def _convert_input_items(items: list) -> list[dict]:
 
     _flush_assistant()
     return messages
+
+
+def _extract_reasoning_text(item: dict) -> str:
+    """从 Responses 的 reasoning item 中提取可回填的思维链文本。
+
+    Responses 规范把思维链放在 `summary`（摘要段数组或字符串）；部分实现
+    （含 CodeBuddy 上游）也会落在 `content`，形态为字符串或部件数组。
+    两者都取不到时返回空串，由调用方决定丢弃（不得注入空 reasoning_content）。
+    """
+    summary = item.get("summary")
+    text = ""
+    if isinstance(summary, list):
+        text = "\n".join(
+            p.get("text", "")
+            for p in summary
+            if isinstance(p, dict) and p.get("text")
+        )
+    elif isinstance(summary, str):
+        text = summary
+    if text:
+        return text
+
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # reasoning 的 content 部件类型是 reasoning_text；兼容部分实现的
+        # text / output_text / summary_text 变体，避免因部件名差异再次静默丢失。
+        parts = []
+        for p in content:
+            if isinstance(p, dict):
+                if p.get("type") in ("reasoning_text", "text", "output_text", "summary_text") and p.get("text"):
+                    parts.append(p["text"])
+            elif isinstance(p, str):
+                parts.append(p)
+        return "\n".join(parts)
+    return ""
 
 
 def _extract_content(content: Any) -> str | list[dict]:

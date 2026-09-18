@@ -79,10 +79,10 @@
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "95c3e41d",
-      "last_synced_sha": "95c3e41d0322a94ee842834314305d853d06e2b2",
-      "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。"
+      "last_synced_commit": "67d2352a",
+      "last_synced_sha": "67d2352ab47e1dc4aecd09aacfab1d5147019542",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；v1.4.0（fixes #17）指出 Responses 多轮历史里的 reasoning item 会被丢弃，本仓同缺口已修复（新增 _extract_reasoning_text + pending_reasoning 归集，附 7 条契约用例与变异验证）；监控整仓新提交。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
