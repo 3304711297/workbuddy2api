@@ -1540,7 +1540,19 @@ _TOKEN_REFRESHER: Optional[Any] = None
 # key 带上 httpx.AsyncClient 类对象——测试 monkeypatch 换类后自动隔离，
 # fake 实例不会泄漏到其他用例；生产环境类对象恒定，即单例复用。
 # P1 优化：timeout=300 拆为分段超时，避免 connect 阶段被长读超时拖住。
-_SHARED_TIMEOUT_DEFAULT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
+# P0 深度加固（外部架构审查采纳）：针对长思考模型（DeepSeek R1/o1/Claude 思考模式），
+# read 默认提升至 300.0s（5分钟），支持环境变量覆盖，消灭思考静默期被误杀假死缺陷；
+# write 提升至 30.0s 保护大上下文上传，pool 提升至 10.0s 避免慢连接挤占打爆连接池。
+def _get_default_shared_timeout() -> httpx.Timeout:
+    env_read = _env_compat("STREAM_READ_TIMEOUT", "")
+    try:
+        read_timeout = float(env_read) if env_read else 300.0
+    except (ValueError, TypeError):
+        read_timeout = 300.0
+    return httpx.Timeout(connect=5.0, read=read_timeout, write=30.0, pool=10.0)
+
+
+_SHARED_TIMEOUT_DEFAULT = _get_default_shared_timeout()
 _SHARED_CLIENTS: dict = {}
 _SHARED_CLIENTS_LOCK = threading.Lock()
 
@@ -1552,10 +1564,10 @@ def _normalize_shared_timeout(timeout):
     if isinstance(timeout, httpx.Timeout):
         return timeout
     if isinstance(timeout, (int, float)):
-        # 历史 5 处调用均为 timeout=300，现收敛为分段超时（connect 5s / read 60s / write 10s / pool 5s）
+        # 历史 5 处调用均为 timeout=300，现收敛为分段超时（connect 5s / read 300s / write 30s / pool 10s）
         if timeout == 300 or timeout == 300.0:
             return _SHARED_TIMEOUT_DEFAULT
-        return httpx.Timeout(connect=5.0, read=float(timeout), write=10.0, pool=5.0)
+        return httpx.Timeout(connect=5.0, read=float(timeout), write=30.0, pool=10.0)
     return _SHARED_TIMEOUT_DEFAULT
 
 
@@ -2369,7 +2381,9 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             or ("使用量超出" in (err_text or ""))
         )
         if is_limit:
-            reset_ms = int((time.time() + 300) * 1000)
+            # 外部架构审查采纳：未下发精确时刻时注入 ±45s 去相关随机抖动（255s~345s），杜绝多协程在同一毫秒二次惊群
+            jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
+            reset_ms = int((time.time() + jitter_sec) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
         else:
             return
@@ -2383,7 +2397,8 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             )
             reset_local = m.group(1)[11:]
         except Exception:
-            reset_ms = int((time.time() + 300) * 1000)
+            jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
+            reset_ms = int((time.time() + jitter_sec) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
     now_ms = int(time.time() * 1000)
     with _RATE_LIMIT_LOCK:
@@ -2469,6 +2484,7 @@ class AccountRotator:
         self.mode = (mode or "off").lower()
         self.rotate_count = max(1, rotate_count)
         self._req_counter = 0
+        self._failover_counter = 0
         self._lock = threading.Lock()
 
     def get_all_accounts(self) -> list[tuple[str, dict]]:
@@ -2554,6 +2570,25 @@ class AccountRotator:
         items.sort(key=lambda x: (x[2], x[1]))
         return [uid for uid, _, _ in items]
 
+    def _get_top_tier_uids(self, uids: list[str]) -> list[str]:
+        """从候选列表中筛选出属于最高优先级到期日档位的所有账号列表（用于同档打散防冲撞）。"""
+        if len(uids) <= 1:
+            return uids
+        now = int(time.time())
+        top_day = None
+        top_tier = []
+        for uid in uids:
+            exp = self.get_account_expire_at(uid)
+            day_key = time.strftime("%Y-%m-%d", time.localtime(exp)) if exp > now else "9999-99-99"
+            if top_day is None:
+                top_day = day_key
+                top_tier.append(uid)
+            elif day_key == top_day:
+                top_tier.append(uid)
+            else:
+                break
+        return top_tier
+
     def get_retry_budget(self, model: str) -> int:
         if self.mode not in ("failover", "roundrobin"):
             return 1
@@ -2597,7 +2632,12 @@ class AccountRotator:
             elif self.mode == "failover":
                 if _is_account_cooldown(active_uid, model):
                     if candidates:
-                        target_uid = candidates[0]
+                        top_tier = self._get_top_tier_uids(candidates)
+                        if len(top_tier) > 1:
+                            self._req_counter += 1
+                            target_uid = top_tier[self._req_counter % len(top_tier)]
+                        else:
+                            target_uid = candidates[0]
                         if target_uid != active_uid and hasattr(self.cred_mgr, "switch_active_account"):
                             self.cred_mgr.switch_active_account(target_uid)
                             active_uid = target_uid
@@ -2638,7 +2678,13 @@ class AccountRotator:
                 _log(f"⚠️ [多账号调度] 账号 {current_uid[:8] if current_uid else '当前'}... 触发限流，但无其他可用就绪账号（模型 {model} 全池冷却）")
                 return None
 
-            next_uid = candidates[0]
+            # 外部架构审查防雪崩优化：在同最高优先级层内轮换平摊，避免所有并发请求同时冲撞同一账号
+            top_tier = self._get_top_tier_uids(candidates)
+            if len(top_tier) > 1:
+                self._failover_counter += 1
+                next_uid = top_tier[self._failover_counter % len(top_tier)]
+            else:
+                next_uid = candidates[0]
             if hasattr(self.cred_mgr, "switch_active_account"):
                 self.cred_mgr.switch_active_account(next_uid)
             new_headers = self.cred_mgr.get_headers_for_uid(next_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
