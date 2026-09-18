@@ -45,16 +45,14 @@ class FakeStreamResponse:
             yield self._body
 
 
-def _install_stream_stub(monkeypatch, response: FakeStreamResponse, safe_override=True):
-    """把 httpx.AsyncClient.stream 替换为返回固定响应的桩，并放行 SSRF 校验。"""
-    if safe_override:
-        monkeypatch.setattr(converter, "_url_is_safe_for_fetch", lambda url: (True, ""))
+def _install_stream_stub(monkeypatch, response: FakeStreamResponse):
+    """把 httpx.AsyncClient.stream 替换为返回固定响应的桩，并让域名解析到公网 IP。
 
-    # DNS 也必须打桩：真实取数路径在 _url_to_data_uri 内部自己解析域名
-    # （_url_is_safe_for_fetch 并无生产调用点），不打桩就会：
-    #   · 离线 / tests/run_isolated_tests.py（deny_dns）下正例恒失败；
-    #   · 反例「通过」的原因是「域名解析失败提前返回原 URL」，而不是被测的那道防线真正生效
-    #     —— 断言看似绿，其实没验证到 SizeGuard / Content-Type 等分支。
+    只打桩**真实的接缝**：SSRF 判定与下载都发生在 `_url_to_data_uri` 内部，
+    统一走 `_resolve_public_connect_ip` → `_resolve_host_ips`（DNS）。
+    因此这里打桩 DNS 即可放行；绝不能像以前那样打桩 `_url_is_safe_for_fetch`
+    ——那是个「以为在放行、实际没人调用」的假接缝，会让人误判用例覆盖到了什么。
+    """
     monkeypatch.setattr(
         converter, "_resolve_host_ips",
         lambda host: [ipaddress.ip_address(PUBLIC_TEST_IP)],
@@ -159,10 +157,18 @@ async def test_responses_endpoint_e2e_inlines_input_image(monkeypatch):
     ("http://0.0.0.0/x.png", "内网"),
 ])
 def test_ssrf_guard_blocks_dangerous_urls(bad_url, expect_keyword):
-    """内网/回环/元数据/非法协议地址必须被 SSRF 守卫拒绝。"""
+    """内网/回环/元数据/非法协议地址必须被 SSRF 守卫拒绝。
+
+    注意 `expect_keyword` 必须真断言：此前它只作为参数收集、从未使用，
+    于是「拒绝原因说得出是哪一类」这条契约其实是空的（拒绝对了但理由串台的
+    改动不会被发现）。分类由 `_resolve_public_connect_ip` 统一给出。
+    """
     ok, reason = _url_is_safe_for_fetch(bad_url)
     assert ok is False
     assert reason, f"{bad_url} 应给出拒绝原因"
+    assert expect_keyword in reason, (
+        f"{bad_url} 的拒绝原因应点明「{expect_keyword}」，实际：{reason}"
+    )
 
 
 @pytest.mark.parametrize("good_url", [

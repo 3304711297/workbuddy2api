@@ -22,6 +22,31 @@ def test_non_public_addresses_are_not_admitted(address):
 
 
 @pytest.mark.anyio
+async def test_url_level_and_fetch_path_share_one_validator(monkeypatch):
+    """URL 级校验与真实下载路径必须共用 `_resolve_public_connect_ip`。
+
+    背景：这两处历史上各写了一份 SSRF 判定，URL 级那份成了零调用点的死代码，
+    「改了一处、真正生效的是另一处」会让改动者产生虚假信心。本用例把两条路径
+    钉在同一个函数上：任一处重新内联自己的判定，`calls` 就不会有两条记录。
+    """
+    calls = []
+
+    def fake_helper(host):
+        calls.append(host)
+        return None, "统一拒绝（测试桩）"
+
+    monkeypatch.setattr(converter, "_resolve_public_connect_ip", fake_helper)
+
+    assert converter._url_is_safe_for_fetch("http://images.example/a.png")[0] is False
+    out = await converter._url_to_data_uri("http://images.example/a.png")
+    assert out == "http://images.example/a.png", "被拒绝的地址必须原样返回、不得内联"
+    assert calls == ["images.example", "images.example"], (
+        "两条路径未共用同一判定函数 —— SSRF 校验又出现第二份实现："
+        f"实际调用记录 {calls}"
+    )
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("scheme,address", [("http", "8.8.8.8"), ("https", "8.8.8.8"), ("https", "2606:4700:4700::1111")])
 async def test_fetch_connects_to_validated_literal_with_original_authority(monkeypatch, scheme, address):
     dns_calls, requests, options = [], [], []

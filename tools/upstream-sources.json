@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-17",
+  "updated_at": "2026-09-18",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -34,8 +34,8 @@
       "name": "workbuddy-switch-gateway（momo0410，借鉴雷达）",
       "repo": "momo0410/workbuddy-switch-gateway",
       "branch": "main",
-      "last_synced_commit": "50e88ae0",
-      "last_synced_sha": "50e88ae046294713eaeb4ee6f06a011dca42b474",
+      "last_synced_commit": "91b9a292",
+      "last_synced_sha": "91b9a2925c3b73e31c891e7541e44921137df4c8",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
       "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。"
     },
@@ -76,11 +76,11 @@
       "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。"
     },
     "wb2api-upstream-ardeyou": {
-      "name": "workbuddy2api-intl 国际版（ardeyouxipianyi，借鉴雷达）",
-      "repo": "ardeyouxipianyi/workbuddy2api-intl",
+      "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
+      "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "7c93b46a",
-      "last_synced_sha": "7c93b46a9e3e3b3e6c0245a4918e7e17cb1db0c4",
+      "last_synced_commit": "95c3e41d",
+      "last_synced_sha": "95c3e41d0322a94ee842834314305d853d06e2b2",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范）",
       "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。"
     },
@@ -133,8 +133,8 @@
       "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
       "repo": "Sliverkiss/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "9d1a21bd",
-      "last_synced_sha": "9d1a21bdcb143527a4d1a0937c4495c026dbd783",
+      "last_synced_commit": "4ac68b77",
+      "last_synced_sha": "4ac68b772248832cebaea980a54480cf763f760d",
       "absorbed": "借鉴雷达（横向对比与加权调度/多账号池核心架构参考）",
       "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。"
     },
@@ -160,8 +160,8 @@
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "45227c54",
-      "last_synced_sha": "45227c5417ae41a995e9276d4993ad43ef8ca5f8",
+      "last_synced_commit": "7ccf62f9",
+      "last_synced_sha": "7ccf62f93f33fe86c7ca4ceb0ad359db2870abe0",
       "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考）",
       "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。"
     },

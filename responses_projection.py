@@ -568,11 +568,14 @@ def _summarize_tool_output(text: str) -> str:
     lines = text.splitlines()
     exit_line = next((line.strip() for line in lines if "Process exited with code" in line), "")
     useful_lines = []
-    saw_output = False
+    # 注：`Output:` 是 Codex CLI 执行器的分段标题行，这里**无条件丢弃**（纯归一化，不承载分支语义）。
+    # 该行曾被赋给一个 `saw_output` 标志，但标志从未被读取——是重构残留而非有意留白；
+    # 已删除以免后人误以为「是否有 Output 段」会影响摘要形态。若将来真要按它分支
+    # （例如无 Output 段时省略 "Key output:" 标题），请连同
+    # tests/test_responses_projection.py::test_summarize_large_tool_output 的契约一起改。
     for line in lines:
         stripped = line.rstrip()
         if stripped == "Output:":
-            saw_output = True
             continue
         if (
             stripped.startswith("Chunk ID:")
