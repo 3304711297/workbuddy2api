@@ -3166,6 +3166,33 @@ async def api_rate_limit(
     }
 
 
+class DeferredHeaderStreamingResponse(StreamingResponse):
+    """首包延迟确认流式响应：
+    挂起 http.response.start 直至首个 chunk 就绪。
+    使得流式首连阶段遭遇 429 触发透明 failover 切号时，能够在发送 HTTP 响应头前准确同步最终生效的
+    X-WorkBuddy-Active-Account，杜绝流式 failover 响应头错配漏洞。
+    """
+    async def stream_response(self, send: Any) -> None:
+        iterator = self.body_iterator.__aiter__()
+        try:
+            first_chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        if not isinstance(first_chunk, bytes | memoryview):
+            first_chunk = first_chunk.encode(self.charset)
+        await send({"type": "http.response.body", "body": first_chunk, "more_body": True})
+
+        async for chunk in iterator:
+            if not isinstance(chunk, bytes | memoryview):
+                chunk = chunk.encode(self.charset)
+            await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
 @app.get("/api/snapshots")
 async def api_snapshots(limit: int = 100,
                         authorization: Optional[str] = Header(default=None),
@@ -3350,38 +3377,56 @@ async def chat_completions(request: Request,
     pacer_ctx = _pacer.acquire(model_name) if _pacer else None
 
     if client_wants_stream and not need_tool_repair:
+        resp = None
+
+        def _sync_stream_hdr(new_uid: str):
+            if resp and new_uid:
+                resp.raw_headers = [
+                    (k, v) for k, v in resp.raw_headers if k.lower() != b"x-workbuddy-active-account"
+                ] + [(b"x-workbuddy-active-account", new_uid.encode("utf-8"))]
+
         async def _paced_stream():
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
-                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
+                async for chunk in _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name, on_account_switched=_sync_stream_hdr):
                     yield chunk
             finally:
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
-        return StreamingResponse(
+        resp = DeferredHeaderStreamingResponse(
             _paced_stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **active_hdr},
         )
+        return resp
 
     if client_wants_stream and need_tool_repair:
+        resp = None
+
+        def _sync_safe_hdr(new_uid: str):
+            if resp and new_uid:
+                resp.raw_headers = [
+                    (k, v) for k, v in resp.raw_headers if k.lower() != b"x-workbuddy-active-account"
+                ] + [(b"x-workbuddy-active-account", new_uid.encode("utf-8"))]
+
         async def _paced_safe_stream():
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
-                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name):
+                async for chunk in _safe_stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name, on_account_switched=_sync_safe_hdr):
                     yield chunk
             finally:
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
-        return StreamingResponse(
+        resp = DeferredHeaderStreamingResponse(
             _paced_safe_stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **active_hdr},
         )
+        return resp
 
     # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
     retry_budget = rotator.get_retry_budget(model_name)
@@ -3617,9 +3662,17 @@ async def anthropic_messages(
     pacer_ctx = _pacer.acquire(model_name) if _pacer else None
 
     if client_wants_stream:
+        resp = None
+
+        def _sync_stream_hdr(new_uid: str):
+            if resp and new_uid:
+                resp.raw_headers = [
+                    (k, v) for k, v in resp.raw_headers if k.lower() != b"x-workbuddy-active-account"
+                ] + [(b"x-workbuddy-active-account", new_uid.encode("utf-8"))]
+
         async def _anthropic_stream_gen():
             translator = AnthropicStreamTranslator(model=raw_body.get("model", model_name))
-            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name)
+            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name, on_account_switched=_sync_stream_hdr)
             buf = ""
             try:
                 if pacer_ctx:
@@ -3655,11 +3708,12 @@ async def anthropic_messages(
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
-        return StreamingResponse(
+        resp = DeferredHeaderStreamingResponse(
             _anthropic_stream_gen(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **active_hdr},
         )
+        return resp
 
     # 非流式
     retry_budget = rotator.get_retry_budget(model_name)
@@ -3855,8 +3909,16 @@ async def openai_responses(
     pacer_ctx = _pacer.acquire(model_name) if _pacer else None
 
     if client_wants_stream:
+        resp = None
+
+        def _sync_stream_hdr(new_uid: str):
+            if resp and new_uid:
+                resp.raw_headers = [
+                    (k, v) for k, v in resp.raw_headers if k.lower() != b"x-workbuddy-active-account"
+                ] + [(b"x-workbuddy-active-account", new_uid.encode("utf-8"))]
+
         async def _responses_stream_generator():
-            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name)
+            upstream_gen = _stream_upstream(url, headers, body, model_name, t0, rid, rotator=rotator, uid=uid, requested_model=model_name, on_account_switched=_sync_stream_hdr)
             try:
                 if pacer_ctx:
                     await pacer_ctx.__aenter__()
@@ -3908,7 +3970,8 @@ async def openai_responses(
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
-        return StreamingResponse(_responses_stream_generator(), media_type="text/event-stream", headers=active_hdr)
+        resp = DeferredHeaderStreamingResponse(_responses_stream_generator(), media_type="text/event-stream", headers=active_hdr)
+        return resp
 
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
     max_attempts = retry_budget + 1
@@ -4222,7 +4285,8 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
 async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                                 model_name: str = "?", t0: float = 0.0, rid: str = "",
                                 rotator: Optional[Any] = None, uid: str = "",
-                                requested_model: str | None = None):
+                                requested_model: str | None = None,
+                                on_account_switched: Optional[Callable[[str], None]] = None):
     """针对带 tools 的流式请求，进行聚合校验与防损坏重试，再伪流式下发。
 
     解决上游 Issue #3：腾讯后端（copilot.tencent.com）在流式返回 tool_calls 时偶发
@@ -4272,6 +4336,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                             if failover:
                                 curr_uid, curr_headers = failover
+                                if on_account_switched:
+                                    on_account_switched(curr_uid)
                                 await _failover_jitter(rid)
                                 continue
                         _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
@@ -4280,6 +4346,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                                       fallback_reason=fallback_reason)
                         yield _err_event(raw, r.status_code)
                         return
+                    if on_account_switched and curr_uid:
+                        on_account_switched(curr_uid)
                     # 聚合等待期间定期下发 SSE 注释保活心跳，防止中间代理或客户端 60s 静默超时
                     collect_task = asyncio.create_task(_collect_stream(r, t0))
                     try:
@@ -4809,7 +4877,8 @@ class _SseLineBuffer:
 async def _stream_upstream(url: str, headers: dict, body: dict,
                            model_name: str = "?", t0: float = 0.0, rid: str = "",
                            rotator: Optional[Any] = None, uid: str = "",
-                           requested_model: str | None = None):
+                           requested_model: str | None = None,
+                           on_account_switched: Optional[Callable[[str], None]] = None):
     """把后端 SSE 原样转发给客户端（后端已是标准 OpenAI SSE，含 tool_calls）。
 
     同时轻量解析流，统计 finish_reason / tool_calls / usage 用于日志，不阻塞转发。
@@ -4958,6 +5027,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                                 if failover:
                                     curr_uid, curr_headers = failover
+                                    if on_account_switched:
+                                        on_account_switched(curr_uid)
                                     await _failover_jitter(rid)
                                     continue
                             _record_usage_once(actual_model, False, t0, error=f"HTTP {r.status_code}",
@@ -4965,6 +5036,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                                fallback_reason=fallback_reason)
                             yield _err_event(err, r.status_code)
                             return
+                        if on_account_switched and curr_uid:
+                            on_account_switched(curr_uid)
                         if fallback_tried and not fallback_notified:
                             fallback_notified = True
                             req_m = requested_model or model_name

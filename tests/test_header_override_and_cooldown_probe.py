@@ -406,3 +406,37 @@ def test_monotonic_clock_protects_cooldown_from_wall_clock_jitter(fake_dual_acco
     assert _is_account_cooldown("uid-alpha", "glm-5.3") is True
 
 
+def test_streaming_failover_updates_active_account_response_header(fake_dual_accounts, monkeypatch):
+    """P0 修复锁定：流式请求中发生 failover (A->429, B->200) 时，首包发出的响应头必须是最终生效的 B。"""
+    cred = CredentialManager()
+    monkeypatch.setitem(converter.CONFIG, "cred", cred)
+    monkeypatch.setitem(converter.CONFIG, "rotate_mode", "failover")
+
+    client = TestClient(app, headers={"Host": "127.0.0.1:8787"})
+
+    call_seq = []
+
+    async def mock_handler(request: httpx.Request):
+        uid = request.headers.get("X-User-Id")
+        call_seq.append(uid)
+        if uid == "uid-alpha":
+            return httpx.Response(429, json={"code": 6004, "msg": "超限将在 2026-09-08 23:00:00 UTC+8 重置"})
+        else:
+            sse_bytes = b'data: {"choices":[{"delta":{"content":"stream ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n'
+            return httpx.Response(200, content=sse_bytes, headers={"content-type": "text/event-stream"})
+
+    transport = httpx.MockTransport(mock_handler)
+    monkeypatch.setattr(converter, "_shared_client_ctx", lambda timeout=None: httpx.AsyncClient(transport=transport))
+
+    # 发起 stream=True 的流式请求
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+    )
+    assert resp.status_code == 200
+    # 终极断言：流式 HTTP 响应头必须在首包前准确同步为最终生效的 uid-beta！
+    assert resp.headers.get("X-WorkBuddy-Active-Account") == "uid-beta"
+    assert "stream ok" in resp.text
+
+
+
