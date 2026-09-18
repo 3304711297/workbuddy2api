@@ -2560,8 +2560,16 @@ def _release_probe(uid: str, model: str) -> None:
         _PROBE_INFLIGHT.discard((uid, model))
 
 
-def _clear_account_cooldown(uid: str, model: str) -> None:
+def _clear_account_cooldown(uid: str, model: str, req_start_ms: float | None = None) -> None:
     with _RATE_LIMIT_LOCK:
+        entry = _ACCOUNT_COOLDOWNS.get((uid, model))
+        if not entry:
+            return
+        # 外部架构复核 P1：并发防反转——若限流发生于当前请求开始之后，禁止迟到成功覆盖新冷却
+        if req_start_ms is not None:
+            cooldown_created_at = entry.get("lastSeenMs", 0)
+            if cooldown_created_at > req_start_ms:
+                return
         _ACCOUNT_COOLDOWNS.pop((uid, model), None)
 
 
@@ -2797,6 +2805,9 @@ class AccountRotator:
                         return best_uid, headers
                     else:
                         _log(f"⚠️ [Half-Open 防惊群] 模型 {model} 最优账号 {best_uid[:8]}... 已有在途探针，当前请求避让回退", level="debug")
+                if _is_account_cooldown(active_uid, model):
+                    _log(f"🛑 [全池冷却防穿透] 模型 {model} 所有账号均在冷却且探针在途，拒绝穿透", level="debug")
+                    return "", {}
                 return active_uid, self.cred_mgr.get_headers()
 
             if effective_mode == "roundrobin":
@@ -3306,6 +3317,17 @@ async def chat_completions(request: Request,
         if rotator
         else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
     )
+    if not headers:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "message": f"模型 {model_name} 所有账号均处于冷却中，正在执行单飞探测自愈，请稍后重试",
+                    "type": "server_error",
+                    "code": "all_accounts_cooldown",
+                }
+            },
+        )
     active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
@@ -3426,7 +3448,7 @@ async def chat_completions(request: Request,
     # 成功证据归实际调用的正式名（含别名映射与 fallback），不覆盖原模型的 11102。
     _mark_model_available(body["model"], uid=uid)
     if uid:
-        _clear_account_cooldown(uid, model_name)
+        _clear_account_cooldown(uid, model_name, req_start_ms=t0 * 1000)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
@@ -3564,6 +3586,17 @@ async def anthropic_messages(
         if rotator
         else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
     )
+    if not headers:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": f"模型 {model_name} 所有账号均处于冷却中，正在执行单飞探测自愈，请稍后重试",
+                },
+            },
+        )
     active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
@@ -3697,7 +3730,7 @@ async def anthropic_messages(
                   snapshot_resp=_snapshot_excerpt(collected))
 
     if uid:
-        _clear_account_cooldown(uid, model_name)
+        _clear_account_cooldown(uid, model_name, req_start_ms=t0 * 1000)
     anthropic_resp = translate_openai_response_to_anthropic(collected)
     if "model" in raw_body:
         anthropic_resp["model"] = raw_body["model"]
@@ -3790,6 +3823,17 @@ async def openai_responses(
         if rotator
         else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
     )
+    if not headers:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "message": f"模型 {model_name} 所有账号均处于冷却中，正在执行单飞探测自愈，请稍后重试",
+                    "type": "server_error",
+                    "code": "all_accounts_cooldown",
+                }
+            },
+        )
     active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
 
     url = f"{BACKEND}/v2/chat/completions"
@@ -3914,7 +3958,7 @@ async def openai_responses(
     if collected is not None:
         _mark_model_available(body["model"], uid=uid)
     if uid:
-        _clear_account_cooldown(uid, model_name)
+        _clear_account_cooldown(uid, model_name, req_start_ms=t0 * 1000)
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
 
@@ -4939,7 +4983,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         # 流正常处理结束输出
         if err_msg is None and curr_uid:
             _mark_model_available(body.get("model", model_name), uid=curr_uid)
-            _clear_account_cooldown(curr_uid, model_name)
+            _clear_account_cooldown(curr_uid, model_name, req_start_ms=t0 * 1000)
         elapsed = time.time() - t0 if t0 else 0
         tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
         req_m = requested_model or model_name

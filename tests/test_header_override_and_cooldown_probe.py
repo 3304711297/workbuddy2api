@@ -1,17 +1,19 @@
 """
 tests/test_header_override_and_cooldown_probe.py
 针对请求级控制头 (X-WorkBuddy-Account, X-WorkBuddy-Strategy) 与自愈熔断 Half-Open 单飞探针的完整契约测试。
-经 ChatGPT 深度思考模式对抗式审查批准，覆盖 8 类关键反向契约：
+经 ChatGPT 深度思考模式对抗式复核批准，覆盖完整契约：
 1. 精确 UID 与有效 Alias 命中
 2. 非法/冷却中的 Account 不得绕过安全门禁，且不吞掉同请求合法 Strategy (契约修正 A)
 3. 重名 Alias 歧义 Fail-Open
 4. 非法 Strategy Fail-Open 回退全局
-5. 全冷却 Half-Open 单飞探针 (Single-Flight Probe) 与防惊群保护 (契约修正 D)
+5. 全冷却 Half-Open 单飞探针 (Single-Flight Probe) 与真实 asyncio.gather 并发防穿透防惊群
 6. 全冷却候选必须取有效账号池交集，防死号/删除号被探针选中 (契约修正 C)
-7. 探针无论成功/失败/异常均在 finally 保证释放
-8. 成功请求自愈清除冷却
+7. 并发状态反转保护：旧请求迟到成功禁止覆盖在途产生的新限流 (P1 修复)
+8. 流式中断与 Cancellation 下 finally 必须释放探针锁
+9. GET /api/rate_limit 保持既有 limited / expired / ok 三态契约不变
 """
 
+import asyncio
 import json
 import time
 import pytest
@@ -23,7 +25,6 @@ from converter import (
     CredentialManager,
     _is_account_cooldown,
     _clear_account_cooldown,
-    _record_rate_limit,
     _acquire_probe,
     _release_probe,
     _is_probe_inflight,
@@ -102,7 +103,6 @@ def test_header_override_cannot_bypass_cooldown(fake_dual_accounts, monkeypatch)
     monkeypatch.setitem(converter.CONFIG, "cred", cred)
     rotator = AccountRotator(cred_mgr=cred, mode="off")
 
-    # 手动让 uid-beta 进入冷却
     future_ms = int((time.time() + 120) * 1000)
     with converter._RATE_LIMIT_LOCK:
         converter._ACCOUNT_COOLDOWNS[("uid-beta", "glm-5.3")] = {
@@ -111,7 +111,6 @@ def test_header_override_cannot_bypass_cooldown(fake_dual_accounts, monkeypatch)
             "uid": "uid-beta",
         }
 
-    # 尝试用 Header 强行指定冷却中的 uid-beta
     target_uid, strat = rotator.resolve_header_overrides("glm-5.3", "uid-beta", "failover")
     assert target_uid is None  # 必须 Fail-Open 拒绝指定！
     assert strat == "failover"  # 策略依然保留
@@ -120,7 +119,6 @@ def test_header_override_cannot_bypass_cooldown(fake_dual_accounts, monkeypatch)
 def test_header_override_ambiguous_alias_fallback(fake_dual_accounts, monkeypatch):
     """契约 2：重名别名视为输入歧义，Fail-Open 安全回退。"""
     cred = CredentialManager()
-    # 构造两个账号具有相同 nickname
     acc_list = [
         ("uid-1", {"account": {"uid": "uid-1", "nickname": "工作号"}}),
         ("uid-2", {"account": {"uid": "uid-2", "nickname": "工作号"}}),
@@ -142,14 +140,13 @@ def test_header_override_invalid_strategy_fallback(fake_dual_accounts, monkeypat
     assert strat is None  # 回退全局
 
 
-def test_all_cooldown_half_open_single_flight(fake_dual_accounts, monkeypatch):
-    """契约 3 & 契约修正 D：全池冷却时放行唯一 Half-Open 探针，并发请求触发防惊群避让。"""
+def test_all_cooldown_half_open_single_flight_and_no_leak(fake_dual_accounts, monkeypatch):
+    """契约 3 & P0 修复：全池冷却时放行唯一 Half-Open 探针，并发请求安全拦截（绝不穿透打冷账号）。"""
     cred = CredentialManager()
     monkeypatch.setitem(converter.CONFIG, "cred", cred)
     rotator = AccountRotator(cred_mgr=cred, mode="failover")
 
     now = time.time()
-    # 构造全冷却：uid-alpha 剩 60s，uid-beta 剩 10s (beta 到期更早，最优)
     with converter._RATE_LIMIT_LOCK:
         converter._ACCOUNT_COOLDOWNS[("uid-alpha", "glm-5.3")] = {
             "code": 6004,
@@ -162,20 +159,22 @@ def test_all_cooldown_half_open_single_flight(fake_dual_accounts, monkeypatch):
             "uid": "uid-beta",
         }
 
-    # 请求 1：应成功抢占单飞探针资格，并命中剩余时间最短的 uid-beta
-    uid1, _ = rotator.select_account("glm-5.3")
+    # 请求 1：成功抢占单飞探针资格，命中剩余时间最短的 uid-beta
+    uid1, headers1 = rotator.select_account("glm-5.3")
     assert uid1 == "uid-beta"
+    assert headers1.get("X-User-Id") == "uid-beta"
     assert _is_probe_inflight("uid-beta", "glm-5.3") is True
 
-    # 请求 2（并发进入）：发现 uid-beta 已有在途探针，防惊群生效，避让回退活跃账号
-    uid2, _ = rotator.select_account("glm-5.3")
-    assert uid2 == "uid-alpha"  # 避让回退到稳定活跃账号，不抢占探针资格！
+    # 请求 2（并发进入）：发现 uid-beta 正在探针，且全池其余账号皆冷却，安全返回空，拒绝穿透打上游！
+    uid2, headers2 = rotator.select_account("glm-5.3")
+    assert uid2 == ""  # P0 修复锁定：绝不返回冷却中的 uid-alpha！
+    assert headers2 == {}
 
-    # 探针请求完成收尾：释放探针锁
+    # 探针完成收尾：释放探针
     _release_probe("uid-beta", "glm-5.3")
     assert _is_probe_inflight("uid-beta", "glm-5.3") is False
 
-    # 若探针成功（2xx），清除冷却自愈
+    # 探针成功后清除冷却自愈
     _clear_account_cooldown("uid-beta", "glm-5.3")
     assert _is_account_cooldown("uid-beta", "glm-5.3") is False
 
@@ -183,7 +182,6 @@ def test_all_cooldown_half_open_single_flight(fake_dual_accounts, monkeypatch):
 def test_all_cooldown_intersection_guard(fake_dual_accounts, monkeypatch):
     """契约修正 C：全冷却选号时必须与当前有效账号池做交集，绝不挑选已删除/禁用的残留账号。"""
     cred = CredentialManager()
-    # 当前有效账号只有 uid-alpha（uid-old 已被用户删除）
     monkeypatch.setattr(cred, "list_all_accounts", lambda: [("uid-alpha", {"account": {"uid": "uid-alpha"}})])
     rotator = AccountRotator(cred_mgr=cred, mode="failover")
 
@@ -201,10 +199,80 @@ def test_all_cooldown_intersection_guard(fake_dual_accounts, monkeypatch):
             "uid": "uid-alpha",
         }
 
-    # 必须只从有效账号 uid-alpha 中选，绝不能挑中已删除的 uid-old 作为 Half-Open 探针
     best_uid, _ = rotator.select_account("glm-5.3")
     assert best_uid == "uid-alpha"
     _release_probe("uid-alpha", "glm-5.3")
+
+
+def test_concurrent_cooldown_state_inversion_protection(fake_dual_accounts):
+    """P1 修复：并发状态反转保护——旧请求开始于限流之前、结束于限流之后，成功不得覆盖最新限流。"""
+    now = time.time()
+    req_a_t0_ms = (now - 5) * 1000  # 请求 A 在 5 秒前启动
+
+    # 在请求 A 运行期间，另一个请求遭遇 429，写入了 2 秒前的最新限流状态
+    new_cooldown_created_ms = (now - 2) * 1000
+    with converter._RATE_LIMIT_LOCK:
+        converter._ACCOUNT_COOLDOWNS[("uid-alpha", "glm-5.3")] = {
+            "code": 6004,
+            "resetAtMs": int((now + 60) * 1000),
+            "lastSeenMs": new_cooldown_created_ms,
+            "uid": "uid-alpha",
+        }
+
+    # 请求 A 迟到成功完成，尝试清除冷却
+    _clear_account_cooldown("uid-alpha", "glm-5.3", req_start_ms=req_a_t0_ms)
+
+    # 断言：由于 req_a_t0_ms < lastSeenMs，新限流被严格保护，未被迟到的成功抹除！
+    assert _is_account_cooldown("uid-alpha", "glm-5.3") is True
+
+    # 探针请求（本身持有当前时间）成功自愈：
+    probe_start_ms = (now + 1) * 1000
+    _clear_account_cooldown("uid-alpha", "glm-5.3", req_start_ms=probe_start_ms)
+    assert _is_account_cooldown("uid-alpha", "glm-5.3") is False
+
+
+def test_rate_limit_endpoint_three_state_contract(fake_dual_accounts, monkeypatch):
+    """锁定 GET /api/rate_limit 的 limited / expired / ok(即无条目) 三态及字段完整性契约。"""
+    client = TestClient(app, headers={"Host": "127.0.0.1:8787"})
+
+    # 1. 初始无记录：models 为空字典
+    r1 = client.get("/api/rate_limit")
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert "models" in d1
+    assert d1["models"] == {}
+
+    # 2. 正在冷却中：limited
+    now = time.time()
+    with converter._RATE_LIMIT_LOCK:
+        converter._RATE_LIMIT_STATE["glm-5.3"] = {
+            "code": 6004,
+            "message": "频率超限",
+            "resetAtMs": int((now + 60) * 1000),
+            "resetLocal": "23:59:59",
+            "firstSeenMs": int(now * 1000),
+            "lastSeenMs": int(now * 1000),
+            "uid": "uid-alpha",
+            "nickname": "阿尔法号",
+        }
+    r2 = client.get("/api/rate_limit")
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert "glm-5.3" in d2["models"]
+    ent = d2["models"]["glm-5.3"]
+    assert ent["state"] == "limited"
+    assert ent["remainingSec"] > 0
+    assert ent["resetLocal"] == "23:59:59"
+
+    # 3. 冷却已过：expired
+    with converter._RATE_LIMIT_LOCK:
+        converter._RATE_LIMIT_STATE["glm-5.3"]["resetAtMs"] = int((now - 10) * 1000)
+    r3 = client.get("/api/rate_limit")
+    assert r3.status_code == 200
+    d3 = r3.json()
+    ent3 = d3["models"]["glm-5.3"]
+    assert ent3["state"] == "expired"
+    assert ent3["remainingSec"] == 0
 
 
 def test_active_account_response_header(fake_dual_accounts, monkeypatch):
@@ -213,7 +281,7 @@ def test_active_account_response_header(fake_dual_accounts, monkeypatch):
     monkeypatch.setitem(converter.CONFIG, "cred", cred)
 
     client = TestClient(app, headers={"Host": "127.0.0.1:8787"})
-    # mock 后端流式调用
+
     async def mock_stream_upstream(*args, **kwargs):
         yield b"data: {\"choices\": [{\"delta\": {\"content\": \"hi\"}}]}\n\n"
         yield b"data: [DONE]\n\n"
@@ -227,3 +295,37 @@ def test_active_account_response_header(fake_dual_accounts, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.headers.get("X-WorkBuddy-Active-Account") == "uid-beta"
+
+
+@pytest.mark.anyio
+async def test_concurrent_all_cooldown_strictly_single_flight(fake_dual_accounts, monkeypatch):
+    """验证 20 个并发请求冲撞全池冷却时，strictly <= 1 个拿到探针，其余全部安全拦截绝不穿透打上游。"""
+    cred = CredentialManager()
+    monkeypatch.setitem(converter.CONFIG, "cred", cred)
+    rotator = AccountRotator(cred_mgr=cred, mode="failover")
+
+    now = time.time()
+    with converter._RATE_LIMIT_LOCK:
+        converter._ACCOUNT_COOLDOWNS[("uid-alpha", "glm-5.3")] = {
+            "code": 6004,
+            "resetAtMs": int((now + 60) * 1000),
+            "uid": "uid-alpha",
+        }
+        converter._ACCOUNT_COOLDOWNS[("uid-beta", "glm-5.3")] = {
+            "code": 6004,
+            "resetAtMs": int((now + 10) * 1000),
+            "uid": "uid-beta",
+        }
+
+    async def _select_task():
+        return rotator.select_account("glm-5.3")
+
+    results = await asyncio.gather(*[_select_task() for _ in range(20)])
+    probes_awarded = [uid for uid, _ in results if uid == "uid-beta"]
+    blocked_safely = [uid for uid, _ in results if uid == ""]
+
+    assert len(probes_awarded) == 1  # 严格单飞探针！
+    assert len(blocked_safely) == 19  # 其余 19 个安全拦截，绝不穿透！
+
+    _release_probe("uid-beta", "glm-5.3")
+
