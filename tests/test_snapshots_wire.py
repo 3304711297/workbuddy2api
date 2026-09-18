@@ -24,12 +24,14 @@ def test_record_usage_forwards_to_snapshot():
     assert "_SNAP_CTX.get(" in src
 
 
-def test_snapshot_independent_of_usage_log(tmp_path):
-    # 用量未启用时快照仍落盘
-    converter.CONFIG["usage_log"] = None
-    converter.CONFIG["snapshots"] = True
-    converter.CONFIG["snapshots_keep"] = 200
-    converter.CONFIG["snapshots_log"] = str(tmp_path / "s.jsonl")
+def test_snapshot_independent_of_usage_log(tmp_path, monkeypatch):
+    # 用量未启用时快照仍落盘。
+    # 一律经 monkeypatch 改写全局 CONFIG：直接赋值不还原会泄漏给后续用例/测试文件
+    # （顺序一变就出现莫名其妙的红/绿），也违反 AGENTS.md 的测试数据隔离铁律。
+    monkeypatch.setitem(converter.CONFIG, "usage_log", None)
+    monkeypatch.setitem(converter.CONFIG, "snapshots", True)
+    monkeypatch.setitem(converter.CONFIG, "snapshots_keep", 200)
+    monkeypatch.setitem(converter.CONFIG, "snapshots_log", str(tmp_path / "s.jsonl"))
     token = converter._SNAP_CTX.set(("/v1/chat/completions", {"a": 1}))
     try:
         converter._record_usage("m", True, 0.0)

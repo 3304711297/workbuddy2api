@@ -84,10 +84,15 @@ def test_usage_int_normalization():
 # 用量统计写盘（--usage-log JSONL）
 # ---------------------------------------------------------------------------
 
-def test_record_usage_disabled_is_noop():
+def test_record_usage_disabled_is_noop(monkeypatch):
     # 未启用 --usage-log：不写文件、不抛异常
+    #
+    # 必须显式置 None，不能断言「CONFIG 默认即 None」：tests/run_isolated_tests.py 的
+    # autouse 夹具为了不污染仓库根，会把 usage_log 指向临时目录，此时该键不是 None
+    # ——原来的 `assert CONFIG.get("usage_log") is None` 会让隔离运行器恒红（harness 与
+    # 用例互相矛盾，导致这个更强的门禁常年没人跑）。默认值本身由 CLI 解析层保证。
+    monkeypatch.setitem(converter.CONFIG, "usage_log", None)
     converter._record_usage("glm-5.3", True, 0.0, input_tokens=1, output_tokens=2)
-    assert converter.CONFIG.get("usage_log") is None  # 默认确实未启用
 
 
 def test_record_usage_writes_jsonl_line(tmp_path, monkeypatch):
@@ -121,13 +126,18 @@ def test_record_usage_failure_row(tmp_path, monkeypatch):
     assert rec["output_tokens"] is None
 
 
-def test_record_usage_failsafe_on_bad_path(monkeypatch):
+def test_record_usage_failsafe_on_bad_path(tmp_path, monkeypatch):
     # 目录不存在：写盘失败必须静默吞掉，绝不影响请求主流程
-    monkeypatch.setitem(
-        converter.CONFIG, "usage_log",
-        r"Z:\__no_such_dir__\usage.jsonl",
-    )
+    #
+    # 不能用 r"Z:\__no_such_dir__\usage.jsonl" 当「坏路径」：那是 Windows 专属假设。
+    # 在 POSIX 上它是一个**合法的相对文件名**，open(..., "a") 会成功，于是在仓库根
+    # 留下一个名为 `Z:\__no_such_dir__\usage.jsonl` 的垃圾文件（未被 .gitignore 覆盖），
+    # 而用例实际走的是成功分支——根本没验证到「写盘失败要吞掉」这条兜底。
+    # 用 tmp_path 下不存在的子目录：两个平台都必然 open 失败。
+    bad = tmp_path / "no_such_dir" / "usage.jsonl"
+    monkeypatch.setitem(converter.CONFIG, "usage_log", str(bad))
     converter._record_usage("glm-5.3", True, 0.0)  # 不应抛异常
+    assert not bad.exists(), "落盘失败时不应创建任何文件（含父目录）"
 
 
 # ---------------------------------------------------------------------------

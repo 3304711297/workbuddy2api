@@ -13,6 +13,7 @@ tests/test_vision_inlining.py - 多模态远程图片自动转 Data-URI 测试
 """
 
 import base64
+import ipaddress
 from contextlib import asynccontextmanager
 
 import pytest
@@ -25,6 +26,10 @@ from converter import (
 )
 
 FAKE_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+# 域名打桩用的公网 IP：真实取数路径（_url_to_data_uri）会在内部自行解析域名，
+# 若放任真实 DNS，用例就会隐式依赖「能上网 + example.com 能解析」。
+PUBLIC_TEST_IP = "93.184.216.34"
 
 
 class FakeStreamResponse:
@@ -40,10 +45,18 @@ class FakeStreamResponse:
             yield self._body
 
 
-def _install_stream_stub(monkeypatch, response: FakeStreamResponse, safe_override=True):
-    """把 httpx.AsyncClient.stream 替换为返回固定响应的桩，并放行 SSRF 校验。"""
-    if safe_override:
-        monkeypatch.setattr(converter, "_url_is_safe_for_fetch", lambda url: (True, ""))
+def _install_stream_stub(monkeypatch, response: FakeStreamResponse):
+    """把 httpx.AsyncClient.stream 替换为返回固定响应的桩，并让域名解析到公网 IP。
+
+    只打桩**真实的接缝**：SSRF 判定与下载都发生在 `_url_to_data_uri` 内部，
+    统一走 `_resolve_public_connect_ip` → `_resolve_host_ips`（DNS）。
+    因此这里打桩 DNS 即可放行；绝不能像以前那样打桩 `_url_is_safe_for_fetch`
+    ——那是个「以为在放行、实际没人调用」的假接缝，会让人误判用例覆盖到了什么。
+    """
+    monkeypatch.setattr(
+        converter, "_resolve_host_ips",
+        lambda host: [ipaddress.ip_address(PUBLIC_TEST_IP)],
+    )
 
     class FakeStreamCtx:
         async def __aenter__(self):
@@ -144,10 +157,18 @@ async def test_responses_endpoint_e2e_inlines_input_image(monkeypatch):
     ("http://0.0.0.0/x.png", "内网"),
 ])
 def test_ssrf_guard_blocks_dangerous_urls(bad_url, expect_keyword):
-    """内网/回环/元数据/非法协议地址必须被 SSRF 守卫拒绝。"""
+    """内网/回环/元数据/非法协议地址必须被 SSRF 守卫拒绝。
+
+    注意 `expect_keyword` 必须真断言：此前它只作为参数收集、从未使用，
+    于是「拒绝原因说得出是哪一类」这条契约其实是空的（拒绝对了但理由串台的
+    改动不会被发现）。分类由 `_resolve_public_connect_ip` 统一给出。
+    """
     ok, reason = _url_is_safe_for_fetch(bad_url)
     assert ok is False
     assert reason, f"{bad_url} 应给出拒绝原因"
+    assert expect_keyword in reason, (
+        f"{bad_url} 的拒绝原因应点明「{expect_keyword}」，实际：{reason}"
+    )
 
 
 @pytest.mark.parametrize("good_url", [
@@ -233,9 +254,13 @@ async def test_redirect_chain_revalidated(monkeypatch):
             return FakeStreamCtx()
 
     # 首跳放行（公网），第二跳由真实守卫判定内网 → 必须拒绝
+    #
+    # 注意：真实防线在 _url_to_data_uri 内部逐跳执行，_url_is_safe_for_fetch 没有生产调用点，
+    # 因此这里必须打桩「DNS 解析」而不是 _url_is_safe_for_fetch——否则首跳会因真实 DNS 是否可用
+    # 而走出不同分支（离线时首跳就提前返回，重定向防线实际没被测到）。
     monkeypatch.setattr(
-        converter, "_url_is_safe_for_fetch",
-        lambda url: (True, "") if "example.com" in url else (False, "内网"),
+        converter, "_resolve_host_ips",
+        lambda host: [ipaddress.ip_address(PUBLIC_TEST_IP)],
     )
     monkeypatch.setattr(converter.httpx, "AsyncClient", FakeAsyncClient)
 

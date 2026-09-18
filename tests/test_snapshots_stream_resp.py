@@ -19,11 +19,13 @@ def _collected():
     }
 
 
-def test_pseudo_stream_snapshot_has_resp(tmp_path):
-    converter.CONFIG["usage_log"] = None  # 用量关闭也不影响快照腿
-    converter.CONFIG["snapshots"] = True
-    converter.CONFIG["snapshots_keep"] = 200
-    converter.CONFIG["snapshots_log"] = str(tmp_path / "s.jsonl")
+def test_pseudo_stream_snapshot_has_resp(tmp_path, monkeypatch):
+    # 一律经 monkeypatch 改写全局 CONFIG：直接赋值不还原会把开关泄漏给后续用例/
+    # 测试文件（顺序一变就出现莫名其妙的红/绿），也违反 AGENTS.md 的测试数据隔离铁律。
+    monkeypatch.setitem(converter.CONFIG, "usage_log", None)  # 用量关闭也不影响快照腿
+    monkeypatch.setitem(converter.CONFIG, "snapshots", True)
+    monkeypatch.setitem(converter.CONFIG, "snapshots_keep", 200)
+    monkeypatch.setitem(converter.CONFIG, "snapshots_log", str(tmp_path / "s.jsonl"))
     token = converter._SNAP_CTX.set(("/v1/chat/completions", {"model": "m"}))
     try:
         async def drain():

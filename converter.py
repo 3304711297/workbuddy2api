@@ -39,7 +39,7 @@ import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -1277,11 +1277,50 @@ def _resolve_host_ips(host: str) -> list:
     return ips
 
 
-def _url_is_safe_for_fetch(url: str) -> tuple[bool, str]:
-    """SSRF 前置校验：仅允许 http(s)、禁止内网/回环/元数据地址。
+def _resolve_public_connect_ip(host: str) -> tuple[Optional[str], str]:
+    """把主机解析为「可直接连接的公网 IP」；拒绝时返回 (None, 原因)。
 
-    返回 (是否安全, 拒绝原因)。DNS 解析后逐个校验 IP，任一落在内网即拒绝
-    （防 DNS rebinding 式的「一公网一内网」混合解析）。
+    这是 SSRF 主机/IP 判定的**唯一实现**：URL 级校验 `_url_is_safe_for_fetch`
+    与实际下载路径 `_url_to_data_uri`（逐跳）都经由它，杜绝两处逻辑漂移
+    —— 历史教训是「一处被改、另一处才是真正生效的防线」，改动者据此产生虚假信心。
+
+    规则：
+      - 命中本机/云元数据主机名单（含 `*.localhost` 后缀）直接拒绝；
+      - 纯 IP 字面量：无需 DNS，直接判定；
+      - 域名：要求**每一个**解析结果都是公网地址（防「一公网一内网」混合解析），
+        并返回首个公网 IP 供调用方**绑定连接**，从而消除「校验一次、连接时再解析
+        一次」的 DNS rebinding 窗口。
+    """
+    host = (host or "").strip().lower()
+    if not host:
+        return None, "缺少主机名"
+    if host in _BLOCKED_IMAGE_HOSTS or host.endswith(".localhost"):
+        return None, f"禁止访问本机/元数据主机: {host}"
+
+    # 纯 IP 直连：直接判定，无需 DNS
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not _ip_is_public(literal):
+            return None, f"禁止访问内网/保留地址: {literal}"
+        return str(literal), ""
+
+    ips = _resolve_host_ips(host)
+    if not ips:
+        return None, f"域名无法解析: {host}"
+    for ip in ips:
+        if not _ip_is_public(ip):
+            return None, f"域名 {host} 解析到内网/保留地址: {ip}"
+    return str(ips[0]), ""
+
+
+def _url_is_safe_for_fetch(url: str) -> tuple[bool, str]:
+    """SSRF 前置校验（URL 级）：仅允许 http(s)，禁止内网/回环/元数据地址。
+
+    返回 (是否安全, 拒绝原因)。主机/IP 判定全部委托给 `_resolve_public_connect_ip`
+    —— 与实际下载路径同源，不存在第二份实现。
     """
     from urllib.parse import urlsplit
     try:
@@ -1292,28 +1331,8 @@ def _url_is_safe_for_fetch(url: str) -> tuple[bool, str]:
     if parts.scheme not in ("http", "https"):
         return False, f"不支持的协议: {parts.scheme}"
 
-    host = (parts.hostname or "").strip().lower()
-    if not host:
-        return False, "缺少主机名"
-    if host in _BLOCKED_IMAGE_HOSTS or host.endswith(".localhost"):
-        return False, f"禁止访问本机/元数据主机: {host}"
-
-    # 纯 IP 直连：直接判定，无需 DNS
-    try:
-        ip = ipaddress.ip_address(host)
-        if not _ip_is_public(ip):
-            return False, f"禁止访问内网/保留地址: {ip}"
-        return True, ""
-    except ValueError:
-        pass
-
-    ips = _resolve_host_ips(host)
-    if not ips:
-        return False, f"域名无法解析: {host}"
-    for ip in ips:
-        if not _ip_is_public(ip):
-            return False, f"域名 {host} 解析到内网/保留地址: {ip}"
-    return True, ""
+    _, reason = _resolve_public_connect_ip(parts.hostname or "")
+    return (False, reason) if reason else (True, "")
 
 
 async def _url_to_data_uri(url: str, timeout: float = 15.0) -> str:
@@ -1354,28 +1373,14 @@ async def _url_to_data_uri(url: str, timeout: float = 15.0) -> str:
             parts = urlsplit(current)
             orig_host = (parts.hostname or "").strip()
             port = parts.port or (443 if parts.scheme == "https" else 80)
-            
-            # DNS 解析并在公网 IP 中取已验证的 IP 建立直连，防 DNS rebinding
-            try:
-                ip_literal = ipaddress.ip_address(orig_host)
-                if not _ip_is_public(ip_literal):
-                    _log(f"🚫 远程图片禁止访问内网/保留地址: {ip_literal}", level="warning")
-                    return url
-                connect_ip = str(ip_literal)
-            except ValueError:
-                resolved_ips = _resolve_host_ips(orig_host)
-                if not resolved_ips:
-                    _log(f"🚫 远程图片域名无法解析: {orig_host}", level="warning")
-                    return url
-                for ip in resolved_ips:
-                    if not _ip_is_public(ip):
-                        _log(f"🚫 远程图片域名 {orig_host} 解析到内网/保留地址: {ip}", level="warning")
-                        return url
-                public_ips = [ip for ip in resolved_ips if _ip_is_public(ip)]
-                if not public_ips:
-                    _log(f"🚫 远程图片域名无有效公网 IP: {orig_host}", level="warning")
-                    return url
-                connect_ip = str(public_ips[0])
+
+            # 与 _url_is_safe_for_fetch 共用同一判定（含本机/元数据主机名单），
+            # 并把连接绑定到已校验的 IP，杜绝「校验一次、连接时再解析一次」的
+            # DNS rebinding 窗口。
+            connect_ip, reason = _resolve_public_connect_ip(orig_host)
+            if not connect_ip:
+                _log(f"🚫 远程图片拒绝下载（{reason}）: {current[:60]}", level="warning")
+                return url
 
             # 构造直连 URL 与连接扩展
             target_host = f"[{connect_ip}]" if ":" in connect_ip else connect_ip

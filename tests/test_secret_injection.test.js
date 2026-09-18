@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { stripRustComments } from './helpers/strip-rust-comments.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const JS = (p) => readFileSync(join(ROOT, p), 'utf8');
@@ -29,9 +30,12 @@ const JS = (p) => readFileSync(join(ROOT, p), 'utf8');
 const PROXY_RS = JS('src-tauri/src/commands/proxy.rs');
 const CONVERTER = JS('converter.py');
 
-// 只看真实代码：去掉注释，避免「注释里写了 --api-key 说明」误判为仍在传参
-const stripComments = (src) =>
-  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+// 只看真实代码：去掉注释，避免「注释里写了 --api-key 说明」误判为仍在传参。
+//
+// 必须用会跳过字符串字面量的实现：proxy.rs 里既有 URL 字面量，也有路径校验
+// `ep.contains("//")`。粗放的 `/\/\/[^\n]*/` 会把这两类行从 `//` 起整段吃掉，
+// 于是「不得出现 --api-key」这类**负向断言会在真回归面前空过**（本文件的断言价值全在负向）。
+const stripComments = stripRustComments;
 
 test('A 内核启动不得再把密钥放进 argv（防明文进命令行）', () => {
   const code = stripComments(PROXY_RS);

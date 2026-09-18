@@ -347,6 +347,11 @@ def test_summarize_large_tool_output():
     assert "result_data_line_49" in content
     assert "Chunk ID:" not in content
     assert "Wall time:" not in content
+    # `Output:` 分隔标题行必须被丢弃（它是 Codex 执行器的分段标记，不是内容）；
+    # 同时正文标题仍为 "Key output:" —— 两者共同锁定「丢弃标题 ≠ 省略正文标题」，
+    # 防止把「无 Output 段时不发 Key output 标题」这类未定义的猜测性分支加回来。
+    assert "Output:" not in content
+    assert content.count("Key output:") == 1
 
 
 def test_schema_projection_removes_unnecessary_keys():
