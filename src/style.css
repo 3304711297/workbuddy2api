@@ -1370,6 +1370,35 @@ body {
 }
 .cell-edit:hover { border-color: var(--primary, #4a8cff); color: var(--primary, #4a8cff); }
 .cell-edit small { font-weight: 400; }
+
+/* 模型调用名：整块可点即复制（复制图标默认隐去，悬停/聚焦时显现） */
+.model-id-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.model-id-copy:hover,
+.model-id-copy:focus-visible {
+  background: var(--bg-field-highlight);
+  border-color: var(--border-light);
+}
+.model-id-copy-icon {
+  font-size: 11px;
+  color: var(--text-secondary, #8b949e);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.model-id-copy:hover .model-id-copy-icon,
+.model-id-copy:focus-visible .model-id-copy-icon { opacity: 0.9; }
 .modal-overlay {
   position: fixed;
   inset: 0;

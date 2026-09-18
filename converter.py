@@ -2373,19 +2373,50 @@ def _record_fallback_event(requested: str, actual: str, reason: str) -> None:
             }
 
 
+def _upstream_error_code(err_text: str):
+    """从上游错误体里提取结构化业务 code（非 JSON 或缺失时返回 None）。
+
+    用于屏蔽「requestId 等 hex 片段里恰好含 429/6004」造成的裸子串误判
+    （实测 requestId 形如 `4290-6004-…` 会命中）。
+    """
+    if not err_text:
+        return None
+    try:
+        data = json.loads(err_text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    code = data.get("code")
+    if code is None:
+        code = data.get("error", {}).get("code") if isinstance(data.get("error"), dict) else None
+    return code
+
+
+def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
+    """判定上游错误是否属于限流（6004 / 429）。
+
+    **结构化报文以业务 code 为准**：裸子串匹配（`"429" in text`、`"6004" in text`）会命中
+    requestId 这类 hex 片段（实测 `...4290-6004-abcd...`），把确定性错误误判成限流 →
+    触发无谓切号与假冷却。故 JSON 报文里只认 `code == 6004`；中文短语是无歧义的整词，
+    两种情形都保留。
+    """
+    text = err_text or ""
+    if status_code == 429:
+        return True
+    cn_hit = ("频率限制" in text) or ("使用量超出" in text)
+    code = _upstream_error_code(text)
+    if code is not None:
+        return str(code) == "6004" or cn_hit
+    # 非结构化（非 JSON / 无 code）时保留既有宽松判据
+    return cn_hit or ("429" in text) or ("Too Many Requests" in text) or ("6004" in text)
+
+
 def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status_code: int | None = None) -> None:
     """从上游错误体里识别 6004/429 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。"""
     m = _RATE_LIMIT_RE.search(err_text or "")
     if not m:
-        is_limit = (
-            (status_code == 429)
-            or ("429" in (err_text or ""))
-            or ("Too Many Requests" in (err_text or ""))
-            or ("6004" in (err_text or ""))
-            or ("频率限制" in (err_text or ""))
-            or ("使用量超出" in (err_text or ""))
-        )
-        if is_limit:
+        if _is_rate_limit_signal(status_code, err_text):
             # 外部架构审查采纳：未下发精确时刻时注入 ±45s 去相关随机抖动（255s~345s），杜绝多协程在同一毫秒二次惊群
             jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
             reset_ms = int((time.time() + jitter_sec) * 1000)
@@ -2659,12 +2690,7 @@ class AccountRotator:
         # 内容审核拦截（11140）为用户请求内容违规，严禁切号重试与冷却
         if _is_content_policy_violation(status_code, err_text):
             return None
-        is_rate_limited = (
-            (status_code == 429)
-            or ("6004" in (err_text or ""))
-            or ("频率限制" in (err_text or ""))
-            or ("使用量超出" in (err_text or ""))
-        )
+        is_rate_limited = _is_rate_limit_signal(status_code, err_text)
         if not is_rate_limited:
             return None
         if self.mode not in ("failover", "roundrobin"):
@@ -3052,7 +3078,7 @@ async def chat_completions(request: Request,
     # 构造后端 body：只透传已知的合法字段
     client_wants_stream = bool(payload.get("stream"))
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
-    body.setdefault("model", "auto")
+    body["model"] = _normalize_model_name(body.get("model"))
     if "messages" in body:
         body["messages"] = await _inline_remote_images(body["messages"])
     # 后端只支持流式：始终以 stream=True 调后端，非流式由转换器聚合
@@ -3067,7 +3093,7 @@ async def chat_completions(request: Request,
         body = desensitize_body(body, roles=("system", "assistant"))
 
     # 日志：请求摘要
-    model_name = payload.get("model", "auto")
+    model_name = _normalize_model_name(payload.get("model"))
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
 
@@ -3202,19 +3228,21 @@ async def chat_completions(request: Request,
                                     uid, headers = failover
                                     await _failover_jitter(rid)
                                     continue
-                            raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
+                            # 不可重试：直接按 OpenAI 协议形状返回，且不再回到循环（确定性 4xx 重发只会白烧上游额度）
+                            _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
+                                          requested_model=model_name, fallback_reason=fallback_reason)
+                            return JSONResponse(status_code=r.status_code, content=_openai_error_body(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
                         break
         except HTTPException as e:
-            if attempt >= max_attempts - 1:
-                _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}",
-                              requested_model=model_name, fallback_reason=fallback_reason)
-                try:
-                    _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
-                    _record_rate_limit(model_name, _dl, uid=uid)
-                except Exception:
-                    pass
-                raise
+            _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}",
+                          requested_model=model_name, fallback_reason=fallback_reason)
+            try:
+                _dl = json.dumps(e.detail, ensure_ascii=False) if not isinstance(e.detail, str) else e.detail
+                _record_rate_limit(model_name, _dl, uid=uid)
+            except Exception:
+                pass
+            raise
         except httpx.HTTPError as e:
             if attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
@@ -3225,7 +3253,7 @@ async def chat_completions(request: Request,
             _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
             _record_usage(actual_model, False, t0, error=f"upstream error: {e}",
                           requested_model=model_name, fallback_reason=fallback_reason)
-            raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
+            return JSONResponse(status_code=502, content={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
         except Exception as e:
             _record_usage(actual_model, False, t0, error=f"{type(e).__name__}: {e}",
                           requested_model=model_name, fallback_reason=fallback_reason)
@@ -3306,11 +3334,11 @@ async def anthropic_messages(
         )
 
     client_wants_stream = bool(payload.get("stream"))
-    model_name = payload.get("model", "auto")
+    model_name = _normalize_model_name(payload.get("model"))
     mapped_model = MODEL_MAP.get(model_name, model_name)
 
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
-    body.setdefault("model", "auto")
+    body["model"] = _normalize_model_name(body.get("model"))
     if "messages" in body:
         body["messages"] = await _inline_remote_images(body["messages"])
     body["stream"] = True
@@ -3457,15 +3485,11 @@ async def anthropic_messages(
                                     continue
                             _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}",
                                           requested_model=model_name, fallback_reason=fallback_reason)
-                            raise HTTPException(
-                                status_code=r.status_code,
-                                detail={"type": "error", "error": {"type": "api_error", "message": raw.decode("utf-8", "replace")[:500]}},
-                            )
+                            return JSONResponse(status_code=r.status_code, content=_anthropic_error_body(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
                         break
         except HTTPException:
-            if attempt >= max_attempts - 1:
-                raise
+            raise
         except httpx.HTTPError as e:
             if attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
@@ -3476,9 +3500,9 @@ async def anthropic_messages(
             _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
             _record_usage(actual_model, False, t0, error=f"upstream error: {e}",
                           requested_model=model_name, fallback_reason=fallback_reason)
-            raise HTTPException(
+            return JSONResponse(
                 status_code=502,
-                detail={"type": "error", "error": {"type": "api_error", "message": f"upstream error: {e}"}},
+                content={"type": "error", "error": {"type": "api_error", "message": f"upstream error: {e}"}},
             )
         except Exception as e:
             _record_usage(actual_model, False, t0, error=f"{type(e).__name__}: {e}",
@@ -3554,7 +3578,7 @@ async def openai_responses(
 
     client_wants_stream = bool(raw_body.get("stream", True))
     body = {k: chat_payload[k] for k in PASSTHROUGH_BODY_KEYS if k in chat_payload}
-    body.setdefault("model", "auto")
+    body["model"] = _normalize_model_name(body.get("model"))
     if "messages" in body:
         body["messages"] = await _inline_remote_images(body["messages"])
     body["stream"] = True
@@ -3564,7 +3588,7 @@ async def openai_responses(
     if CONFIG.get("desensitize"):
         body = desensitize_body(body, roles=("system", "assistant"))
 
-    model_name = raw_body.get("model", "auto")
+    model_name = _normalize_model_name(raw_body.get("model"))
     mapped_model = MODEL_MAP.get(model_name, model_name)
     body["model"] = mapped_model
 
@@ -3678,13 +3702,14 @@ async def openai_responses(
                                     uid, headers = failover
                                     await _failover_jitter(rid)
                                     continue
-                            raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
+                            # 不可重试：按 OpenAI 协议形状返回，且不再回到循环（确定性 4xx 重发只会白烧上游额度）
+                            _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
+                            return JSONResponse(status_code=r.status_code, content=_openai_error_body(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
                         break
         except HTTPException as e:
-            if attempt >= max_attempts - 1:
-                _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
-                raise
+            _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
+            raise
         except httpx.HTTPError as e:
             if attempt < max_attempts - 1 and rotator:
                 failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
@@ -4071,6 +4096,70 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                                               actual_model=actual_model, fallback_reason=fallback_reason,
                                               requested_model=requested_model or model_name):
         yield chunk
+
+
+def _normalize_model_name(name) -> str:
+    """空 / 纯空白 / 缺失的模型名归一化为 ``auto``。
+
+    客户端「测试连接」探测常发 ``model: ""``（自定义提供商模型列表为空时），上游对空模型名
+    一律返回 400 ``11102 model [] service info not found``。归一化与「缺省即 auto」的既有语义
+    一致，让探测拿到真实可用性反馈；非空字符串原样保留（不做 trim，避免改变既有语义）。
+    """
+    if not isinstance(name, str):
+        return "auto"
+    return name if name.strip() else "auto"
+
+
+def _openai_error_body(raw, status: int) -> dict:
+    """把上游错误体规范成 OpenAI 形状 ``{"error": {...}}``（不经 FastAPI 的 detail 包裹）。
+
+    非流式路径若 `raise HTTPException(detail=...)`，客户端拿到的是 ``{"detail": ...}``，
+    破坏协议形状、也让客户端无法解析错误原因。中文展示文案优先，原始英文 msg 保留在
+    ``upstream_message`` 里可追溯。
+    """
+    raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("utf-8", "replace")
+    try:
+        data = json.loads(raw_bytes.decode("utf-8", "replace"))
+    except Exception:
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        return data  # 已是标准形状（含 11140 规范化结果）
+    if isinstance(data, dict):
+        code = data.get("code")
+        msg = data.get("msg") or data.get("message") or ""
+        if code is not None and str(code) == "11140":
+            return {
+                "error": {
+                    "message": f"上游内容安全审核未通过 (11140): {msg or '请调整提示词后重试'}",
+                    "type": "invalid_request_error",
+                    "code": 11140,
+                }
+            }
+        disp = data.get("displayMsg")
+        disp_msg = ""
+        if isinstance(disp, dict):
+            disp_msg = disp.get("zh") or disp.get("zh-hant") or disp.get("en") or ""
+        text = str(disp_msg or msg or f"upstream error (HTTP {status})")
+        err = {"message": text, "type": "invalid_request_error" if status == 400 else "upstream_error"}
+        if code is not None:
+            err["code"] = code
+        if msg and str(msg) != text:
+            err["upstream_message"] = str(msg)
+        return {"error": err}
+    text = raw_bytes.decode("utf-8", "replace")[:500]
+    return {"error": {"message": text or f"upstream error (HTTP {status})", "type": "upstream_error", "code": status}}
+
+
+def _anthropic_error_body(raw, status: int) -> dict:
+    """Anthropic 形状的错误体：``{"type": "error", "error": {...}}``。"""
+    inner = _openai_error_body(raw, status)["error"]
+    err = {
+        "type": "invalid_request_error" if status == 400 else "api_error",
+        "message": inner.get("message"),
+    }
+    if "code" in inner:
+        err["code"] = inner["code"]
+    return {"type": "error", "error": err}
 
 
 def _safe_err_raw(raw: bytes, status: int) -> dict:

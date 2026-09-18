@@ -266,7 +266,11 @@ function renderModelsTable(list) {
     return `
       <tr>
         <td>
-          <strong class="mono" style="color: var(--link); font-size: 13px;">${esc(m.id)}</strong>
+          <button class="model-id-copy mono" data-copy-model="${esc(m.id)}"
+            title="点击复制模型调用名（${esc(m.id)}）" aria-label="复制模型调用名 ${esc(m.id)}">
+            <strong style="color: var(--link); font-size: 13px;">${esc(m.id)}</strong>
+            <span class="model-id-copy-icon" aria-hidden="true">⧉</span>
+          </button>
           <div class="muted" style="font-size: 11px;">${esc(m.name)}</div>
         </td>
         <td>${creditsBadge}</td>
@@ -507,7 +511,16 @@ export function initModelsAndCopy() {
 
   // 模型表格事件委托：行内编辑按钮与标签快速筛选
   const modelsTbody = document.getElementById('models-table-body');
-  modelsTbody?.addEventListener('click', (e) => {
+  modelsTbody?.addEventListener('click', async (e) => {
+    // 模型 id 点击 = 复制调用名（客户端配置时直接粘贴）
+    const idEl = e.target.closest('[data-copy-model]');
+    if (idEl) {
+      const modelId = idEl.dataset.copyModel || '';
+      if (!modelId) return;
+      const ok = await copyToClipboard(modelId);
+      showToast(ok ? `已复制模型名：${modelId}` : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
+      return;
+    }
     const tagEl = e.target.closest('.clickable-tag[data-filter-tag]');
     if (tagEl) {
       setTagFilter(tagEl.dataset.filterTag);
