@@ -628,3 +628,16 @@ workbuddy2api.exe (GUI)
      控制台模型表标签列仅保留 Agent 来源端标识（`CodeBuddy` / `WorkBuddy` / `双端`），
      上游业务修饰标签（主力/深度推理/高智商等）一律过滤剔除。
 
+- **请求级控制头与全冷却 Half-Open 单飞探针（2026-09-19 借鉴 9router 吸收交付，改动必读）**：
+  1. **请求级旁路控制头（`X-WorkBuddy-Account` / `X-WorkBuddy-Strategy`）**：
+     - `X-WorkBuddy-Account` 支持精确 UID 与唯一 alias，**严格遵守安全门禁**：指定账号处于冷却中或不可用时，必须 Fail-Open 放弃指定，严禁穿透冷却；
+     - 契约修正 A：无效或冷却的 Account 覆盖不会清空同请求中合法的 Strategy 覆盖；
+     - 重名 alias 视为输入歧义直接 Fail-Open；非法 Strategy 安全回退全局；
+     - 契约修正 B：实际发往后端的请求在响应头回传 `X-WorkBuddy-Active-Account: <uid>`，未发生真实调用的错误请求不返回该头。
+  2. **全冷却 Half-Open 单飞探针与防惊群保护（`_PROBE_INFLIGHT`）**：
+     - 契约修正 C：全池冷却时，`best_uid` 必须通过「当前有效账号池 ∩ 冷却字典」交集计算，绝不选择已删除/禁用的残留账号；
+     - 契约修正 D：放行单飞探针时保持全局 active_uid 稳定（不提前切换防惊群），并发请求自动避让回退；
+     - 探针结束无论成功、失败、异常、取消，`finally` 块必须调用 `_release_probe` 释放锁；
+     - 探针成功（2xx）自动调用 `_clear_account_cooldown` 触发账号自愈；
+     - 严格保持既有 `/api/rate_limit` 三态契约不变。契约锁定：`tests/test_header_override_and_cooldown_probe.py`（9 条单测）。
+

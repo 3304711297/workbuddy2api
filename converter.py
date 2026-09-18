@@ -2538,6 +2538,41 @@ def _parse_expiry_timestamp(v: Any) -> int:
     return 0
 
 
+_PROBE_INFLIGHT: set[tuple[str, str]] = set()
+_PROBE_LOCK = threading.Lock()
+
+
+def _is_probe_inflight(uid: str, model: str) -> bool:
+    with _PROBE_LOCK:
+        return (uid, model) in _PROBE_INFLIGHT
+
+
+def _acquire_probe(uid: str, model: str) -> bool:
+    with _PROBE_LOCK:
+        if (uid, model) in _PROBE_INFLIGHT:
+            return False
+        _PROBE_INFLIGHT.add((uid, model))
+        return True
+
+
+def _release_probe(uid: str, model: str) -> None:
+    with _PROBE_LOCK:
+        _PROBE_INFLIGHT.discard((uid, model))
+
+
+def _clear_account_cooldown(uid: str, model: str) -> None:
+    with _RATE_LIMIT_LOCK:
+        _ACCOUNT_COOLDOWNS.pop((uid, model), None)
+
+
+def _get_cooldown_reset_ms(uid: str, model: str) -> float:
+    with _RATE_LIMIT_LOCK:
+        entry = _ACCOUNT_COOLDOWNS.get((uid, model))
+        if entry:
+            return float(entry.get("resetAtMs", 0.0))
+    return 0.0
+
+
 class AccountRotator:
     """多账号凭证调度引擎。
     支持三种轮换模式：
@@ -2662,14 +2697,86 @@ class AccountRotator:
         all_accs = self.get_all_accounts()
         return max(1, min(len(all_accs), 5))
 
-    def select_account(self, model: str) -> tuple[str, dict]:
-        """为即将开始的请求选择账号，返回 (uid, headers)。"""
+    def resolve_header_overrides(
+        self,
+        model: str,
+        req_account: str | None,
+        req_strategy: str | None,
+    ) -> tuple[str | None, str | None]:
+        """解析请求级控制头（X-WorkBuddy-Account 与 X-WorkBuddy-Strategy）。
+        遵循 Fail-Open 铁律与 ChatGPT 审查契约修正：
+        - invalid/cooldown Account 不会破坏同请求合法的 Strategy Header（契约修正 A）；
+        - 若 Account 指定的账号存在、有效且未处于冷却中，返回 (target_uid, strategy)；
+        - 若 Account 指定的账号不存在、未启用、重名或处于冷却中，放弃该 Account（返回 None），保留 strategy；
+        - Strategy 若为合法值 ("direct", "round_robin", "roundrobin", "expire_priority", "failover", "off")，返回规范化模式；否则返回 None（回退全局策略）。
+        """
+        target_uid = None
+        if req_account and isinstance(req_account, str):
+            cleaned_acc = req_account.strip()
+            if cleaned_acc:
+                all_accs = self.get_all_accounts()
+                exact_uids = [u for u, _ in all_accs if u == cleaned_acc]
+                if exact_uids:
+                    cand = exact_uids[0]
+                    if not _is_account_cooldown(cand, model):
+                        target_uid = cand
+                    else:
+                        _log(f"⚠️ [Header 门禁] X-WorkBuddy-Account 指定账号 {cand[:8]}... 处于冷却中，放弃指定并回退策略", level="debug")
+                else:
+                    matched_alias = []
+                    for u, s in all_accs:
+                        if isinstance(s, dict):
+                            nick = (s.get("account") or {}).get("nickname")
+                            if nick and str(nick).strip() == cleaned_acc:
+                                matched_alias.append(u)
+                    if len(matched_alias) == 1:
+                        cand = matched_alias[0]
+                        if not _is_account_cooldown(cand, model):
+                            target_uid = cand
+                        else:
+                            _log(f"⚠️ [Header 门禁] X-WorkBuddy-Account 指定别名账号 {cand[:8]}... 处于冷却中，放弃指定并回退策略", level="debug")
+                    elif len(matched_alias) > 1:
+                        _log(f"⚠️ [Header 门禁] X-WorkBuddy-Account 别名 '{cleaned_acc}' 存在多个重名账号，视为输入歧义并 Fail-Open", level="debug")
+
+        target_strategy = None
+        if req_strategy and isinstance(req_strategy, str):
+            cleaned_strat = req_strategy.strip().lower()
+            if cleaned_strat in ("round_robin", "roundrobin"):
+                target_strategy = "roundrobin"
+            elif cleaned_strat in ("direct", "off"):
+                target_strategy = "off"
+            elif cleaned_strat in ("failover", "expire_priority"):
+                target_strategy = cleaned_strat
+            else:
+                _log(f"⚠️ [Header 门禁] X-WorkBuddy-Strategy 未知取值 '{req_strategy}'，Fail-Open 回退全局配置", level="debug")
+
+        return target_uid, target_strategy
+
+    def select_account(
+        self,
+        model: str,
+        override_uid: str | None = None,
+        override_mode: str | None = None,
+    ) -> tuple[str, dict]:
+        """为即将开始的请求选择账号，返回 (uid, headers)。支持请求级覆盖与全冷却 Half-Open 探针。"""
         with self._lock:
             if not self.cred_mgr:
                 raise HTTPException(status_code=503, detail={"error": {"message": "未找到登录凭据，请先在桌面端登录 CodeBuddy/WorkBuddy", "type": "auth_error"}})
 
             active_uid = getattr(self.cred_mgr, "get_active_uid", lambda: "")()
-            if self.mode == "off":
+
+            # 1. 请求级账号覆盖（优先且直接命中）
+            if override_uid:
+                all_accs = self.get_all_accounts()
+                if any(u == override_uid for u, _ in all_accs):
+                    if hasattr(self.cred_mgr, "switch_active_account") and override_uid != active_uid:
+                        self.cred_mgr.switch_active_account(override_uid)
+                    headers = self.cred_mgr.get_headers_for_uid(override_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
+                    _log(f"🎯 [请求级路由] 依 Header 强制指定账号 UID: {override_uid[:8]}...")
+                    return override_uid, headers
+
+            effective_mode = (override_mode or self.mode or "off").lower()
+            if effective_mode == "off":
                 return active_uid, self.cred_mgr.get_headers()
 
             all_accs = self.get_all_accounts()
@@ -2678,9 +2785,21 @@ class AccountRotator:
 
             candidates = self.get_candidate_uids_tiered(model)
             if not candidates:
+                # 全池冷却分支（契约修正 C）：计算当前有效账号与冷却账号交集，选取最短到期者
+                cooldown_uids = [u for u, _ in all_accs if _is_account_cooldown(u, model)]
+                if cooldown_uids:
+                    best_uid = min(cooldown_uids, key=lambda u: _get_cooldown_reset_ms(u, model))
+                    # 单飞探针保护（契约修正 D）：
+                    if _acquire_probe(best_uid, model):
+                        _log(f"⚡ [Half-Open 探针] 模型 {model} 全池冷却，放行单飞探针 UID: {best_uid[:8]}...")
+                        # ⚠️ 探针期间禁止提前切换全局活跃账号（防惊群与污染），仅定向获取该 UID headers
+                        headers = self.cred_mgr.get_headers_for_uid(best_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
+                        return best_uid, headers
+                    else:
+                        _log(f"⚠️ [Half-Open 防惊群] 模型 {model} 最优账号 {best_uid[:8]}... 已有在途探针，当前请求避让回退", level="debug")
                 return active_uid, self.cred_mgr.get_headers()
 
-            if self.mode == "roundrobin":
+            if effective_mode == "roundrobin":
                 self._req_counter += 1
                 if self._req_counter % self.rotate_count == 0:
                     cand_list = candidates
@@ -2696,8 +2815,8 @@ class AccountRotator:
                 headers = self.cred_mgr.get_headers_for_uid(active_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
                 return active_uid, headers
 
-            elif self.mode == "failover":
-                if _is_account_cooldown(active_uid, model):
+            elif effective_mode in ("failover", "expire_priority"):
+                if _is_account_cooldown(active_uid, model) or effective_mode == "expire_priority":
                     if candidates:
                         top_tier = self._get_top_tier_uids(candidates)
                         if len(top_tier) > 1:
@@ -2708,9 +2827,9 @@ class AccountRotator:
                         if target_uid != active_uid and hasattr(self.cred_mgr, "switch_active_account"):
                             self.cred_mgr.switch_active_account(target_uid)
                             active_uid = target_uid
-                            _log(f"🔄 [限流避让] 当前账号冷却中，自动切换至就绪账号 UID: {active_uid[:8]}...")
+                            _log(f"🔄 [调度选择] 切换至账号 UID: {active_uid[:8]}... (mode={effective_mode})")
                     else:
-                        _log(f"⚠️ [限流避让] 模型 {model} 当前所有账号均在冷却中（全池冷却）")
+                        _log(f"⚠️ [调度选择] 模型 {model} 当前所有账号均在冷却中（全池冷却）")
                 headers = self.cred_mgr.get_headers_for_uid(active_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
                 return active_uid, headers
 
@@ -3175,7 +3294,19 @@ async def chat_completions(request: Request,
     _log_payload(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}")
 
     rotator = _get_rotator()
-    uid, headers = rotator.select_account(model_name)
+    req_account = request.headers.get("x-workbuddy-account")
+    req_strategy = request.headers.get("x-workbuddy-strategy")
+    override_uid, override_strat = (
+        rotator.resolve_header_overrides(model_name, req_account, req_strategy)
+        if rotator
+        else (None, None)
+    )
+    uid, headers = (
+        rotator.select_account(model_name, override_uid=override_uid, override_mode=override_strat)
+        if rotator
+        else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    )
+    active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
@@ -3198,7 +3329,7 @@ async def chat_completions(request: Request,
         return StreamingResponse(
             _paced_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **active_hdr},
         )
 
     if client_wants_stream and need_tool_repair:
@@ -3215,7 +3346,7 @@ async def chat_completions(request: Request,
         return StreamingResponse(
             _paced_safe_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **active_hdr},
         )
 
     # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
@@ -3294,6 +3425,8 @@ async def chat_completions(request: Request,
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     # 成功证据归实际调用的正式名（含别名映射与 fallback），不覆盖原模型的 11102。
     _mark_model_available(body["model"], uid=uid)
+    if uid:
+        _clear_account_cooldown(uid, model_name)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0,
@@ -3303,7 +3436,7 @@ async def chat_completions(request: Request,
                   requested_model=model_name,
                   fallback_reason=fallback_reason,
                   snapshot_resp=_snapshot_excerpt(collected))
-    resp_headers = {}
+    resp_headers = dict(active_hdr)
     if actual_model != model_name:
         resp_headers["X-Actual-Model"] = actual_model
         resp_headers["X-Requested-Model"] = model_name
@@ -3419,7 +3552,19 @@ async def anthropic_messages(
     _log(f"[{rid}] ▶ ANTHROPIC /v1/messages {model_name}{fast_tag} | stream={client_wants_stream}")
 
     rotator = _get_rotator()
-    uid, headers = rotator.select_account(model_name)
+    req_account = request.headers.get("x-workbuddy-account")
+    req_strategy = request.headers.get("x-workbuddy-strategy")
+    override_uid, override_strat = (
+        rotator.resolve_header_overrides(model_name, req_account, req_strategy)
+        if rotator
+        else (None, None)
+    )
+    uid, headers = (
+        rotator.select_account(model_name, override_uid=override_uid, override_mode=override_strat)
+        if rotator
+        else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    )
+    active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
@@ -3468,7 +3613,7 @@ async def anthropic_messages(
         return StreamingResponse(
             _anthropic_stream_gen(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **active_hdr},
         )
 
     # 非流式
@@ -3551,10 +3696,12 @@ async def anthropic_messages(
                   fallback_reason=fallback_reason,
                   snapshot_resp=_snapshot_excerpt(collected))
 
+    if uid:
+        _clear_account_cooldown(uid, model_name)
     anthropic_resp = translate_openai_response_to_anthropic(collected)
     if "model" in raw_body:
         anthropic_resp["model"] = raw_body["model"]
-    resp_headers = {}
+    resp_headers = dict(active_hdr)
     if actual_model != model_name:
         resp_headers["X-Actual-Model"] = actual_model
         resp_headers["X-Requested-Model"] = model_name
@@ -3631,7 +3778,19 @@ async def openai_responses(
     _log(f"[{rid}] ▶ RESPONSES /v1/responses {model_name} | stream={client_wants_stream}")
 
     rotator = _get_rotator()
-    uid, headers = rotator.select_account(model_name) if rotator else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    req_account = request.headers.get("x-workbuddy-account")
+    req_strategy = request.headers.get("x-workbuddy-strategy")
+    override_uid, override_strat = (
+        rotator.resolve_header_overrides(model_name, req_account, req_strategy)
+        if rotator
+        else (None, None)
+    )
+    uid, headers = (
+        rotator.select_account(model_name, override_uid=override_uid, override_mode=override_strat)
+        if rotator
+        else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    )
+    active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
 
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
@@ -3693,7 +3852,7 @@ async def openai_responses(
                 if pacer_ctx:
                     await pacer_ctx.__aexit__(None, None, None)
 
-        return StreamingResponse(_responses_stream_generator(), media_type="text/event-stream")
+        return StreamingResponse(_responses_stream_generator(), media_type="text/event-stream", headers=active_hdr)
 
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
     max_attempts = retry_budget + 1
@@ -3754,11 +3913,13 @@ async def openai_responses(
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     if collected is not None:
         _mark_model_available(body["model"], uid=uid)
+    if uid:
+        _clear_account_cooldown(uid, model_name)
     _u = collected.get("usage") or {}
     _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
 
     responses_obj = chat_response_to_responses(collected, model=model_name)
-    return JSONResponse(content=responses_obj)
+    return JSONResponse(content=responses_obj, headers=active_hdr or None)
 
 
 def _last_user_text(messages: list) -> str:
@@ -4778,6 +4939,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         # 流正常处理结束输出
         if err_msg is None and curr_uid:
             _mark_model_available(body.get("model", model_name), uid=curr_uid)
+            _clear_account_cooldown(curr_uid, model_name)
         elapsed = time.time() - t0 if t0 else 0
         tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
         req_m = requested_model or model_name
@@ -4815,6 +4977,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                            fallback_reason=fallback_reason)
         raise
     finally:
+        if curr_uid:
+            _release_probe(curr_uid, model_name)
         # 最终安全网：若仍有其他未记录退出的分支，兜底补记一次
         if not usage_recorded:
             req_m = requested_model or model_name
