@@ -12,6 +12,7 @@ export const state = {
   healthTimer: null, // 健康轮询句柄（main.js 持有，窗口隐藏时停表）
   oauthTimer: null,
   accountsList: [],
+  apiKey: '', // 当前生效的 API Key（空串表示未启用鉴权，前端示例回退为 local）
   models: [
     { id: 'glm-5.3-flash', target: 'glm-5.3-flash', ctx: '1,048,576 (1M)', tags: ['双端'] },
     { id: 'glm-5.3', target: 'glm-5.3', ctx: '1,048,576 (1M)', tags: ['双端'] },

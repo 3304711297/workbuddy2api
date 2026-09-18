@@ -112,6 +112,27 @@ export function initSettings() {
     }
   };
 
+  // 动态化前端示例密钥：当开启 API 认证时，避免复制示例写死 local，绑定 apiKeyCache
+  const applyApiKeyToUi = (val) => {
+    const trimmed = (val || '').trim();
+    state.apiKey = trimmed;
+    const displayKey = trimmed || 'local';
+    const epKey = document.getElementById('endpoint-key');
+    if (epKey) epKey.value = displayKey;
+    const claudeEl = document.getElementById('code-claude');
+    if (claudeEl) {
+      let txt = String(claudeEl.textContent || '');
+      txt = txt.replace(/ANTHROPIC_API_KEY="[^"]*"/g, `ANTHROPIC_API_KEY="${displayKey}"`);
+      claudeEl.textContent = txt;
+    }
+    const pyEl = document.getElementById('code-python');
+    if (pyEl) {
+      let txt = String(pyEl.textContent || '');
+      txt = txt.replace(/api_key="[^"]*"/g, `api_key="${displayKey}"`);
+      pyEl.textContent = txt;
+    }
+  };
+
   // 端口 → 内存 state 与看板/侧边栏/端点联动展示
   const applyPortToUi = (val) => {
     state.port = val;
@@ -299,6 +320,7 @@ export function initSettings() {
     const key = genApiKey();
     if (inputApiKey) inputApiKey.value = key;
     apiKeyCache = key;
+    applyApiKeyToUi(key);
     if (await persistSettings({ api_key: key })) {
       showToast(state.running ? '已生成并保存新密钥，重启内核后生效' : '已生成并保存新密钥', 'success');
     }
@@ -321,6 +343,7 @@ export function initSettings() {
   document.getElementById('btn-clear-api-key')?.addEventListener('click', async () => {
     if (inputApiKey) inputApiKey.value = '';
     apiKeyCache = '';
+    applyApiKeyToUi('');
     // 显式声明空值：此前空输入会满足磁盘回灌条件把旧 key 读回来，清空永远不生效
     if (await persistSettings({ api_key: '' })) {
       showToast(
@@ -334,8 +357,10 @@ export function initSettings() {
 
   // 手动编辑：只更新缓存，由用户点击「保存设置」链路之外的交互触发（失焦/回车即保存）
   inputApiKey?.addEventListener('change', async () => {
-    apiKeyCache = (inputApiKey.value || '').trim();
-    if (await persistSettings({ api_key: (inputApiKey.value || '').trim() })) {
+    const trimmed = (inputApiKey.value || '').trim();
+    apiKeyCache = trimmed;
+    applyApiKeyToUi(trimmed);
+    if (await persistSettings({ api_key: trimmed })) {
       showToast(state.running ? '密钥已保存，重启内核后生效' : '密钥已保存', 'success');
     }
   });
@@ -467,11 +492,12 @@ export function initSettings() {
           modelListModeCache = selectModelListMode.value;
           renderModelListModeNote(modelListModeCache);
         }
-        // 客户端鉴权密钥回读：null/undefined 都归一到空串
+        // 客户端鉴权密钥回读：null/undefined 都归一到空串，并同步到看板示例
         if (inputApiKey) {
           apiKeyCache = typeof cfg.api_key === 'string' ? cfg.api_key : '';
           inputApiKey.value = apiKeyCache;
         }
+        applyApiKeyToUi(typeof cfg.api_key === 'string' ? cfg.api_key : '');
         // 日志级别 / 正文落盘回读：非法值归一到默认
         if (selectLogLevel) {
           const lv = ['info', 'debug', 'trace'].includes(cfg.log_level) ? cfg.log_level : 'info';

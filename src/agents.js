@@ -62,9 +62,17 @@ export async function loadAgentsStatus() {
   }
 }
 
+function getEffectiveApiKey() {
+  return (state.apiKey || '').trim() || 'local';
+}
+
 function renderHermesGuide(guide) {
   const wrap = document.getElementById('hermes-guide');
   if (!wrap) return;
+  const effectiveKey = getEffectiveApiKey();
+  // 动态化密钥：Rust 端 guide 固定返回 local，前端若已配置真实密钥则覆盖展示
+  const displayApiKey = guide.target_api_key === 'local' || !guide.target_api_key ? effectiveKey : guide.target_api_key;
+  const yamlSnippet = (guide.yaml_snippet || '').replace(/api_key:\s*['"]?local['"]?/gi, `api_key: '${effectiveKey}'`).replace(/"local"/g, effectiveKey === 'local' ? '"local"' : `"${effectiveKey}"`);
   const field = (label, value) => `
     <div class="zguide-field">
       <span class="zguide-label">${esc(label)}</span>
@@ -74,11 +82,11 @@ function renderHermesGuide(guide) {
     <div class="zcode-guide-panel">
       ${field('配置文件路径', guide.config_path)}
       ${field('目标 Base URL', guide.target_base_url)}
-      ${field('目标 API Key', guide.target_api_key)}
+      ${field('目标 API Key', displayApiKey)}
       ${field('目标模型（default）', guide.target_model)}
       <div class="zguide-field">
         <span class="zguide-label">YAML 配置片段（点击复制）</span>
-        <pre class="zguide-value" data-copy="${esc(guide.yaml_snippet)}" title="点击复制 YAML 片段" style="white-space: pre-wrap; font-size: 11.5px; margin: 0;">${esc(guide.yaml_snippet)}</pre>
+        <pre class="zguide-value" data-copy="${esc(yamlSnippet)}" title="点击复制 YAML 片段" style="white-space: pre-wrap; font-size: 11.5px; margin: 0;">${esc(yamlSnippet)}</pre>
       </div>
       <ol class="zguide-steps">${guide.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
     </div>`;
@@ -88,6 +96,8 @@ function renderHermesGuide(guide) {
 function renderZcodeGuide(guide) {
   const wrap = document.getElementById('zcode-guide');
   if (!wrap) return;
+  const effectiveKey = getEffectiveApiKey();
+  const displayApiKey = guide.api_key === 'local' || !guide.api_key ? effectiveKey : guide.api_key;
   const field = (label, value) => `
     <div class="zguide-field">
       <span class="zguide-label">${esc(label)}</span>
@@ -101,7 +111,7 @@ function renderZcodeGuide(guide) {
     <div class="zcode-guide-panel">
       ${field('Base URL（接口地址）', guide.base_url)}
       ${field('API 格式（下拉选择）', guide.api_format)}
-      ${field('API Key（密钥）', guide.api_key)}
+      ${field('API Key（密钥）', displayApiKey)}
       <div class="zguide-field">
         <span class="zguide-label">模型列表（点击芯片复制模型名）</span>
         <div class="zguide-chips">${allModels}${chips}</div>
@@ -115,8 +125,9 @@ function renderClaudeGuide(port) {
   const wrap = document.getElementById('claude-guide');
   if (!wrap) return;
   const baseUrl = `http://127.0.0.1:${port || 8787}`;
-  const bashCmd = `export ANTHROPIC_BASE_URL="${baseUrl}"\nexport ANTHROPIC_API_KEY="local"\nclaude --model deepseek-v4.1-flash`;
-  const psCmd = `$env:ANTHROPIC_BASE_URL="${baseUrl}"; $env:ANTHROPIC_API_KEY="local"; claude --model deepseek-v4.1-flash`;
+  const effectiveKey = getEffectiveApiKey();
+  const bashCmd = `export ANTHROPIC_BASE_URL="${baseUrl}"\nexport ANTHROPIC_API_KEY="${effectiveKey}"\nclaude --model deepseek-v4.1-flash`;
+  const psCmd = `$env:ANTHROPIC_BASE_URL="${baseUrl}"; $env:ANTHROPIC_API_KEY="${effectiveKey}"; claude --model deepseek-v4.1-flash`;
 
   const field = (label, value) => `
     <div class="zguide-field">
@@ -127,7 +138,7 @@ function renderClaudeGuide(port) {
   wrap.innerHTML = `
     <div class="zcode-guide-panel" style="margin-top: 10px;">
       ${field('Base URL（ANTHROPIC_BASE_URL）', baseUrl)}
-      ${field('API Key（ANTHROPIC_API_KEY）', 'local')}
+      ${field('API Key（ANTHROPIC_API_KEY）', effectiveKey)}
       ${field('原生端点路径', `${baseUrl}/v1/messages`)}
       ${field('推荐模型', 'deepseek-v4.1-flash')}
       <div class="zguide-field">
@@ -157,6 +168,7 @@ function renderCodexGuide(port) {
   const wrap = document.getElementById('codex-guide');
   if (!wrap) return;
   const baseUrl = `http://127.0.0.1:${port || 8787}/v1`;
+  const effectiveKey = getEffectiveApiKey();
   const tomlSnippet = [
     '# ~/.codex/config.toml',
     'model = "deepseek-v4.1-flash"',
@@ -167,8 +179,8 @@ function renderCodexGuide(port) {
     'env_key = "WORKBUDDY_API_KEY"',
     'wire_api = "responses"',
   ].join('\n');
-  const bashCmd = `export WORKBUDDY_API_KEY="local"\ncodex`;
-  const psCmd = `$env:WORKBUDDY_API_KEY="local"; codex`;
+  const bashCmd = `export WORKBUDDY_API_KEY="${effectiveKey}"\ncodex`;
+  const psCmd = `$env:WORKBUDDY_API_KEY="${effectiveKey}"; codex`;
 
   const field = (label, value) => `
     <div class="zguide-field">
@@ -180,7 +192,7 @@ function renderCodexGuide(port) {
     <div class="zcode-guide-panel" style="margin-top: 10px;">
       ${field('Responses 端点路径', `${baseUrl}/responses`)}
       ${field('API Key 环境变量名', 'WORKBUDDY_API_KEY')}
-      ${field('API Key 值（本地固定）', 'local')}
+      ${field('API Key 值', effectiveKey)}
       ${field('推荐模型', 'deepseek-v4.1-flash')}
       <div class="zguide-field">
         <div class="snippet-tab-header">

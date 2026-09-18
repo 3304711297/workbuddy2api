@@ -19,6 +19,10 @@ Thumbs.db
 # 内核运行态数据（本地跑 --usage-log / --snapshots-log 会落在仓库根；默认写 %LOCALAPPDATA%，此处防误入）
 usage.jsonl
 snapshots.jsonl
+# 拆分后的用量日志目录（usage/usage_*.jsonl + snapshots.jsonl）及本地滚动日志
+usage/
+usage/*.jsonl
+usage/*.log
 # SQLite 库与 WAL/SHM 边车文件（同名成对生成，只忽略 *.db 会漏掉 -wal / -shm）
 *.db
 *.db-wal
@@ -31,6 +35,16 @@ snapshots.jsonl
 *.token
 *.key
 secrets.*
+# WorkBuddy2API 本地运行时配置与凭据（防 token 泄漏，绝不入库）
+accounts.json
+settings.json
+model_settings.json
+model_availability.json
+window.json
+update-check.json
+# 旧版兼容目录（曾用名 codebuddy2openai）
+codebuddy2openai/
+codebuddy2openai.json
 # 环境变量文件（常含 API Key / 端点覆盖），保留 .env.example 模板可提交
 .env
 .env.*

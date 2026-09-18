@@ -96,10 +96,16 @@ function renderRateLimitCard(rl, activeModel, currentUid = null) {
   const fallbacks = rl.fallbacks && typeof rl.fallbacks === 'object' ? Object.entries(rl.fallbacks) : [];
   const fallbackRows = fallbacks.map(([requested, ev]) => {
     const isCurrent = requested === activeModel;
-    const detail = `${esc(ev.actual || '—')} · 原因 ${esc(ev.reason || 'unknown')} · ${ev.count || 0} 次 · ${esc(ev.lastLocal || '—')}`;
-    return `<div class="pkg-item" title="请求 ${esc(requested)} 被上游拒绝后静默降级为 ${esc(ev.actual || '—')}">
+    // P2-9 闭环：ev 可能被端口冒充为非对象，count 必须 Number 归一化后插值
+    const safeEv = ev && typeof ev === 'object' ? ev : {};
+    const count = Number(safeEv.count) || 0;
+    const actual = safeEv.actual || '—';
+    const reason = safeEv.reason || 'unknown';
+    const lastLocal = safeEv.lastLocal || '—';
+    const detail = `${esc(actual)} · 原因 ${esc(reason)} · ${count} 次 · ${esc(lastLocal)}`;
+    return `<div class="pkg-item" title="请求 ${esc(requested)} 被上游拒绝后静默降级为 ${esc(actual)}">
       <span style="color:var(--danger);">⚠️ 降级${isCurrent ? '（当前会话）' : ''}</span>
-      <span><span class="mono">${esc(requested)}</span> → <span class="mono">${esc(ev.actual || '—')}</span></span>
+      <span><span class="mono">${esc(requested)}</span> → <span class="mono">${esc(actual)}</span></span>
       <small class="muted mono">${detail}</small>
     </div>`;
   }).join('');

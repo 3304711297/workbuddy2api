@@ -1539,22 +1539,47 @@ _TOKEN_REFRESHER: Optional[Any] = None
 # 热路径共享连接池：按 (timeout, client 类) 复用，避免逐请求建池重复 TLS 握手。
 # key 带上 httpx.AsyncClient 类对象——测试 monkeypatch 换类后自动隔离，
 # fake 实例不会泄漏到其他用例；生产环境类对象恒定，即单例复用。
+# P1 优化：timeout=300 拆为分段超时，避免 connect 阶段被长读超时拖住。
+_SHARED_TIMEOUT_DEFAULT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
 _SHARED_CLIENTS: dict = {}
 _SHARED_CLIENTS_LOCK = threading.Lock()
 
 
-def _shared_client(timeout):
-    key = (timeout, httpx.AsyncClient)
+def _normalize_shared_timeout(timeout):
+    """将历史入参 300 / None / Timeout 统一归一为 httpx.Timeout 或 None。"""
+    if timeout is None:
+        return None
+    if isinstance(timeout, httpx.Timeout):
+        return timeout
+    if isinstance(timeout, (int, float)):
+        # 历史 5 处调用均为 timeout=300，现收敛为分段超时（connect 5s / read 60s / write 10s / pool 5s）
+        if timeout == 300 or timeout == 300.0:
+            return _SHARED_TIMEOUT_DEFAULT
+        return httpx.Timeout(connect=5.0, read=float(timeout), write=10.0, pool=5.0)
+    return _SHARED_TIMEOUT_DEFAULT
+
+
+def _timeout_key(t):
+    if t is None:
+        return (None,)
+    if isinstance(t, httpx.Timeout):
+        return (t.connect, t.read, t.write, t.pool)
+    return (str(t),)
+
+
+def _shared_client(timeout=_SHARED_TIMEOUT_DEFAULT):
+    norm = _normalize_shared_timeout(timeout)
+    key = (_timeout_key(norm), httpx.AsyncClient)
     with _SHARED_CLIENTS_LOCK:
         c = _SHARED_CLIENTS.get(key)
         if c is None or getattr(c, "is_closed", False):
-            c = httpx.AsyncClient(timeout=timeout)
+            c = httpx.AsyncClient(timeout=norm)
             _SHARED_CLIENTS[key] = c
         return c
 
 
 @asynccontextmanager
-async def _shared_client_ctx(timeout):
+async def _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT):
     """共享池的 async-with 包装：只为零缩进替换建池点，从不关闭共享实例。"""
     yield _shared_client(timeout)
 
@@ -3097,7 +3122,7 @@ async def chat_completions(request: Request,
     for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-                async with _shared_client_ctx(timeout=300) as c:
+                async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                     async with c.stream("POST", url, headers=headers, json=body) as r:
                         if r.status_code != 200:
                             raw = await r.aread()
@@ -3348,7 +3373,7 @@ async def anthropic_messages(
     for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-                async with _shared_client_ctx(timeout=300) as c:
+                async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                     async with c.stream("POST", url, headers=headers, json=body) as r:
                         if r.status_code != 200:
                             raw = await r.aread()
@@ -3575,7 +3600,7 @@ async def openai_responses(
     for attempt in range(max_attempts):
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
-                async with _shared_client_ctx(timeout=300) as c:
+                async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                     async with c.stream("POST", url, headers=headers, json=body) as r:
                         if r.status_code != 200:
                             raw = await r.aread()
@@ -3892,7 +3917,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
 
     for attempt in range(max_attempts):
         try:
-            async with _shared_client_ctx(timeout=300) as c:
+            async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                 async with c.stream("POST", url, headers=curr_headers, json=body) as r:
                     if r.status_code != 200:
                         raw = await r.aread()
@@ -4489,7 +4514,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     try:
         for attempt in range(max_attempts):
             try:
-                async with _shared_client_ctx(timeout=300) as c:
+                async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                     async with c.stream("POST", url, headers=curr_headers, json=body) as r:
                         if r.status_code != 200:
                             err = await r.aread()
