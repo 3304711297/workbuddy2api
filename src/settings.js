@@ -360,7 +360,7 @@ export function initSettings() {
     const trimmed = (inputApiKey.value || '').trim();
     apiKeyCache = trimmed;
     applyApiKeyToUi(trimmed);
-    if (await persistSettings({ api_key: trimmed })) {
+    if (await persistSettings({ api_key: (inputApiKey.value || '').trim() })) {
       showToast(state.running ? '密钥已保存，重启内核后生效' : '密钥已保存', 'success');
     }
   });
