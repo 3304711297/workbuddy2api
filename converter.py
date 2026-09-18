@@ -2269,11 +2269,18 @@ _RATE_LIMIT_RE = re.compile(
 def _is_account_cooldown(uid: str, model: str) -> bool:
     if not uid:
         return False
+    mono_now = time.monotonic()
     now_ms = time.time() * 1000
     with _RATE_LIMIT_LOCK:
         entry = _ACCOUNT_COOLDOWNS.get((uid, model))
         if not entry:
             return False
+        mono_until = entry.get("monotonic_until")
+        if mono_until is not None:
+            if mono_now >= mono_until:
+                _ACCOUNT_COOLDOWNS.pop((uid, model), None)
+                return False
+            return True
         if entry.get("resetAtMs", 0) <= now_ms:
             _ACCOUNT_COOLDOWNS.pop((uid, model), None)
             return False
@@ -2449,6 +2456,8 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
     if not _is_rate_limit_signal(status_code, err_text):
         return
     m = _RATE_LIMIT_RE.search(err_text or "")
+    now_ms = int(time.time() * 1000)
+    mono_now = time.monotonic()
     if m:
         try:
             reset_ms = int(
@@ -2458,16 +2467,17 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
                 * 1000
             )
             reset_local = m.group(1)[11:]
+            delta_sec = max(5.0, min(3600.0, (reset_ms - now_ms) / 1000.0))
         except Exception:
-            jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
-            reset_ms = int((time.time() + jitter_sec) * 1000)
+            delta_sec = 300.0 + random.uniform(-45.0, 45.0)
+            reset_ms = int((time.time() + delta_sec) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
     else:
         # 外部架构审查采纳：未下发精确时刻时注入 ±45s 去相关随机抖动（255s~345s），杜绝多协程在同一毫秒二次惊群
-        jitter_sec = 300.0 + random.uniform(-45.0, 45.0)
-        reset_ms = int((time.time() + jitter_sec) * 1000)
+        delta_sec = 300.0 + random.uniform(-45.0, 45.0)
+        reset_ms = int((time.time() + delta_sec) * 1000)
         reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
-    now_ms = int(time.time() * 1000)
+    monotonic_until = mono_now + delta_sec
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)
         if prev is None and len(_RATE_LIMIT_STATE) >= _RATE_LIMIT_CAP:
@@ -2492,6 +2502,7 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             "message": (err_text or "")[:300],
             "resetAtMs": reset_ms,
             "resetLocal": reset_local,
+            "monotonic_until": monotonic_until,
             "firstSeenMs": prev["firstSeenMs"] if prev and prev.get("resetAtMs") == reset_ms else now_ms,
             "lastSeenMs": now_ms,
             "uid": curr_uid or "",
@@ -2577,6 +2588,9 @@ def _get_cooldown_reset_ms(uid: str, model: str) -> float:
     with _RATE_LIMIT_LOCK:
         entry = _ACCOUNT_COOLDOWNS.get((uid, model))
         if entry:
+            mono_until = entry.get("monotonic_until")
+            if mono_until is not None:
+                return float(mono_until)
             return float(entry.get("resetAtMs", 0.0))
     return 0.0
 
@@ -2773,14 +2787,12 @@ class AccountRotator:
 
             active_uid = getattr(self.cred_mgr, "get_active_uid", lambda: "")()
 
-            # 1. 请求级账号覆盖（优先且直接命中）
+            # 1. 请求级账号覆盖（优先且直接命中，严禁调用 switch_active_account 污染全局）
             if override_uid:
                 all_accs = self.get_all_accounts()
                 if any(u == override_uid for u, _ in all_accs):
-                    if hasattr(self.cred_mgr, "switch_active_account") and override_uid != active_uid:
-                        self.cred_mgr.switch_active_account(override_uid)
                     headers = self.cred_mgr.get_headers_for_uid(override_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
-                    _log(f"🎯 [请求级路由] 依 Header 强制指定账号 UID: {override_uid[:8]}...")
+                    _log(f"🎯 [请求级路由] 依 Header 强制指定账号 UID: {override_uid[:8]}... (零全局副作用)")
                     return override_uid, headers
 
             effective_mode = (override_mode or self.mode or "off").lower()
@@ -3458,7 +3470,7 @@ async def chat_completions(request: Request,
                   requested_model=model_name,
                   fallback_reason=fallback_reason,
                   snapshot_resp=_snapshot_excerpt(collected))
-    resp_headers = dict(active_hdr)
+    resp_headers = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     if actual_model != model_name:
         resp_headers["X-Actual-Model"] = actual_model
         resp_headers["X-Requested-Model"] = model_name
@@ -3734,7 +3746,7 @@ async def anthropic_messages(
     anthropic_resp = translate_openai_response_to_anthropic(collected)
     if "model" in raw_body:
         anthropic_resp["model"] = raw_body["model"]
-    resp_headers = dict(active_hdr)
+    resp_headers = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     if actual_model != model_name:
         resp_headers["X-Actual-Model"] = actual_model
         resp_headers["X-Requested-Model"] = model_name
@@ -3963,7 +3975,8 @@ async def openai_responses(
     _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
 
     responses_obj = chat_response_to_responses(collected, model=model_name)
-    return JSONResponse(content=responses_obj, headers=active_hdr or None)
+    final_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else None
+    return JSONResponse(content=responses_obj, headers=final_hdr)
 
 
 def _last_user_text(messages: list) -> str:

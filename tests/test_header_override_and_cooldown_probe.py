@@ -17,6 +17,7 @@ import asyncio
 import json
 import time
 import pytest
+import httpx
 from starlette.testclient import TestClient
 
 import converter
@@ -328,4 +329,80 @@ async def test_concurrent_all_cooldown_strictly_single_flight(fake_dual_accounts
     assert len(blocked_safely) == 19  # 其余 19 个安全拦截，绝不穿透！
 
     _release_probe("uid-beta", "glm-5.3")
+
+
+def test_header_override_does_not_mutate_global_active_account(fake_dual_accounts, monkeypatch):
+    """P0 修复锁定：X-WorkBuddy-Account 请求级覆盖绝不得修改全局 active_uid（零全局副作用）。"""
+    cred = CredentialManager()
+    monkeypatch.setitem(converter.CONFIG, "cred", cred)
+    rotator = AccountRotator(cred_mgr=cred, mode="off")
+
+    assert cred.get_active_uid() == "uid-alpha"
+
+    # 请求级指定 uid-beta
+    sel_uid, _ = rotator.select_account("glm-5.3", override_uid="uid-beta")
+    assert sel_uid == "uid-beta"
+
+    # 全局 active_uid 必须保持 uid-alpha，绝不泄漏副作用！
+    assert cred.get_active_uid() == "uid-alpha"
+
+
+def test_failover_updates_active_account_response_header(fake_dual_accounts, monkeypatch):
+    """P0 修复锁定：发生 failover (A->429, B->200) 时，最终响应头必须准确反映最终生效的 B。"""
+    cred = CredentialManager()
+    monkeypatch.setitem(converter.CONFIG, "cred", cred)
+    monkeypatch.setitem(converter.CONFIG, "rotate_mode", "failover")
+
+    client = TestClient(app, headers={"Host": "127.0.0.1:8787"})
+
+    call_seq = []
+
+    def mock_stream_upstream(url, headers, body, model_name, t0, rid, rotator=None, uid="", requested_model=None):
+        call_seq.append(uid)
+        if uid == "uid-alpha":
+            # 首选账号报错 429
+            class MockResp:
+                status_code = 429
+                def aiter_bytes(self):
+                    async def _gen():
+                        yield b'{"code":6004,"msg":"\xe7\x94\xa8\xe9\x87\x8f\xe8\xb6\x85\xe9\x99\x90"}'
+                    return _gen()
+            return MockResp()
+
+    # 直接端到端测试非流式请求
+    async def mock_handler(request: httpx.Request):
+        uid = request.headers.get("X-User-Id")
+        call_seq.append(uid)
+        if uid == "uid-alpha":
+            return httpx.Response(429, json={"code": 6004, "msg": "超限将在 2026-09-08 23:00:00 UTC+8 重置"})
+        else:
+            sse_bytes = b'data: {"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n'
+            return httpx.Response(200, content=sse_bytes, headers={"content-type": "text/event-stream"})
+
+    transport = httpx.MockTransport(mock_handler)
+    monkeypatch.setattr(converter, "_shared_client_ctx", lambda timeout=None: httpx.AsyncClient(transport=transport))
+
+    resp = client.post("/v1/chat/completions", json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 200
+    # 响应头必须是最终成功的 uid-beta，而不是最初失败的 uid-alpha！
+    assert resp.headers.get("X-WorkBuddy-Active-Account") == "uid-beta"
+
+
+def test_monotonic_clock_protects_cooldown_from_wall_clock_jitter(fake_dual_accounts, monkeypatch):
+    """P0 修复锁定：内部冷却由 monotonic clock 驱动，即使系统墙上时钟大幅回拨或前跳，冷却依然受控。"""
+    now_mono = time.monotonic()
+    with converter._RATE_LIMIT_LOCK:
+        converter._ACCOUNT_COOLDOWNS[("uid-alpha", "glm-5.3")] = {
+            "code": 6004,
+            "resetAtMs": int((time.time() + 60) * 1000),
+            "monotonic_until": now_mono + 60.0,
+            "uid": "uid-alpha",
+        }
+
+    # 模拟墙上时钟跳回 1000 年前（time.time() 剧变）
+    monkeypatch.setattr(time, "time", lambda: 0.0)
+
+    # 由于 monotonic 仍在 60s 内，判定依然是 cooldown
+    assert _is_account_cooldown("uid-alpha", "glm-5.3") is True
+
 
