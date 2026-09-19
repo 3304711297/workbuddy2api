@@ -14,6 +14,7 @@ ENV/
 
 # 本地运行产物 / 日志
 *.log
+*.lnk
 .DS_Store
 Thumbs.db
 # 内核运行态数据（本地跑 --usage-log / --snapshots-log 会落在仓库根；默认写 %LOCALAPPDATA%，此处防误入）
