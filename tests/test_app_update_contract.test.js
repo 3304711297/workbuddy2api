@@ -706,10 +706,12 @@ test('更新流程包含 handoff-ready 握手以保护主程序不闪退（Fail-
   assert.ok(/target_run_id/.test(updateRs), 'Rust update.rs 未对 run_id 进行校验绑定');
 });
 
-test('更新脚本包含并发互斥锁防多实例冲突', () => {
-  // P1 锁定：检查 lock.json 并在进程存活时拒绝并发运行
+test('更新脚本包含并发互斥锁防多实例冲突（原子抢锁与陈旧自愈）', () => {
+  // P1 锁定：使用 FileMode.CreateNew + FileShare.None 原子抢锁，禁止非原子的 check-then-write
   assert.ok(/lock\.json/.test(handoff), 'windows.ps1 缺少 lock.json 互斥锁');
-  assert.ok(/existingLock\.pid/.test(handoff), 'windows.ps1 缺少已有锁进程探活');
+  assert.ok(/CreateNew/.test(handoff), 'windows.ps1 缺少 FileMode::CreateNew 原子抢锁机制（存在并发竞态）');
+  assert.ok(/FileShare::None/.test(handoff), 'windows.ps1 缺少 FileShare::None 独占锁');
+  assert.ok(/existingLock\.pid/.test(handoff), 'windows.ps1 缺少已有锁进程探活与陈旧自愈');
   assert.ok(/Remove-Item[^\n]*lockPath/.test(handoff), 'finally 块缺少 lock.json 清理逻辑');
 });
 

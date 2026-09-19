@@ -74,28 +74,54 @@ if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDi
 $logDir = Split-Path -Parent $LogPath
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-# ── 进程互斥锁 (P1 防并发与孤儿冲突) ──────────────────────────────────────────
+# ── 进程互斥锁 (P1 原子抢锁与陈旧自愈，Fail-Closed) ─────────────────────────
 $lockPath = Join-Path $updateDir 'lock.json'
-if (Test-Path -LiteralPath $lockPath) {
+$script:AcquiredLock = $false
+
+for ($attempt = 0; $attempt -lt 2; $attempt++) {
     try {
-        $existingLock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($existingLock -and $existingLock.pid) {
-            $existingProc = Get-Process -Id $existingLock.pid -ErrorAction SilentlyContinue
-            if ($existingProc -and -not $existingProc.HasExited) {
-                Write-Log "检测到已有正在执行的更新进程（PID $($existingLock.pid)），拒绝并发执行" 'WARN'
-                exit 2
+        # 原子创建文件：FileMode::CreateNew + FileAccess::Write + FileShare::None
+        # 若文件已存在，Windows 内核抛出 IOException，彻底规避 check-then-write 并发竞态
+        $fs = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $sw = [System.IO.StreamWriter]::new($fs, (New-Object System.Text.UTF8Encoding $false))
+        $lockPayload = @{
+            run_id     = $RunId
+            pid        = $PID
+            started_at = [int64]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds
+        } | ConvertTo-Json -Compress
+        $sw.Write($lockPayload)
+        $sw.Flush()
+        $sw.Dispose()
+        $fs.Dispose()
+        $script:AcquiredLock = $true
+        break
+    } catch [System.IO.IOException] {
+        # 文件已存在：读取并检查持有锁的 PID 状态
+        try {
+            $existingLock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+            if ($existingLock -and $existingLock.pid) {
+                $existingProc = Get-Process -Id $existingLock.pid -ErrorAction SilentlyContinue
+                if ($existingProc -and -not $existingProc.HasExited) {
+                    Write-Log "检测到已有正在执行的更新进程（PID $($existingLock.pid)，RunId $($existingLock.run_id)），拒绝并发执行" 'WARN'
+                    exit 2
+                }
             }
+            # PID 不存在或已退出：说明是陈旧孤儿锁，清理后重试一次原子创建
+            Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Log "无法读取现有更新锁（安全中止更新防并发冲突）：$_" 'WARN'
+            exit 2
         }
-    } catch { }
+    } catch {
+        Write-Log "创建更新互斥锁失败（Fail-Closed 拒绝执行）：$_" 'ERROR'
+        exit 2
+    }
 }
-try {
-    $lockPayload = @{
-        run_id     = $RunId
-        pid        = $PID
-        started_at = [int64]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds
-    } | ConvertTo-Json -Compress
-    [System.IO.File]::WriteAllText($lockPath, $lockPayload, (New-Object System.Text.UTF8Encoding $false))
-} catch { }
+
+if (-not $script:AcquiredLock) {
+    Write-Log '未能成功获取更新互斥锁，中止更新' 'ERROR'
+    exit 2
+}
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -883,9 +909,9 @@ catch {
     exit 1
 }
 finally {
-    # 清理 updater 互斥锁（仅清理属于本进程的锁）
+    # 清理 updater 互斥锁（仅清理属于本进程成功获取的锁）
     try {
-        if ($lockPath -and (Test-Path -LiteralPath $lockPath)) {
+        if ($script:AcquiredLock -and $lockPath -and (Test-Path -LiteralPath $lockPath)) {
             $currentLock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($currentLock -and $currentLock.pid -eq $PID) {
                 Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
