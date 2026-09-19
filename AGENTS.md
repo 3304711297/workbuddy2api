@@ -599,6 +599,17 @@ workbuddy2api.exe (GUI)
   `proxy_start` 在**非回环 + 密钥为空**时必须 `return Err` 拒绝启动并给出可操作提示——内核也会 exit 1，但用户看到的是「内核启动后立刻退出」而无从判断原因。刻意**不**提供 `--unsafe-expose` 放行开关：GUI 不应鼓励无鉴权暴露。
   `lan_ipv4` 用 UDP `connect` 查路由表选出默认出口网卡（不发包、不依赖外网连通性），失败返回 `None` 由前端降级；不要改用需要联网请求的方案。
   前端开关在无密钥时须拦截并引导先生成密钥（与内核判定一致），`buildSettingsPayload` 必须带上 `listen_host`。
+- **浏览器跨站防御（Host + Origin 双校验，仅回环绑定时生效）**：
+  `LocalHostOnlyMiddleware` 校验 Host 头（防 DNS rebinding）；`OriginGuardMiddleware`（**最外层**，先于 body 缓冲）校验 Origin 头，
+  防恶意外网页面向 `127.0.0.1:<port>` 发起的跨站「简单请求」——`POST + text/plain` 不触发 CORS 预检，网页读不到响应，却能触发副作用（消耗额度、`/api/checkin/claim`）。
+  规则：**无 Origin 放行**（curl / Codex CLI / Claude Code CLI / Hermes Agent 等原生客户端）；有 Origin 则仅放行回环页面
+  （`http(s)://localhost` / `127.0.0.0/8` / `[::1]`，任意端口）、Tauri WebView（`tauri://localhost`、`http(s)://tauri.localhost`）与 `chrome-extension://*`；
+  其余一律 403 `invalid_origin`，**含字面量 `null`**（沙箱 iframe / `file://` / `data:` 页面都会产生，攻击者可轻易构造）。
+  额外来源用 `WORKBUDDY2API_ALLOWED_ORIGINS`（逗号分隔、精确匹配、无通配符；旧名 `CODEBUDDY2OPENAI_ALLOWED_ORIGINS`）——
+  Electron 的 `file://` 页面会发 `null`，需显式列出。
+  **改动必读**：① 只比对 `urlsplit` 解析出的 scheme + 主机名，**严禁**改成 `startswith("http://localhost")`（会放行 `localhost.evil.com` / `localhost@evil.com`）；
+  ② 网关**不返回任何 CORS 头**——放行 ≠ 浏览器 JS 能读到响应；需要浏览器直连的 Web UI 属另一个功能，不要为此放宽本校验；
+  ③ 局限：浏览器发起的「无 Origin」跨站 GET（如 `<img src>`）不在防线内，因此所有 GET 端点必须保持只读。契约锁定：`tests/test_origin_guard.py`。
 - **凭证轮换（P1，**已交付** 2026-09-11，见上方「多账号调度」条目）**：
   多账号就位后按既定要点实施完毕（`AccountRotator` + GUI 策略卡）。
   token 续期由 `converter.py` 的 `_refresh()` 被动处理（`expiresIn` 60 天 /

@@ -40,6 +40,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -1689,6 +1690,121 @@ class LocalHostOnlyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# ---------------------------------------------------------------------------
+# Origin 校验（防浏览器跨站请求）
+# ---------------------------------------------------------------------------
+# 威胁模型：用户浏览器里打开的任意外网网页，都能向 http://127.0.0.1:<port> 发起跨域请求。
+#   - application/json / 自定义头的请求会先触发 CORS 预检；本网关不返回任何 CORS 头，预检必败；
+#   - 但「简单请求」（POST + text/plain 或表单类型）不预检、会直达服务端：页面读不到响应，
+#     却能触发副作用（消耗额度的 /v1/* 调用、POST /api/checkin/claim 等）。
+# Host 校验防不住这一类——由恶意页面直接发起时 Host 本来就是 127.0.0.1（那是防 DNS rebinding 的）。
+# 浏览器对所有跨域 POST 都会带 Origin 头，且页面脚本无法伪造或删除它，故按 Origin 拦截是可靠的。
+#
+# 规则（仅在绑定回环地址时生效，与 LocalHostOnlyMiddleware 一致；开放局域网时已强制要求 API 密钥）：
+#   - 无 Origin 头 → 放行（curl / Codex CLI / Claude Code CLI / Hermes Agent 等原生客户端不发 Origin）；
+#   - 有 Origin 头 → 必须是本机回环页面 / 本机 WebView / 浏览器扩展，或被
+#     WORKBUDDY2API_ALLOWED_ORIGINS 显式放行；
+#   - 其余一律 403。字面量 "null"（沙箱 iframe / file:// / data: 页面都会产生，攻击者可轻易构造）
+#     默认同样拒绝。
+# 局限：浏览器发起的「无 Origin」跨站 GET（如 <img src>）不在此防线内；网关所有 GET 端点均为只读。
+
+# 非 http(s) 的可信来源：scheme → 允许的主机名（None 表示任意，如扩展 ID）
+_ORIGIN_SCHEME_HOSTS: dict = {
+    "tauri": frozenset({"localhost"}),  # Tauri WebView（macOS / Linux）：tauri://localhost
+    "chrome-extension": None,           # Chromium 扩展页面：chrome-extension://<扩展 ID>
+}
+# Tauri v2 在 Windows / Android 上的 WebView 来源是 http(s)://tauri.localhost
+_ORIGIN_TAURI_HOST = "tauri.localhost"
+# 合法 Origin 只含可见 ASCII（IDN 走 punycode）：空值 / 超长 / 含空白或控制字符一律视为畸形
+_ORIGIN_SAFE_RE = re.compile(r"[\x21-\x7e]{1,2048}")
+
+
+def _extra_allowed_origins() -> frozenset:
+    """WORKBUDDY2API_ALLOWED_ORIGINS：逗号分隔的额外放行来源（精确匹配，不支持通配符）。
+
+    用于 Electron（file:// 页面会发 "null"）、局域网自建 Web UI 等默认规则之外的合法浏览器客户端。
+    字面量 "null" 需在此显式列出才会放行——这等于信任所有沙箱 iframe，风险自担。
+    兼容旧名 CODEBUDDY2OPENAI_ALLOWED_ORIGINS。
+    """
+    raw = _env_compat("ALLOWED_ORIGINS", "")
+    return frozenset(item.strip().lower().rstrip("/") for item in raw.split(",") if item.strip())
+
+
+def _is_allowed_origin(origin: str) -> bool:
+    """判定 Origin 头是否可信。纯函数：只看 scheme 与解析出的主机名，绝不做字符串前缀匹配
+    （否则 http://localhost.evil.com、http://localhost@evil.com 会被放行）。"""
+    origin = (origin or "").strip()
+    if not _ORIGIN_SAFE_RE.fullmatch(origin):
+        return False
+    if origin.lower().rstrip("/") in _extra_allowed_origins():
+        return True
+    try:
+        parts = urlsplit(origin)
+        _ = parts.port  # 端口非法（:abc、:99999）时抛 ValueError
+    except ValueError:
+        return False
+    host = parts.hostname or ""
+    scheme = parts.scheme.lower()
+    if not scheme or not host or "@" in parts.netloc:
+        return False  # 无 scheme / 无主机 / 带 userinfo（浏览器绝不会这样发）
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return False  # 浏览器发出的 Origin 只有 scheme://host[:port]
+    if scheme in ("http", "https"):
+        return _is_loopback_host(host) or host == _ORIGIN_TAURI_HOST
+    if scheme in _ORIGIN_SCHEME_HOSTS:
+        allowed = _ORIGIN_SCHEME_HOSTS[scheme]
+        return allowed is None or host in allowed
+    return False
+
+
+async def _send_403_origin(send, origin: str) -> None:
+    """下发 403（错误体形状与 Host 校验的 invalid_host 一致；回显的 Origin 已截断并转义）。"""
+    shown = origin if len(origin) <= 100 else origin[:100] + "..."
+    payload = {
+        "error": {
+            "message": f"forbidden origin: {shown}",
+            "type": "invalid_origin",
+            "hint": "cross-site browser requests are blocked; "
+                    "list trusted origins in WORKBUDDY2API_ALLOWED_ORIGINS (comma-separated)",
+        }
+    }
+    body = json.dumps(payload).encode("utf-8")  # ensure_ascii 默认开启：回显内容一律转义
+    await send({
+        "type": "http.response.start",
+        "status": 403,
+        "headers": [
+            (b"content-type", b"application/json; charset=utf-8"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+class OriginGuardMiddleware:
+    """拒绝来自不可信站点的浏览器跨域请求（规则与威胁模型见上方注释）。
+
+    纯 ASGI 实现（而非 BaseHTTPMiddleware）：不包装响应流，不影响 SSE 流式透传。
+    注册为最外层，跨站请求在 RequestBodyLimitMiddleware 缓冲 body 之前就被拒绝。
+    仅处理 http scope；lifespan 等其它 scope 原样透传。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not _is_loopback_host(CONFIG.get("host", "127.0.0.1")):
+            return await self.app(scope, receive, send)
+        # 逐个检查所有 Origin 头：任一不可信即拒绝（浏览器只会发一个，多值必为非浏览器构造）
+        for key, value in (scope.get("headers") or []):
+            if key == b"origin":
+                origin = value.decode("latin-1")
+                if not _is_allowed_origin(origin):
+                    _log(f"拒绝跨站请求: {scope.get('method')} {scope.get('path')} "
+                         f"Origin={origin[:100]!r}")
+                    return await _send_403_origin(send, origin)
+        return await self.app(scope, receive, send)
+
+
 _BODY_LIMIT_PATHS = frozenset({"/v1/chat/completions", "/v1/messages", "/v1/responses"})
 
 
@@ -1785,6 +1901,8 @@ class RequestBodyLimitMiddleware:
 
 app.add_middleware(LocalHostOnlyMiddleware)
 app.add_middleware(RequestBodyLimitMiddleware)
+# 最后注册 = 最外层（Starlette 后注册者先执行）：跨站请求在读取 body 之前就被拒绝
+app.add_middleware(OriginGuardMiddleware)
 
 
 # ---------------------------------------------------------------------------
