@@ -639,5 +639,7 @@ workbuddy2api.exe (GUI)
      - 契约修正 D：放行单飞探针时保持全局 active_uid 稳定（不提前切换防惊群），并发请求自动避让回退；
      - 探针结束无论成功、失败、异常、取消，`finally` 块必须调用 `_release_probe` 释放锁；
      - 探针成功（2xx）自动调用 `_clear_account_cooldown` 触发账号自愈；
-     - 严格保持既有 `/api/rate_limit` 三态契约不变。契约锁定：`tests/test_header_override_and_cooldown_probe.py`（9 条单测）。
+     - 内部冷却判断优先由 `time.monotonic()` 驱动，免疫系统时间跳变；
+     - `DeferredHeaderStreamingResponse` 挂起首包确认，确保流式 failover 场景下响应头准确同步最终生效的 `X-WorkBuddy-Active-Account`；
+     - 严格保持既有 `/api/rate_limit` 三态契约不变。契约锁定：`tests/test_header_override_and_cooldown_probe.py`（16 条单测）。
 
