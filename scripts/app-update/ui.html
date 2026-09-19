@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WorkBuddy2API 更新程序</title>
+<style>
+  :root {
+    --background: #0f1218;
+    --card-bg: #161b22;
+    --foreground: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-glow: rgba(88, 166, 255, 0.2);
+    --success: #3fb950;
+    --warning: #d29922;
+    --danger: #f85149;
+    --border: rgba(255, 255, 255, 0.08);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --background: #f6f8fa;
+      --card-bg: #ffffff;
+      --foreground: #1f2328;
+      --muted: #656d76;
+      --accent: #0969da;
+      --accent-glow: rgba(9, 105, 218, 0.15);
+      --success: #1a7f37;
+      --warning: #9a6700;
+      --danger: #cf222e;
+      --border: rgba(0, 0, 0, 0.1);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    user-select: none;
+    cursor: default;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .container {
+    width: 100%;
+    max-width: 360px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 14px;
+    animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .icon-wrap {
+    width: 64px;
+    height: 64px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pulse-ring {
+    position: absolute;
+    inset: -6px;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    opacity: 0;
+    animation: ringPulse 2s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+  }
+  @keyframes ringPulse {
+    0% { transform: scale(0.85); opacity: 0.8; }
+    50% { transform: scale(1.15); opacity: 0; }
+    100% { transform: scale(1.2); opacity: 0; }
+  }
+  .spinner {
+    width: 48px;
+    height: 48px;
+    border: 3px solid rgba(88, 166, 255, 0.15);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .status-glyph {
+    display: none;
+    font-size: 38px;
+    line-height: 1;
+  }
+  body.done .spinner, body.done .pulse-ring { display: none; }
+  body.done .status-glyph.glyph-done { display: block; color: var(--success); }
+  body.rolled-back .spinner, body.rolled-back .pulse-ring { display: none; }
+  body.rolled-back .status-glyph.glyph-warning { display: block; color: var(--warning); }
+  body.failed .spinner, body.failed .pulse-ring { display: none; }
+  body.failed .status-glyph.glyph-error { display: block; color: var(--danger); }
+
+  h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  p.sub {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--muted);
+    word-break: break-word;
+  }
+  .elapsed-tag {
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    color: var(--muted);
+    opacity: 0.85;
+  }
+  .detail-box {
+    display: none;
+    max-height: 72px;
+    overflow-y: auto;
+    width: 100%;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    color: var(--muted);
+    text-align: left;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  body.rolled-back .detail-box,
+  body.failed .detail-box {
+    display: block;
+  }
+  .actions {
+    display: none;
+    margin-top: 4px;
+    width: 100%;
+  }
+  body.rolled-back .actions,
+  body.failed .actions {
+    display: flex;
+    justify-content: center;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 7px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--foreground);
+    transition: all 0.15s ease;
+  }
+  .btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+</style>
+</head>
+<body class="running">
+  <div class="container">
+    <div class="icon-wrap">
+      <div class="pulse-ring"></div>
+      <div class="spinner"></div>
+      <div class="status-glyph glyph-done">✓</div>
+      <div class="status-glyph glyph-warning">!</div>
+      <div class="status-glyph glyph-error">✕</div>
+    </div>
+    <h2 id="title">正在更新 WorkBuddy2API</h2>
+    <p class="sub" id="message">更新已在进行中，稍候将自动重启应用…</p>
+    <div class="elapsed-tag" id="elapsed">0s</div>
+    <div class="detail-box" id="detail"></div>
+    <div class="actions" id="actions">
+      <button class="btn" id="btn-close" type="button">关闭窗口</button>
+    </div>
+  </div>
+
+<script>
+  let lastReceipt = null;
+  let pollTimer = null;
+
+  async function poll() {
+    try {
+      const res = await fetch('/progress', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data) return;
+
+      const titleEl = document.getElementById('title');
+      const msgEl = document.getElementById('message');
+      const elapsedEl = document.getElementById('elapsed');
+      const detailEl = document.getElementById('detail');
+
+      if (typeof data.elapsed_seconds === 'number') {
+        elapsedEl.textContent = data.elapsed_seconds + 's';
+      }
+
+      if (data.status === 'running') {
+        document.body.className = 'running';
+        titleEl.textContent = '正在更新 WorkBuddy2API';
+        if (data.message) msgEl.textContent = data.message;
+        if (data.detail) {
+          detailEl.textContent = data.detail;
+          detailEl.style.display = 'block';
+        }
+      } else if (data.status === 'done') {
+        document.body.className = 'done';
+        titleEl.textContent = '更新完成';
+        msgEl.textContent = data.message || '已成功升级到最新版本，正在重启应用…';
+        elapsedEl.style.display = 'none';
+        if (data.receipt && data.receipt !== lastReceipt) {
+          lastReceipt = data.receipt;
+          fetch('/ack/' + encodeURIComponent(data.receipt), { method: 'POST' }).catch(() => {});
+        }
+        clearInterval(pollTimer);
+        setTimeout(() => { window.close(); }, 2000);
+      } else if (data.status === 'rolled-back') {
+        document.body.className = 'rolled-back';
+        titleEl.textContent = '更新未完成';
+        msgEl.textContent = data.message || '更新中途遇到问题，已安全恢复到更新前的版本。';
+        if (data.detail) {
+          detailEl.textContent = data.detail;
+          detailEl.style.display = 'block';
+        }
+        if (data.receipt && data.receipt !== lastReceipt) {
+          lastReceipt = data.receipt;
+          fetch('/ack/' + encodeURIComponent(data.receipt), { method: 'POST' }).catch(() => {});
+        }
+        clearInterval(pollTimer);
+      } else if (data.status === 'failed' || data.status === 'error') {
+        document.body.className = 'failed';
+        titleEl.textContent = '更新失败';
+        msgEl.textContent = data.message || '更新过程发生异常，请检查更新日志。';
+        if (data.detail) {
+          detailEl.textContent = data.detail;
+          detailEl.style.display = 'block';
+        }
+        if (data.receipt && data.receipt !== lastReceipt) {
+          lastReceipt = data.receipt;
+          fetch('/ack/' + encodeURIComponent(data.receipt), { method: 'POST' }).catch(() => {});
+        }
+        clearInterval(pollTimer);
+      }
+    } catch (e) {
+      // transient connection error while server starting/shutting down
+    }
+  }
+
+  document.getElementById('btn-close').addEventListener('click', () => {
+    window.close();
+  });
+
+  poll();
+  pollTimer = setInterval(poll, 500);
+</script>
+</body>
+</html>

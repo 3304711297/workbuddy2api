@@ -240,7 +240,7 @@ test('脚本必须写阶段状态文件供 GUI 轮询（不留黑屏）', () => 
   // 状态文件必须原子替换，否则 GUI 会读到半截 JSON
   assert.ok(/Move-Item/.test(handoff), '状态文件未做原子替换（GUI 可能读到半截 JSON）');
 
-  // 阶段名必须与前端 UPDATE_PHASES 及 index.html 步骤条三处完全一致
+  // 阶段名在脚本上报与前端阶段列表中必须覆盖
   const phases = [
     'preparing', 'fetching', 'merging', 'deps',
     'frontend', 'building', 'verifying', 'restarting',
@@ -249,13 +249,14 @@ test('脚本必须写阶段状态文件供 GUI 轮询（不留黑屏）', () => 
     assert.ok(new RegExp(`-Phase '${p}'`).test(handoff), `脚本未上报 ${p} 阶段`);
     assert.ok(
       new RegExp(`'${p}'`).test(updateJs),
-      `前端 UPDATE_PHASES 缺少 ${p}（步骤条会错位）`
-    );
-    assert.ok(
-      html.includes(`data-step="${p}"`),
-      `index.html 步骤条缺少 ${p}`
+      `前端 UPDATE_PHASES 缺少 ${p}`
     );
   }
+
+  // 前端弹窗必须包含 Hermes 原生 4-view 结构（检测状态、可用更新、交接中视图）
+  assert.ok(html.includes('id="update-status-view"'), 'index.html 缺少 #update-status-view');
+  assert.ok(html.includes('id="update-available-view"'), 'index.html 缺少 #update-available-view');
+  assert.ok(html.includes('id="update-applying-view"'), 'index.html 缺少 #update-applying-view');
 });
 
 test('失败分类必须在脚本、Rust 契约与前端提示三处对齐', () => {
@@ -637,24 +638,48 @@ test('更新脚本必须带 UTF-8 BOM（PS 5.1 无 BOM 按 GBK 读 → 解析即
   );
 });
 
-test('脚本必须内置可见进度窗（Hermes 同款体验，不得是后台黑箱）', () => {
+test('脚本必须内置可见进度窗（Hermes 同款体验，基于 ui.html Web 视窗，绝不弹 MessageBox）', () => {
   // 用户明确要求与 Hermes 更新逻辑一致：更新全程要有可见进度。
-  // GUI 必须退出（Windows 锁 exe），进度窗由脚本用 WinForms runspace 自绘。
+  // GUI 必须退出（Windows 锁 exe），外部微型 Web 视窗由脚本通过 loopback 提供并由 Chromium --app 展示。
   for (const fn of ['Start-ProgressWindow', 'Update-ProgressWindow', 'Stop-ProgressWindow']) {
     assert.ok(new RegExp(`function ${fn}`).test(handoff), `缺少进度窗函数 ${fn}`);
   }
-  // Write-State 必须联动刷新进度窗（否则窗体文字停在初始值）
+  assert.ok(/function Start-UiServer/.test(handoff), '缺少 Start-UiServer 函数');
+  assert.ok(/function Get-UiHtmlPath/.test(handoff), '缺少 Get-UiHtmlPath 函数');
+
+  // 必须存在对应模板文件
+  const uiHtmlPath = join(root, 'scripts', 'app-update', 'ui.html');
+  const uiHtml = readFileSync(uiHtmlPath, 'utf8');
+  assert.ok(uiHtml.includes('WorkBuddy2API'), 'ui.html 缺少 WorkBuddy2API 标识');
+
+  // Write-State 必须联动刷新进度窗
   const wsIdx = handoff.indexOf('function Write-State');
   const wsBody = handoff.slice(wsIdx, handoff.indexOf('function Throw-Failure'));
   assert.ok(
     /Update-ProgressWindow/.test(wsBody),
     'Write-State 未联动进度窗：每个阶段都必须实时可见'
   );
-  // 四个出口（成功/无更新/失败/GUI 超时）都必须关窗
+  // 出口（成功/无更新/失败/GUI 超时）都必须关窗或呈现终态
   const stops = [...handoff.matchAll(/Stop-ProgressWindow/g)].length;
   assert.ok(stops >= 4, `Stop-ProgressWindow 出口覆盖不足（${stops} 处，需 ≥4）`);
-  // 窗体必须置顶（GUI 已退出，窗口是唯一可见面）
-  assert.ok(/TopMost\s*=\s*\$true/.test(handoff), '进度窗未置顶');
+
+  // 严格禁止调用 MessageBox::Show（禁止弹原生 Windows 98 风格红叉弹窗）
+  const codeOnly = handoff
+    .split('\n')
+    .filter(l => !l.trimStart().startsWith('#'))
+    .join('\n');
+  assert.ok(
+    !/MessageBox::Show/.test(codeOnly),
+    '脚本可执行代码中调用了 MessageBox::Show：必须使用 ui.html Web 视窗优雅呈现'
+  );
+});
+
+test('更新流程包含 handoff-ready 握手以保护主程序不闪退', () => {
+  // 外部评审 P0 采纳：主窗口不能靠固定 sleep 盲目退出；
+  // 必须等待脚本上报 handoff-ready 信号后才 exit，超时则 Fail-Closed 保持主程序存活。
+  assert.ok(/handoff-ready/.test(handoff), '更新脚本未产生 handoff-ready 握手信号');
+  assert.ok(/handoff-ready/.test(updateRs), 'Rust update.rs 未检查 handoff-ready 信号');
+  assert.ok(/handoff-ready/.test(updateJs), '前端 update-check.js 未识别 handoff-ready 阶段');
 });
 
 test('回滚阶段必须严格检查外部命令退出码并受控拉起（防假回滚与拉起损坏产物）', () => {
@@ -701,5 +726,20 @@ test('回滚时 stash pop 必须在旧版重建完成之后（防本地未完成
   assert.ok(
     /if\s*\(\$rollbackRebuildOk\s*-and\s*\$stashed\)[\s\S]*?git stash pop/.test(handoff),
     '回滚中的 stash pop 必须置于重建成功（rollbackRebuildOk）的守卫内：构建失败绝不恢复 stash'
+  );
+});
+
+test('更新脚本读取当前提交不得在管道中直连 Select-Object（防 pwsh 管道提前终止置空 $LASTEXITCODE）', () => {
+  // 真实踩坑：PowerShell 7 (pwsh) 下，原生可执行程序输出若直接管道流向 Select-Object -First 1，
+  // 下游提取首行后提前断开管道，导致原生进程被非正常终止，PowerShell 将 $LASTEXITCODE 置空（$null）。
+  // 而 PowerShell 中 `$null -ne 0` 为 True，会导致「有效的 git 检出」被误判为 not-a-git-checkout 并报错回滚。
+  // 必须先由变量完整接收原生命令输出后再取首行。
+  const codeOnly = handoff
+    .split('\n')
+    .filter(line => !line.trimStart().startsWith('#'))
+    .join('\n');
+  assert.ok(
+    !/& git rev-parse[^\n]*\|\s*Select-Object/.test(codeOnly),
+    'git rev-parse 在管道中直连了 Select-Object：pwsh 下会导致 $LASTEXITCODE 置空并误报 not-a-git-checkout'
   );
 });

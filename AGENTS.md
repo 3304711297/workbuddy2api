@@ -68,6 +68,14 @@ npm run build && cd src-tauri && cargo tauri build --no-bundle
 非此现象主因）。正确 flag 是 `CREATE_NO_WINDOW(0x08000000) | CREATE_NEW_PROCESS_GROUP`：
 同样无窗口、不与父进程生命周期绑定，但 console 正常初始化。契约锁定：
 `tests/test_app_update_contract.test.js` 的 spawn flags 断言。
+⚠️ **更新脚本中原生命令（git）绝不能管道直连 `Select-Object -First 1`（「不是有效的 git 检出」最终根因）**：
+在 PowerShell 7（`pwsh`）下，原生可执行文件（如 `git rev-parse HEAD`）若直接通过管道流向
+`Select-Object -First 1`，下游提取首行后会提前关闭输入流以终止管道。这会导致 upstream 原生进程被
+非正常终止，PowerShell 因而将 `$LASTEXITCODE` 置空为 `$null`。而在 PowerShell 中，`$null -ne 0` 为 `$true`，
+导致 `if ($LASTEXITCODE -ne 0 -or -not $previousSha)` 恒成立，把完全正常的 git 检出误判为
+`not-a-git-checkout`（「无法读取当前提交，D:\... 不是有效的 git 检出」）并触发回滚与重建。
+正确写法：先由变量完整接收原生命令输出（`$headOutput = (& git rev-parse HEAD 2>&1)`），让进程正常退出并设置
+真实的 `$LASTEXITCODE`，随后再用 `Select-Object -First 1` 提取首行。契约锁定：`tests/test_app_update_contract.test.js`。
 
 **绝不跑裸 `cargo build --release`**：`custom-protocol` feature 只有 tauri CLI 会带上，
 plain cargo 会**静默产出无前端的空壳 exe**（15,572,992 字节 vs 正确约 15,663,616）

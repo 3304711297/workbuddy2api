@@ -267,33 +267,6 @@ const FAILURE_HINTS = {
 
 let updatePollTimer = null;
 
-/** 渲染阶段步骤条：已完成打勾、进行中高亮、失败标红。 */
-function renderSteps(phase, failed = false) {
-  const list = el('update-steps');
-  if (!list) return;
-  const idx = UPDATE_PHASES.indexOf(phase);
-  for (const li of list.querySelectorAll('li')) {
-    li.classList.remove('is-done', 'is-active', 'is-failed');
-    const step = li.dataset.step;
-    const stepIdx = UPDATE_PHASES.indexOf(step);
-    if (failed) {
-      // 失败时：失败点标红，之前的算完成，之后的保持待办
-      if (stepIdx === idx) li.classList.add('is-failed');
-      else if (idx >= 0 && stepIdx < idx) li.classList.add('is-done');
-      continue;
-    }
-    if (stepIdx < idx) li.classList.add('is-done');
-    else if (stepIdx === idx) li.classList.add('is-active');
-  }
-  // done 时全部打勾
-  if (phase === 'done') {
-    for (const li of list.querySelectorAll('li')) {
-      li.classList.remove('is-active', 'is-failed');
-      li.classList.add('is-done');
-    }
-  }
-}
-
 function setApplyingText(message) {
   const msgEl = el('update-applying-message');
   if (msgEl && message) msgEl.textContent = message;
@@ -313,25 +286,31 @@ function startUpdatePolling() {
       return;
     }
     if (!state || !state.phase) {
-      // 状态文件尚未出现（脚本刚启动）；此前若已见过状态又消失，说明脚本重启了
       if (seenAlive) startUpdatePolling();
       return;
     }
     seenAlive = true;
 
     const phase = state.phase;
+    if (phase === 'handoff-ready') {
+      setApplyingText('更新环境已就绪，主窗口即将关闭并由更新视窗接管…');
+      return;
+    }
+
     setApplyingText(state.message || '正在更新…');
 
     if (phase === 'failed') {
       stopUpdatePolling();
       const hint = FAILURE_HINTS[state.failure_kind] || FAILURE_HINTS.unknown;
-      renderSteps(state.failure_kind === 'startup-unhealthy' ? 'restarting' : phase, true);
       const titleEl = el('update-applying-title');
       if (titleEl) titleEl.textContent = '更新失败';
       const iconEl = el('update-applying-view')?.querySelector('.update-status-icon');
       if (iconEl) iconEl.classList.remove('spin');
       const logEl = el('update-applying-log');
-      if (logEl) logEl.textContent = [state.detail, hint].filter(Boolean).join('\n');
+      if (logEl) {
+        logEl.textContent = [state.detail, hint].filter(Boolean).join('\n');
+        logEl.hidden = false;
+      }
       // 失败后允许关闭，并提示可重试
       const close = el('update-close');
       if (close) close.hidden = false;
@@ -339,8 +318,6 @@ function startUpdatePolling() {
       if (hintEl) hintEl.textContent = '可关闭本窗口后重新检查更新。';
       return;
     }
-
-    renderSteps(phase, false);
 
     if (phase === 'done') {
       // 脚本会拉起新 GUI；本进程仍在时如实告知，用户可自行关闭
@@ -362,20 +339,25 @@ function stopUpdatePolling() {
 
 async function applyUpdate() {
   showView('applying');
-  renderSteps('preparing', false);
+  const titleEl = el('update-applying-title');
+  if (titleEl) titleEl.textContent = '正在准备更新';
+  setApplyingText('正在启动外部更新环境，主窗口即将退出…');
   const logEl = el('update-applying-log');
-  if (logEl) logEl.textContent = '';
+  if (logEl) {
+    logEl.textContent = '';
+    logEl.hidden = true;
+  }
   const hintEl = el('update-applying-hint');
   if (hintEl) hintEl.textContent = '更新期间请勿手动启动应用；更新完成后会自动重新打开。';
 
   try {
-    // 该命令启动分离的更新进程后会让 GUI 退出，因此 await 很可能拿不到返回值 ——
-    // 那是预期行为，不是失败。启动轮询以显示脚本写入的真实进度。
     const msg = await invokeTauri('apply_app_update');
-    if (logEl && msg) logEl.textContent = msg;
+    if (logEl && msg) {
+      logEl.textContent = msg;
+      logEl.hidden = false;
+    }
     startUpdatePolling();
   } catch (e) {
-    // 启动更新失败才是真失败：退回状态视图并给出可操作提示
     stopUpdatePolling();
     const detail = e?.message || String(e);
     renderStatus({
@@ -383,7 +365,7 @@ async function applyUpdate() {
       body: '无法启动更新程序，请确认工作区完整（含 scripts/app-update/windows.ps1）后重试。',
       detail,
       icon: '!',
-      action: { label: '重试', onClick: () => applyUpdate() },
+      action: { label: '重试', onClick: () => runCheck({ silent: false, force: true }) },
     });
     showToast(`更新启动失败: ${detail}`, 'error');
   }
@@ -467,12 +449,11 @@ async function resumeInFlightUpdate() {
     return;
   }
   if (!state?.phase) return;
-  if (!['preparing', 'fetching', 'merging', 'deps', 'frontend', 'building', 'verifying', 'restarting', 'rolling-back'].includes(state.phase)) {
+  if (!['handoff-ready', 'preparing', 'fetching', 'merging', 'deps', 'frontend', 'building', 'verifying', 'restarting', 'rolling-back'].includes(state.phase)) {
     return;
   }
   openOverlay();
   showView('applying');
-  renderSteps(state.phase, false);
   setApplyingText(state.message || '正在更新…');
   startUpdatePolling();
 }

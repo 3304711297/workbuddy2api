@@ -85,98 +85,221 @@ function Write-Log {
 }
 
 # ---------------------------------------------------------------------------
-# 进度小窗（Hermes 同款体验：更新全程可见，不再是后台黑箱）
-#
-# GUI 必须退出（Windows 锁运行中的 exe），进度窗因此由**脚本自己**用 WinForms
-# 绘制并置顶显示。实现在独立运行空间（runspace）里：主线程继续跑更新步骤，
-# 窗口线程读 $script:ProgressText 刷新 UI，互不阻塞。5.1/7 均内置 WinForms。
-# 若窗体初始化失败（极端精简系统），更新流程照常继续——进度窗是体验增强，
-# 决不能反过来成为更新的故障点。
+# 进度微型 Web 视窗（Hermes 同款体验：基于 ui.html + Edge/Chrome --app，无边框暗黑科技风）
 # ---------------------------------------------------------------------------
+$script:UiStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:UiState = [hashtable]::Synchronized(@{
+    status               = 'running'
+    message              = '正在准备更新…'
+    detail               = ''
+    clock                = $script:UiStopwatch
+    receipt              = $null
+    acknowledged_receipt = $null
+})
+$script:UiServer = $null
 $script:ProgressText = '正在准备更新…'
-$script:ProgressDone = $false
 
-function Start-ProgressWindow {
-    # ⚠️ 整个函数体包进 try（P2，外部评审）：窗体是体验增强，
-    # 任何失败（缺 WinForms / runspace 创建失败 / STA 不可用）都必须
-    # 只 WARN 并放行更新流程，绝不能让进度窗反过来成为更新故障点。
-    try {
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
-    } catch {
-        Write-Log "进度窗不可用（缺 WinForms）：$_" 'WARN'
-        return
+function Get-UiHtmlPath {
+    $p = Join-Path $PSScriptRoot 'ui.html'
+    if (Test-Path -LiteralPath $p) { return $p }
+    return $null
+}
+
+function Get-DefaultBrowserExe {
+    $progId = $null
+    foreach ($proto in @('https', 'http')) {
+        try {
+            $progId = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$proto\UserChoice" -Name ProgId -ErrorAction Stop).ProgId
+        } catch { continue }
+        if ($progId) { break }
     }
+    if ($progId) {
+        try {
+            $cmd = (Get-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\$progId\shell\open\command" -ErrorAction Stop).'(default)'
+            if ($cmd -and $cmd -match '"([^"]+\.exe)"') {
+                $exe = $Matches[1]
+                if (Test-Path -LiteralPath $exe) { return $exe }
+            }
+        } catch { }
+    }
+    $candidates = @(
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+        "$env:ProgramFiles\Microsoft\Edge Dev\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge Dev\Application\msedge.exe",
+        "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe",
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    return $null
+}
+
+function Start-UiServer([string]$HtmlPath) {
     try {
-        # 共享表：主空间写、窗口线程读（Synchronized hashtable 线程安全）
-        $script:ProgressShared = [hashtable]::Synchronized(@{
-            Text = $script:ProgressText
-            Done = $false
-        })
-        $shared = $script:ProgressShared
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $serverPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+
         $rs = [runspacefactory]::CreateRunspace()
-        $rs.ApartmentState = 'STA'
         $rs.Open()
+        $rs.SessionStateProxy.SetVariable('Listener', $listener)
+        $rs.SessionStateProxy.SetVariable('State', $script:UiState)
+        $rs.SessionStateProxy.SetVariable('HtmlBytes', [System.IO.File]::ReadAllBytes($HtmlPath))
+
         $ps = [powershell]::Create()
         $ps.Runspace = $rs
-    # 共享表经参数传入窗口线程；线程内只读 Text / Done
-    $winScript = @'
-param($shared)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'WorkBuddy2API 更新'
-$form.Size = New-Object System.Drawing.Size(440, 150)
-$form.StartPosition = 'CenterScreen'
-$form.FormBorderStyle = 'FixedDialog'
-$form.MaximizeBox = $false
-$form.TopMost = $true
-$form.ShowInTaskbar = $false
-$label = New-Object System.Windows.Forms.Label
-$label.SetBounds(20, 20, 390, 55)
-$label.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
-$label.ForeColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
-$form.Controls.Add($label)
-$bar = New-Object System.Windows.Forms.ProgressBar
-$bar.SetBounds(20, 85, 390, 18)
-$bar.Style = 'Marquee'
-$bar.MarqueeAnimationSpeed = 30
-$form.Controls.Add($bar)
-$form.Add_Shown({ $form.Activate() })
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 300
-$timer.Add_Tick({
-    $label.Text = $shared.Text
-    if ($shared.Done) { $form.Close() }
-})
-$timer.Start()
-[void]$form.ShowDialog()
-$timer.Stop()
-'@
-
-    $ps.Streams.Error.add_DataAdded({
-        param($sender, $event)
-        try { Write-Log "进度窗线程错误：$($event.Item)" 'WARN' } catch { }
-    })
-        [void]$ps.AddScript($winScript).AddArgument($shared)
+        [void]$ps.AddScript({
+            function Send-Response($Stream, [string]$Status, [string]$ContentType, [byte[]]$Body) {
+                $head = "HTTP/1.1 $Status`r`nContent-Type: $ContentType`r`nContent-Length: $($Body.Length)`r`nCache-Control: no-store`r`nConnection: close`r`n`r`n"
+                $headBytes = [System.Text.Encoding]::ASCII.GetBytes($head)
+                $Stream.Write($headBytes, 0, $headBytes.Length)
+                $Stream.Write($Body, 0, $Body.Length)
+                $Stream.Flush()
+            }
+            while ($true) {
+                try { $client = $Listener.AcceptTcpClient() } catch { break }
+                try {
+                    $client.ReceiveTimeout = 2000
+                    $stream = $client.GetStream()
+                    $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
+                    $request = $reader.ReadLine()
+                    while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                    if ($request -match '^GET /progress HTTP/1\.[01]$') {
+                        $elapsed = [Math]::Floor($State.clock.Elapsed.TotalSeconds)
+                        $snapshot = @{
+                            status          = $State.status
+                            message         = $State.message
+                            detail          = $State.detail
+                            elapsed_seconds = $elapsed
+                            receipt         = $State.receipt
+                        } | ConvertTo-Json -Compress
+                        Send-Response $stream '200 OK' 'application/json; charset=utf-8' ([System.Text.Encoding]::UTF8.GetBytes($snapshot))
+                    } elseif ($request -match '^POST /ack/([^ /?]+) HTTP/1\.[01]$') {
+                        $receipt = $Matches[1]
+                        if ($State.status -in @('done', 'rolled-back', 'failed') -and $State.receipt -and $receipt -ceq $State.receipt) {
+                            Send-Response $stream '204 No Content' 'text/plain' ([byte[]]@())
+                            $State.acknowledged_receipt = $receipt
+                        } else {
+                            Send-Response $stream '409 Conflict' 'text/plain' ([System.Text.Encoding]::ASCII.GetBytes('unknown receipt'))
+                        }
+                    } elseif ($request -match '^GET / HTTP/1\.[01]$') {
+                        Send-Response $stream '200 OK' 'text/html; charset=utf-8' $HtmlBytes
+                    } else {
+                        Send-Response $stream '404 Not Found' 'text/plain' ([System.Text.Encoding]::ASCII.GetBytes('not found'))
+                    }
+                } catch {
+                } finally {
+                    try { $client.Close() } catch { }
+                }
+            }
+        })
         [void]$ps.BeginInvoke()
+
+        $ready = $false
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not $ready -and [DateTime]::UtcNow -lt $readyDeadline) {
+            try {
+                $probe = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$serverPort/progress")
+                $probe.Timeout = 1000
+                $probe.ReadWriteTimeout = 1000
+                $probe.KeepAlive = $false
+                $resp = $probe.GetResponse()
+                try { $ready = ([int]$resp.StatusCode -eq 200) } finally { $resp.Close() }
+            } catch {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $ready) {
+            Write-Log 'progress server did not answer /progress within 10s; continuing without UI' 'WARN'
+            try { $listener.Stop() } catch { }
+            try { $ps.Stop() } catch { }
+            try { $rs.Close() } catch { }
+            return $null
+        }
+
+        return @{ Listener = $listener; Runspace = $rs; PowerShell = $ps; Port = $serverPort; BrowserProc = $null; Profile = $null }
     } catch {
-        # P2 防线：runspace 创建/启动失败也只 WARN，不放阻断更新
-        Write-Log "进度窗启动失败（不影响更新）：$_" 'WARN'
+        Write-Log "Start-UiServer 异常：$_" 'WARN'
+        try { if ($listener) { $listener.Stop() } } catch { }
+        return $null
     }
+}
+
+function Start-ProgressWindow {
+    try {
+        $htmlPath = Get-UiHtmlPath
+        $browser = Get-DefaultBrowserExe
+        if ($htmlPath -and $browser) {
+            $server = Start-UiServer $htmlPath
+            if ($server) {
+                $browserProfile = Join-Path $env:TEMP ("workbuddy2api-update-ui-{0}" -f $PID)
+                $browserArgs = @(
+                    "--app=http://127.0.0.1:$($server.Port)/",
+                    "--user-data-dir=$browserProfile",
+                    "--no-first-run", "--no-default-browser-check",
+                    "--window-size=380,320"
+                )
+                $bProc = Start-Process -FilePath $browser -ArgumentList $browserArgs -PassThru
+                $server.BrowserProc = $bProc
+                $server.Profile = $browserProfile
+                $script:UiServer = $server
+                Write-Log "微型 Web 过渡视窗已在 127.0.0.1:$($server.Port) 启动（PID $($bProc.Id)）"
+            }
+        }
+    } catch {
+        Write-Log "启动微型 Web 过渡视窗失败（不阻断更新）：$_" 'WARN'
+    }
+
+    # 写入 handoff-ready：向主 GUI 宣告外部更新环境已就绪（主窗口可安全退出）
+    Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
 }
 
 function Update-ProgressWindow {
-    param([Parameter(Mandatory = $true)][string]$Message)
+    param([Parameter(Mandatory = $true)][string]$Message, [string]$Detail = '')
     $script:ProgressText = $Message
-    if ($script:ProgressShared) { $script:ProgressShared.Text = $Message }
+    $script:UiState.message = $Message
+    if ($Detail) { $script:UiState.detail = $Detail }
 }
 
 function Stop-ProgressWindow {
-    param([string]$FinalMessage = '')
-    if ($script:ProgressShared) {
-        if ($FinalMessage) { $script:ProgressShared.Text = $FinalMessage }
-        $script:ProgressShared.Done = $true
+    param([switch]$LeaveWindow, [string]$FinalMessage = '')
+    if (-not $script:UiServer) { return }
+    if ($FinalMessage) { $script:UiState.message = $FinalMessage }
+    try { $script:UiServer.Listener.Stop() } catch { }
+    try { $script:UiServer.PowerShell.Stop() } catch { }
+    try { $script:UiServer.Runspace.Close() } catch { }
+    if (-not $LeaveWindow) {
+        try {
+            if ($script:UiServer.BrowserProc -and -not $script:UiServer.BrowserProc.HasExited) {
+                $script:UiServer.BrowserProc.CloseMainWindow() | Out-Null
+            }
+        } catch { }
+    }
+    try {
+        if ($script:UiServer.Profile -and (Test-Path -LiteralPath $script:UiServer.Profile)) {
+            Remove-Item -LiteralPath $script:UiServer.Profile -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
+    $script:UiServer = $null
+}
+
+function Publish-UiTerminal {
+    param([string]$Status, [string]$Message, [string]$Detail = '')
+    $receipt = [Guid]::NewGuid().ToString('N')
+    $script:UiState.receipt = $receipt
+    $script:UiState.acknowledged_receipt = $null
+    $script:UiState.message = $Message
+    $script:UiState.detail = $Detail
+    $script:UiState.status = $Status
+    if ($script:UiServer) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($script:UiState.acknowledged_receipt -cne $receipt -and $sw.Elapsed.TotalSeconds -lt 4) {
+            Start-Sleep -Milliseconds 50
+        }
     }
 }
 
@@ -210,7 +333,7 @@ function Write-State {
     }
     Write-Log "[$Phase] $Message"
     # 进度窗同步刷新：状态文件的每个阶段都实时可见（Hermes 同款体验）
-    if ($Message) { Update-ProgressWindow -Message $Message }
+    if ($Message) { Update-ProgressWindow -Message $Message -Detail $Detail }
 }
 
 # 失败分类：让用户看到「哪一步、为什么」，而不是笼统的「更新失败」
@@ -338,16 +461,12 @@ function Wait-WorkBuddyHealthy {
 }
 
 function Show-FailureMessage {
-    param([string]$Message)
-    try {
-        Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
-        [System.Windows.MessageBox]::Show($Message, 'WorkBuddy2API 更新失败', 'OK', 'Error') | Out-Null
-    } catch {
-        Write-Log "无法弹出失败对话框：$_" 'ERROR'
-    }
+    param([string]$Message, [string]$Detail = '')
+    # 彻底废除 MessageBox.Show：改为通过 ui.html 现代 Web 视窗就地展示
+    Publish-UiTerminal -Status 'failed' -Message $Message -Detail $Detail
 }
 
-Start-ProgressWindow   # Hermes 同款：进度小窗置顶显示，更新不再是后台黑箱
+Start-ProgressWindow   # Hermes 同款：微型 Web 视窗置顶显示，更新不再是后台黑箱
 Write-State -Phase 'preparing' -Message '正在准备更新'
 Write-Log '============================================================'
 Write-Log "更新开始：branch=$Branch root=$InstallRoot guiPid=$GuiPid"
@@ -364,8 +483,8 @@ if ($GuiPid -gt 0) {
     if (Get-Process -Id $GuiPid -ErrorAction SilentlyContinue) {
         Write-State -Phase 'failed' -Message '等待应用退出超时' -FailureKind 'gui-exit-timeout' `
             -Detail "PID $GuiPid 仍在运行。请手动退出应用后重试。"
-        Stop-ProgressWindow
-        Show-FailureMessage "等待应用退出超时（PID $GuiPid 仍在运行），更新已中止。请手动退出应用后重试。"
+        Publish-UiTerminal -Status 'failed' -Message '等待应用退出超时' -Detail "PID $GuiPid 仍在运行。请手动退出应用后重试。"
+        Stop-ProgressWindow -LeaveWindow
         exit 1
     }
     Write-Log 'GUI 已退出'
@@ -382,10 +501,16 @@ try {
 
     # ── 2. 记录更新前状态（回滚用） ─────────────────────────────────────────
     Write-State -Phase 'preparing' -Message '正在检查工作区'
-    $previousSha = (& git rev-parse HEAD 2>&1 | Select-Object -First 1).ToString().Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $previousSha) {
+    # ⚠️ 外部原生命令输出绝不能直接管道流向 Select-Object -First 1：
+    # PowerShell 7 (pwsh) 的管道提前终止机制会在下游拿到首行后立即关闭输入流，
+    # 导致原生命令非正常终止或 $LASTEXITCODE 被清空为 $null。
+    # 而 PowerShell 中 `$null -ne 0` 为 True，会把成功的 git rev-parse 误判为失败。
+    # 必须先由变量完整接收输出，保留真实的 $LASTEXITCODE。
+    $headOutput = (& git rev-parse HEAD 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not $headOutput) {
         Throw-Failure 'not-a-git-checkout' "无法读取当前提交（$InstallRoot 不是有效的 git 检出）"
     }
+    $previousSha = ($headOutput | Select-Object -First 1).ToString().Trim()
     Write-Log "更新前 HEAD：$previousSha"
 
     $dirty = (& git status --porcelain 2>&1) -join "`n"
@@ -403,7 +528,11 @@ try {
         Throw-Failure 'fetch-failed' "git fetch origin $Branch 失败（网络或代理问题）"
     }
 
-    $targetSha = (& git rev-parse "origin/$Branch" 2>&1 | Select-Object -First 1).ToString().Trim()
+    $targetOutput = (& git rev-parse "origin/$Branch" 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not $targetOutput) {
+        Throw-Failure 'fetch-failed' "无法读取 origin/$Branch 的最新提交"
+    }
+    $targetSha = ($targetOutput | Select-Object -First 1).ToString().Trim()
 
     # ⚠️ 是否需要重建，取决于「工作树 vs **运行中的产物**」，而不是「工作树 vs 远端」。
     # 本项目源码留在检出目录：用户可能已手动 pull 过，或上一次更新中途失败，
@@ -424,7 +553,8 @@ try {
         if ((Invoke-Logged -FilePath 'git' -Arguments @('merge', '--ff-only', "origin/$Branch") -What 'git merge --ff-only') -ne 0) {
             Throw-Failure 'diverged' "无法快进到 origin/$Branch：本地存在未推送的提交。请手动处理分叉后重试。"
         }
-        $currentSha = (& git rev-parse HEAD 2>&1 | Select-Object -First 1).ToString().Trim()
+        $currentOutput = (& git rev-parse HEAD 2>&1)
+        $currentSha = ($currentOutput | Select-Object -First 1).ToString().Trim()
         Write-Log "已快进：$previousSha -> $currentSha"
         $needsRebuild = $true
     } else {
@@ -684,11 +814,16 @@ catch {
         default { '请查看日志了解详情。' }
     }
 
-    Write-State -Phase 'failed' -Message '更新失败' -FailureKind $kind `
-        -Detail "$message`n$hint"
+    $failureTitle = if ($rolledBack) { '更新未完成' } else { '更新失败' }
+    $failureStatus = if ($rolledBack) { 'rolled-back' } else { 'failed' }
+    $failureDetail = [string]::Join("`n", @($message, $hint, $rollbackSummary, "详细日志：$LogPath") | Where-Object { $_ })
 
-    Stop-ProgressWindow -FinalMessage '更新失败，详见弹窗与日志。'
-    Show-FailureMessage "自动更新失败：$message`n`n$hint`n`n详细日志：$LogPath`n`n$rollbackSummary"
+    Write-State -Phase 'failed' -Message $failureTitle -FailureKind $kind `
+        -Detail $failureDetail
+
+    # 外部 ui.html 呈现终端状态并等待用户操作，绝不弹 MessageBox
+    Publish-UiTerminal -Status $failureStatus -Message $failureTitle -Detail $failureDetail
+    Stop-ProgressWindow -LeaveWindow -FinalMessage $failureTitle
 
     if ($rolledBack) {
         Start-WorkBuddy -Reason '更新失败回滚后' | Out-Null

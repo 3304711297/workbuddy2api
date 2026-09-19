@@ -1011,23 +1011,12 @@ print(response.choices[0].message.content)</code></pre>
         </div>
       </div>
 
-      <!-- 更新已发起：应用即将退出的说明（不提供关闭） -->
+      <!-- 更新已发起：交接给外部微型 Web 视窗（Hermes 同款体验） -->
       <div id="update-applying-view" class="update-status-view" hidden>
         <div class="update-status-icon spin" aria-hidden="true">◐</div>
-        <h3 class="update-title" id="update-applying-title">正在更新</h3>
-        <p class="update-subtitle" id="update-applying-message">更新程序将在本窗口关闭后接管，重建完成后会自动重新打开应用。</p>
-        <!-- 阶段步骤条：让用户看到进行到哪一步，而不是黑屏等几分钟 -->
-        <ol class="update-steps" id="update-steps">
-          <li data-step="preparing">准备</li>
-          <li data-step="fetching">获取更新</li>
-          <li data-step="merging">快进提交</li>
-          <li data-step="deps">安装依赖</li>
-          <li data-step="frontend">构建前端</li>
-          <li data-step="building">编译应用</li>
-          <li data-step="verifying">校验产物</li>
-          <li data-step="restarting">启动新版本</li>
-        </ol>
-        <p class="update-detail mono" id="update-applying-log"></p>
+        <h3 class="update-title" id="update-applying-title">正在准备更新</h3>
+        <p class="update-subtitle" id="update-applying-message">正在启动外部更新环境，主窗口即将退出并由更新视窗接管…</p>
+        <p class="update-detail mono" id="update-applying-log" hidden></p>
         <p class="update-hint" id="update-applying-hint">更新期间请勿手动启动应用；更新完成后会自动重新打开。</p>
       </div>
     </div>

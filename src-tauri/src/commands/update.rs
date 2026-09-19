@@ -522,12 +522,27 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         cmd.spawn().map_err(|e| format!("无法启动更新程序：{e}"))?;
 
-        // 让前端有时间把界面切到「更新中」再退出：脚本正等待本 PID 消失才动工作树，
-        // 因此这里必须真正退出进程，否则更新永远不会开始。
+        // 外部视窗交接握手（Fail-Closed 保护）：等待脚本上报 handoff-ready 信号，
+        // 确认外部微型 Web 视窗已成功启动并就绪后，主窗口才退出；
+        // 若 8 秒内未收到就绪信号，则拒绝退出以避免主程序意外消失闪退。
         let handle = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1200));
-            handle.exit(0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let mut ready = false;
+            while std::time::Instant::now() < deadline {
+                if let Ok(Some(state)) = app_update_state() {
+                    if state.phase == "handoff-ready" {
+                        ready = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            if ready {
+                handle.exit(0);
+            } else {
+                eprintln!("[update] handoff-ready 握手超时，主窗口保持存活");
+            }
         });
 
         Ok(format!("更新程序已启动，日志：{}", log_path.display()))
