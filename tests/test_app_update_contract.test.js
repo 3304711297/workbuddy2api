@@ -674,12 +674,43 @@ test('脚本必须内置可见进度窗（Hermes 同款体验，基于 ui.html W
   );
 });
 
-test('更新流程包含 handoff-ready 握手以保护主程序不闪退', () => {
+test('更新流程包含 handoff-ready 握手以保护主程序不闪退（Fail-Closed 校验与 RunId 绑定）', () => {
   // 外部评审 P0 采纳：主窗口不能靠固定 sleep 盲目退出；
   // 必须等待脚本上报 handoff-ready 信号后才 exit，超时则 Fail-Closed 保持主程序存活。
   assert.ok(/handoff-ready/.test(handoff), '更新脚本未产生 handoff-ready 握手信号');
   assert.ok(/handoff-ready/.test(updateRs), 'Rust update.rs 未检查 handoff-ready 信号');
   assert.ok(/handoff-ready/.test(updateJs), '前端 update-check.js 未识别 handoff-ready 阶段');
+
+  // P0 负路径锁定：Start-ProgressWindow 必须对缺失 ui.html / 缺 Chromium / server失败 / 进程退出做 fail-closed
+  const spwIdx = handoff.indexOf('function Start-ProgressWindow');
+  const spwBody = handoff.slice(spwIdx, handoff.indexOf('function Update-ProgressWindow'));
+  assert.ok(
+    /ui-unavailable/.test(spwBody),
+    'Start-ProgressWindow 缺少 ui-unavailable 失败分支'
+  );
+  assert.ok(
+    /exit 1/.test(spwBody),
+    'Start-ProgressWindow 异常时未 exit 1 中止更新，导致主窗口误退出'
+  );
+  // 严格过滤非 Chromium 浏览器
+  assert.ok(
+    /ChromeHTML\|MSEdgeHTM\|EdgeDevHTML/.test(handoff),
+    'Get-DefaultBrowserExe 未对 Chromium 家族 ProgId 做严格白名单校验（会误选 Firefox 等不支持 --app 的浏览器）'
+  );
+
+  // P1 run_id 与 updater_pid 跨端绑定
+  assert.ok(/run_id/.test(handoff), 'windows.ps1 缺少 run_id 字段');
+  assert.ok(/updater_pid/.test(handoff), 'windows.ps1 缺少 updater_pid 字段');
+  assert.ok(/pub run_id: Option<String>/.test(updateRs), 'Rust AppUpdateState 缺少 run_id 字段');
+  assert.ok(/pub updater_pid: Option<u64>/.test(updateRs), 'Rust AppUpdateState 缺少 updater_pid 字段');
+  assert.ok(/target_run_id/.test(updateRs), 'Rust update.rs 未对 run_id 进行校验绑定');
+});
+
+test('更新脚本包含并发互斥锁防多实例冲突', () => {
+  // P1 锁定：检查 lock.json 并在进程存活时拒绝并发运行
+  assert.ok(/lock\.json/.test(handoff), 'windows.ps1 缺少 lock.json 互斥锁');
+  assert.ok(/existingLock\.pid/.test(handoff), 'windows.ps1 缺少已有锁进程探活');
+  assert.ok(/Remove-Item[^\n]*lockPath/.test(handoff), 'finally 块缺少 lock.json 清理逻辑');
 });
 
 test('回滚阶段必须严格检查外部命令退出码并受控拉起（防假回滚与拉起损坏产物）', () => {

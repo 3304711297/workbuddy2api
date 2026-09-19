@@ -61,7 +61,8 @@ param(
     [string]$LogPath,
     [string]$StatePath,
     [string]$CurrentBuildSha = '',
-    [Parameter(Mandatory = $true)][int]$Port
+    [Parameter(Mandatory = $true)][int]$Port,
+    [string]$RunId = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,6 +73,29 @@ if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDi
 
 $logDir = Split-Path -Parent $LogPath
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+
+# ── 进程互斥锁 (P1 防并发与孤儿冲突) ──────────────────────────────────────────
+$lockPath = Join-Path $updateDir 'lock.json'
+if (Test-Path -LiteralPath $lockPath) {
+    try {
+        $existingLock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($existingLock -and $existingLock.pid) {
+            $existingProc = Get-Process -Id $existingLock.pid -ErrorAction SilentlyContinue
+            if ($existingProc -and -not $existingProc.HasExited) {
+                Write-Log "检测到已有正在执行的更新进程（PID $($existingLock.pid)），拒绝并发执行" 'WARN'
+                exit 2
+            }
+        }
+    } catch { }
+}
+try {
+    $lockPayload = @{
+        run_id     = $RunId
+        pid        = $PID
+        started_at = [int64]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds
+    } | ConvertTo-Json -Compress
+    [System.IO.File]::WriteAllText($lockPath, $lockPayload, (New-Object System.Text.UTF8Encoding $false))
+} catch { }
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -113,7 +137,8 @@ function Get-DefaultBrowserExe {
         } catch { continue }
         if ($progId) { break }
     }
-    if ($progId) {
+    # 严格校验必须是 Chromium 内核家族（Chrome / Edge / Edge Dev），防 Firefox 等不支持 --app 的浏览器误选
+    if ($progId -and ($progId -match 'ChromeHTML|MSEdgeHTM|EdgeDevHTML')) {
         try {
             $cmd = (Get-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\$progId\shell\open\command" -ErrorAction Stop).'(default)'
             if ($cmd -and $cmd -match '"([^"]+\.exe)"') {
@@ -230,31 +255,54 @@ function Start-UiServer([string]$HtmlPath) {
 }
 
 function Start-ProgressWindow {
-    try {
-        $htmlPath = Get-UiHtmlPath
-        $browser = Get-DefaultBrowserExe
-        if ($htmlPath -and $browser) {
-            $server = Start-UiServer $htmlPath
-            if ($server) {
-                $browserProfile = Join-Path $env:TEMP ("workbuddy2api-update-ui-{0}" -f $PID)
-                $browserArgs = @(
-                    "--app=http://127.0.0.1:$($server.Port)/",
-                    "--user-data-dir=$browserProfile",
-                    "--no-first-run", "--no-default-browser-check",
-                    "--window-size=380,320"
-                )
-                $bProc = Start-Process -FilePath $browser -ArgumentList $browserArgs -PassThru
-                $server.BrowserProc = $bProc
-                $server.Profile = $browserProfile
-                $script:UiServer = $server
-                Write-Log "微型 Web 过渡视窗已在 127.0.0.1:$($server.Port) 启动（PID $($bProc.Id)）"
-            }
-        }
-    } catch {
-        Write-Log "启动微型 Web 过渡视窗失败（不阻断更新）：$_" 'WARN'
+    $htmlPath = Get-UiHtmlPath
+    if (-not $htmlPath) {
+        Write-Log '缺少 ui.html 模板文件，无法启动外部更新视窗' 'ERROR'
+        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '缺少更新视窗模板 ui.html'
+        exit 1
     }
 
-    # 写入 handoff-ready：向主 GUI 宣告外部更新环境已就绪（主窗口可安全退出）
+    $browser = Get-DefaultBrowserExe
+    if (-not $browser) {
+        Write-Log '未检测到支持 --app 模式的 Chromium 浏览器（Edge/Chrome），无法启动外部更新视窗' 'ERROR'
+        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '未检测到支持 --app 模式的 Chromium 浏览器'
+        exit 1
+    }
+
+    $server = Start-UiServer $htmlPath
+    if (-not $server) {
+        Write-Log '本地 UI 服务启动或响应超时，无法提供更新视窗' 'ERROR'
+        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '本地更新服务启动失败'
+        exit 1
+    }
+
+    try {
+        $browserProfile = Join-Path $env:TEMP ("workbuddy2api-update-ui-{0}" -f $PID)
+        $browserArgs = @(
+            "--app=http://127.0.0.1:$($server.Port)/",
+            "--user-data-dir=$browserProfile",
+            "--no-first-run", "--no-default-browser-check",
+            "--window-size=380,320"
+        )
+        $bProc = Start-Process -FilePath $browser -ArgumentList $browserArgs -PassThru
+        if (-not $bProc -or $bProc.HasExited) {
+            Write-Log '浏览器视窗进程拉起失败或立即退出' 'ERROR'
+            try { $server.Listener.Stop() } catch { }
+            Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '外部更新视窗启动失败'
+            exit 1
+        }
+        $server.BrowserProc = $bProc
+        $server.Profile = $browserProfile
+        $script:UiServer = $server
+        Write-Log "微型 Web 过渡视窗已在 127.0.0.1:$($server.Port) 启动（PID $($bProc.Id)）"
+    } catch {
+        Write-Log "启动微型 Web 过渡视窗异常：$_" 'ERROR'
+        try { $server.Listener.Stop() } catch { }
+        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message "启动更新视窗异常：$_"
+        exit 1
+    }
+
+    # 只有当 ui.html、server 与 browser 视窗均成功就绪后，才写入 handoff-ready（Fail-Closed 保证）
     Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
 }
 
@@ -312,6 +360,8 @@ function Write-State {
         [string]$Detail = ''
     )
     $payload = [ordered]@{
+        run_id      = $RunId
+        updater_pid = $PID
         phase       = $Phase
         message     = $Message
         failureKind = $FailureKind
@@ -833,6 +883,16 @@ catch {
     exit 1
 }
 finally {
+    # 清理 updater 互斥锁（仅清理属于本进程的锁）
+    try {
+        if ($lockPath -and (Test-Path -LiteralPath $lockPath)) {
+            $currentLock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($currentLock -and $currentLock.pid -eq $PID) {
+                Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch { }
+
     # 确保无论成功失败都回到原始工作目录。
     # ⚠️ 不能用 `(Get-Location -Stack).Path` 之类写法：栈为空时它会抛错，
     # 在 finally 里抛错会顶替掉 try 中真正的失败原因，让日志丢失关键信息。

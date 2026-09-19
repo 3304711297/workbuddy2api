@@ -489,6 +489,14 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
+        let run_id = format!(
+            "{:x}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
         let shell = resolve_powershell();
         let mut cmd = std::process::Command::new(shell);
         cmd.arg("-NoProfile")
@@ -506,6 +514,8 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             .arg(&log_path)
             .arg("-StatePath")
             .arg(&state_path)
+            .arg("-RunId")
+            .arg(&run_id)
             // 运行中 exe 的构建提交：脚本据此判断「快进后是否需要重建」。
             // 不能只比工作树 HEAD —— 工作树可能已被 pull 到最新，而跑着的仍是旧产物。
             .arg("-CurrentBuildSha")
@@ -522,18 +532,24 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         cmd.spawn().map_err(|e| format!("无法启动更新程序：{e}"))?;
 
-        // 外部视窗交接握手（Fail-Closed 保护）：等待脚本上报 handoff-ready 信号，
-        // 确认外部微型 Web 视窗已成功启动并就绪后，主窗口才退出；
-        // 若 8 秒内未收到就绪信号，则拒绝退出以避免主程序意外消失闪退。
+        // 外部视窗交接握手（Fail-Closed 保护）：严格按本次 run_id 比对，
+        // 确认外部微型 Web 视窗已成功启动并就绪（handoff-ready）后，主窗口才退出；
+        // 若 8 秒内未收到就绪信号或脚本直接报 failed，则拒绝退出以避免主程序意外消失闪退。
         let handle = app.clone();
+        let target_run_id = run_id.clone();
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
             let mut ready = false;
             while std::time::Instant::now() < deadline {
                 if let Ok(Some(state)) = app_update_state() {
-                    if state.phase == "handoff-ready" {
-                        ready = true;
-                        break;
+                    if state.run_id.as_deref() == Some(&target_run_id) {
+                        if state.phase == "handoff-ready" {
+                            ready = true;
+                            break;
+                        } else if state.phase == "failed" {
+                            eprintln!("[update] updater 启动即报 failed，中止交接退出");
+                            break;
+                        }
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(150));
@@ -541,7 +557,7 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             if ready {
                 handle.exit(0);
             } else {
-                eprintln!("[update] handoff-ready 握手超时，主窗口保持存活");
+                eprintln!("[update] handoff-ready 握手超时或失败，主窗口保持存活");
             }
         });
 
@@ -664,6 +680,8 @@ pub fn app_update_state() -> Result<Option<AppUpdateState>, String> {
     };
 
     Ok(Some(AppUpdateState {
+        run_id: text("run_id"),
+        updater_pid: value.get("updater_pid").and_then(|v| v.as_u64()).or_else(|| value.get("pid").and_then(|v| v.as_u64())),
         phase: text("phase").unwrap_or_default(),
         message: text("message").unwrap_or_default(),
         failure_kind: text("failureKind").unwrap_or_default(),
@@ -676,15 +694,15 @@ pub fn app_update_state() -> Result<Option<AppUpdateState>, String> {
 /// 更新阶段状态（前端轮询显示用）
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AppUpdateState {
-    /// preparing / fetching / merging / deps / frontend / building / verifying /
-    /// restarting / done / failed / rolling-back
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub updater_pid: Option<u64>,
     pub phase: String,
     pub message: String,
-    /// 失败分类（仅 phase=failed 时有意义），见脚本内 Throw-Failure 的 kind 取值
     pub failure_kind: String,
     pub detail: String,
     pub updated_at: i64,
-    /// 写状态的脚本进程 PID（前端可据此判断更新是否仍在进行）
     pub pid: u64,
 }
 

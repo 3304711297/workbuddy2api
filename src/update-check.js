@@ -242,7 +242,7 @@ async function runCheck({ silent = true, force = false } = {}) {
 // 应用更新
 // ---------------------------------------------------------------------------
 
-// 阶段顺序须与 index.html 的 #update-steps 及脚本 Write-State 的 phase 取值一致
+// 阶段定义（与脚本 Write-State 的 phase 取值对齐）
 const UPDATE_PHASES = [
   'preparing', 'fetching', 'merging', 'deps',
   'frontend', 'building', 'verifying', 'restarting',
