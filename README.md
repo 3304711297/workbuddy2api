@@ -53,7 +53,7 @@
   - **ZCode**：采用引导式接入——展示接口地址/密钥/模型清单，点击任意值即复制，在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴即可；状态徽章基于本地服务端口真实可达性探测。
 - ⚡ **动态模型矩阵**：模型清单**自动获取 WorkBuddy 支持的全量模型**（含计费倍率、上下文窗口与思考强度配置），随上游动态更新，无需随版本维护静态列表；OpenAI 与 Anthropic 协议均可透明传入相同模型标识；在「模型与接口」页面查看与定制。
 - 🛡️ **安全脱敏、流量削峰与请求防护**：
-  - **客户端鉴权密钥（可选）**：设置页可一键生成 / 复制 / 清空 32 位十六进制随机密钥（CSPRNG 生成），内核以 `--api-key` 生效，之后所有客户端须携带 `Authorization: Bearer <密钥>` 或 `x-api-key: <密钥>`，否则返回 `401 invalid api key`；密钥仅在启动时注入（改后需重启内核）。开启「局域网访问」（非回环监听）时**必须先设置密钥**，否则前端拒绝开启且内核亦拒绝启动（对标 `router-for-me/EasyCLIProxyAPI` 的 API 访问管理）；
+  - **客户端鉴权密钥（可选）**：设置页可一键生成 / 复制 / 清空 32 位十六进制随机密钥（CSPRNG 生成），内核以 `--api-key` 生效，之后所有客户端须携带 `Authorization: Bearer <key>` 或 `x-api-key: <key>`，未携带或错误时返回 `401 invalid api key`；密钥仅在启动时注入（改后需重启内核）。开启「局域网访问」（非回环监听）时**必须先设置密钥**，否则前端拒绝开启且内核亦拒绝启动（对标 `router-for-me/EasyCLIProxyAPI` 的 API 访问管理）；
   - **结构化日志与级别管理**：设置页可切换内核日志级别 `info`（默认，仅请求摘要与耗时）/ `debug`（附加错误响应详情）/ `trace`（完整请求体与响应流，自动脱敏 Token/Key），日志写入 `converter.log` 并在「实时日志」页与进程 stdout 合并展示（分区标注）；可选开启 `--log-payloads` 落盘完整 Prompt / 响应正文（**明文**，需 trace 级双闸门生效，默认关闭且 UI 明确警示隐私风险）（对标 `router-for-me/EasyCLIProxyAPI` 的日志管理）；
 - 🔍 **内置 API 调试台**：「调试」页保留最近 200 条请求快照（端点/模型/状态/耗时/请求体/响应摘要/错误），点行看详情、基于快照重放复现问题、一键复制 curl（含 `YOUR_KEY` 占位不泄露密钥）；快照默认开启、设置页可关，请求体明文落盘（Token/Key 已脱敏），保留条数 10–2000 可调（对标 `orangeboyChen/codebuddy2api` 的 API Test/Debug 快照）；
   - **局域网访问（可选）**：设置页可开启「允许局域网内其它设备访问」（`--host 0.0.0.0`），并自动探测本机局域网 IPv4 展示可复制地址（如 `http://192.168.x.x:8787/v1`），供手机 / 平板 / 其它电脑直连；出于安全默认关闭（仅 `127.0.0.1` 监听）。无鉴权密钥时前端**拒绝开启**且内核亦会 `exit 1`——双重守卫确保服务绝不无鉴权暴露（对标 `router-for-me/EasyCLIProxyAPI` 的网络设置，但刻意不提供 `--unsafe-expose` 放行开关）；
@@ -71,15 +71,15 @@
 
 | 协议 / 功能分类 | 接口端点 | 适用客户端 / 场景 | 推荐鉴权 Header |
 |---|---|---|---|
-| **OpenAI Responses 协议** | `POST /v1/responses` | **Codex CLI**, OpenCode, Responses SDK | `Authorization: Bearer *** 或 `x-api-key: *** |
-| **Anthropic Messages 协议** | `POST /v1/messages` | **Claude Code CLI**, Cline, Roo Code, Anthropic SDK | `x-api-key: *** 或 `Authorization: Bearer *** |
-| **OpenAI 对话补全协议** | `POST /v1/chat/completions` | **Hermes Agent**, Cherry Studio, NextChat, OpenAI SDK | `Authorization: Bearer *** |
-| **模型列表探测** | `GET /v1/models` | OpenAI 格式标准模型列表（动态拉取上游全部模型） | `Authorization: Bearer local` |
+| **OpenAI Responses 协议** | `POST /v1/responses` | **Codex CLI**, OpenCode, Responses SDK | `Authorization: Bearer <key>` 或 `x-api-key: <key>` |
+| **Anthropic Messages 协议** | `POST /v1/messages` | **Claude Code CLI**, Cline, Roo Code, Anthropic SDK | `x-api-key: <key>` 或 `Authorization: Bearer <key>` |
+| **OpenAI 对话补全协议** | `POST /v1/chat/completions` | **Hermes Agent**, Cherry Studio, NextChat, OpenAI SDK | `Authorization: Bearer <key>` |
+| **模型列表探测** | `GET /v1/models` | OpenAI 格式标准模型列表（动态拉取上游全部模型） | `Authorization: Bearer <key>` |
 | **服务健康与探活** | `GET /health` | 本地健康检测 / 心跳探测（安全收窄，不泄露敏感身份信息） | 无需鉴权 |
-| **用量统计与积分概览** | `GET /api/usage_summary` | 当前账号积分余额、今日用量（请求数/Token/429） | `Authorization: Bearer local` |
-| **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） + 多账号调度配置来源（`rotation.config_source`） | `Authorization: Bearer *** |
-| **11128 毒历史自查** | `POST /api/desensitize_check` | 干跑脱敏诊断：定位哪条 system/assistant 历史带客户端指纹（只报不改） | `Authorization: Bearer *** |
-| **请求快照查询** | `GET /api/snapshots` | 最近请求快照（最新在前，调试 Tab 数据源） | `Authorization: Bearer *** |
+| **用量统计与积分概览** | `GET /api/usage_summary` | 当前账号积分余额、今日用量（请求数/Token/429） | `Authorization: Bearer <key>` |
+| **频控与冷却状态感知** | `GET /api/rate_limit` | 上游 6004 频控状态与冷却倒计时（三态感知） + 多账号调度配置来源（`rotation.config_source`） | `Authorization: Bearer <key>` |
+| **11128 毒历史自查** | `POST /api/desensitize_check` | 干跑脱敏诊断：定位哪条 system/assistant 历史带客户端指纹（只报不改） | `Authorization: Bearer <key>` |
+| **请求快照查询** | `GET /api/snapshots` | 最近请求快照（最新在前，调试 Tab 数据源） | `Authorization: Bearer <key>` |
 
 ---
 
