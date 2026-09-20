@@ -70,6 +70,19 @@ npm run build && cd src-tauri && cargo tauri build --no-bundle
 且因「写日志的动作本身依赖这个函数」连一行日志都留不下（与上面的语法错误表现完全一致、
 极难区分）。**新增函数时，把定义放在首个调用点之前**；契约测试已锁定「顶层调用点
 不得早于定义」（函数体内的调用不算——运行时才解析）。
+⚠️ **交接握手的判据必须是「已到达 handoff-ready 或更晚」，绝不是 `phase == "handoff-ready"` 等值比对（2026-09-20 用户实测「等待应用退出超时」的根因）**：
+脚本 `Start-ProgressWindow` 末尾写 `handoff-ready` 后，主流程**同一语句块**紧接着写
+`preparing`——实测两写间隔 **2.1 ms**，而 Rust 轮询间隔 **150 ms**，等值比对命中概率仅
+1.4% ⇒ 8s 后 Fail-Closed 拒绝退出（符合设计）⇒ 脚本干等 GUI 180s ⇒ `gui-exit-timeout`。
+现象：进度视窗正常出现，但 3 分钟后报「更新失败：等待应用退出超时 / PID xxxx 仍在运行」。
+判据用 `phase_is_handoff_ready_or_later()`（白名单含 handoff-ready 及其后所有阶段；
+`failed` 保持独立分支=中止退出而非判就绪）。**任何"等待某个瞬时状态"的握手都有此风险：
+先量该状态的实际存活时间，与轮询间隔比较，命中率 = 存活/间隔。**
+⚠️ **退出前必须显式停反代内核，否则孤儿占端口会让更新的启动确认阶段失败**：
+`apply_app_update` 的 `handle.exit(0)` 不调 `proxy_stop` 时，converter.py（**无父进程
+退出检测**）变孤儿继续监听端口 ⇒ 脚本第 7 步 `Wait-PortReleased` 30s 超时 ⇒
+`port-not-released` 中止更新。托盘「退出」分支（lib.rs `"quit"`）是显式停内核的，
+更新路径必须同口径。**同一进程有多个退出入口时，逐个核对它们是否都做了必要的清理。**
 ⚠️ **这两类"解析/定义阶段静默死亡"的通用排查手段**：`Parser::ParseFile` 静态分析
 （解析不执行、无副作用）比追日志快得多：
 `[System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errors)`，
