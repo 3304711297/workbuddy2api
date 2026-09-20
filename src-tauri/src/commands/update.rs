@@ -450,6 +450,50 @@ fn working_tree_dirty(root: &Path) -> bool {
     matches!((idx.modified(), head.modified()), (Ok(a), Ok(b)) if a > b)
 }
 
+/// 交接握手判据：状态是否已到达 `handoff-ready` **或任何更晚的阶段**。
+///
+/// ⚠️ **不可退化为 `phase == "handoff-ready"` 的等值比对**（2026-09-20 修复）：
+/// 脚本写完 `handoff-ready` 后立刻写 `preparing`（同一语句块，实测间隔 ~2ms），
+/// 而轮询间隔是 150ms —— 等值比对约 98.6% 概率错过那个瞬时值，导致误判握手超时、
+/// 拒绝退出，而脚本苦等 180s 后报 `gui-exit-timeout`（用户实测的「更新失败」）。
+/// 这些后续阶段只可能在视窗就绪之后出现，判「已到达」与判「等于」语义等价，
+/// 但不受轮询间隔与写入速度影响。
+fn phase_is_handoff_ready_or_later(phase: &str) -> bool {
+    matches!(
+        phase,
+        "handoff-ready"
+            | "preparing"
+            | "fetching"
+            | "merging"
+            | "deps"
+            | "frontend"
+            | "building"
+            | "verifying"
+            | "restarting"
+            | "done"
+            | "rolling-back"
+            | "rolled-back"
+    )
+}
+
+/// 退出前停掉反代内核。
+///
+/// `converter.py` **没有父进程退出检测**（全仓无 getppid 判据，proxy.rs 的孤儿清理
+/// 注释也确认了这点）：GUI 进程消失后它会变孤儿继续监听端口，而更新脚本第 7 步的
+/// `Wait-PortReleased` 依赖「端口先消失再出现」来证明新版确实起来了 —— 孤儿占着端口
+/// 会让这步 30s 超时并 `Throw-Failure 'port-not-released'` 中止更新。
+/// 走托盘「退出」（lib.rs 的 "quit" 分支）时是显式停内核的，更新路径必须同口径。
+///
+/// 失败不阻断退出：清理是尽力而为，脚本侧另有孤儿清理兜底（proxy.rs::climb_to_orphan_root）。
+fn stop_proxy_before_exit(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<crate::ProxyHandle>() {
+        if let Err(err) = crate::commands::proxy_stop(state, app.clone()) {
+            eprintln!("[update] 退出前停止反代失败（不阻断退出）：{err}");
+        }
+    }
+}
+
 /// 发起自动更新：校验前置条件 → 分离进程拉起编排脚本 → 让 GUI 退出。
 ///
 /// 返回后前端应显示「更新程序中」并停止一切交互；GUI 退出由脚本接管，
@@ -535,6 +579,14 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
         // 外部视窗交接握手（Fail-Closed 保护）：严格按本次 run_id 比对，
         // 确认外部微型 Web 视窗已成功启动并就绪（handoff-ready）后，主窗口才退出；
         // 若 8 秒内未收到就绪信号或脚本直接报 failed，则拒绝退出以避免主程序意外消失闪退。
+        //
+        // ⚠️ **必须用「已进入后续阶段」而非「恰好等于 handoff-ready」做判据**（2026-09-20 修复）：
+        // 脚本写完 `handoff-ready` 后会**立刻**写 `preparing`（同一个语句块，实测间隔仅 ~2ms），
+        // 而本线程 150ms 才轮询一次 —— 严格等值比对意味着 98.6% 的概率看不见那个瞬时值，
+        // 8 秒后误判「握手超时」而拒绝退出，脚本那边则干等 180 秒报 `gui-exit-timeout`。
+        // 真实踩到：日志里 handoff-ready 与 preparing 同一秒出现，用户看到「更新失败：等待应用退出超时」。
+        // 判据改为「已到达 handoff-ready 或任何更晚的阶段」——那些阶段都只可能在
+        // 视窗就绪之后出现，语义等价且不受轮询间隔影响。
         let handle = app.clone();
         let target_run_id = run_id.clone();
         std::thread::spawn(move || {
@@ -543,7 +595,7 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             while std::time::Instant::now() < deadline {
                 if let Ok(Some(state)) = app_update_state() {
                     if state.run_id.as_deref() == Some(&target_run_id) {
-                        if state.phase == "handoff-ready" {
+                        if phase_is_handoff_ready_or_later(&state.phase) {
                             ready = true;
                             break;
                         } else if state.phase == "failed" {
@@ -555,6 +607,11 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
             if ready {
+                // ⚠️ 退出前必须显式停掉反代内核。converter.py 没有父进程退出检测：
+                // 只 handle.exit(0) 会让它变孤儿继续占着端口，脚本随后的
+                // Wait-PortReleased 会判「端口未释放」并中止更新（30s 后报 port-not-released）。
+                // 与托盘「退出」同口径（lib.rs 的 "quit" 分支）。
+                stop_proxy_before_exit(&app);
                 handle.exit(0);
             } else {
                 eprintln!("[update] handoff-ready 握手超时或失败，主窗口保持存活");
@@ -1037,4 +1094,74 @@ mod tests {
             "生产代码仍保留读工作树 HEAD 的函数：它已无合法用途，留着只会被误用为版本比对"
         );
     }
+
+    // ── 交接握手判据（2026-09-20 修复：等值比对导致 98.6% 概率误判超时）──────────
+
+    #[test]
+    fn handoff_phase_accepts_ready_and_all_later_stages() {
+        // 核心回归：脚本写完 handoff-ready 后立刻写 preparing（实测间隔 ~2ms），
+        // 轮询 150ms 一次 —— 等值比对会错过瞬时值。判据必须接受「已到达或更晚」。
+        assert!(phase_is_handoff_ready_or_later("handoff-ready"));
+        assert!(
+            phase_is_handoff_ready_or_later("preparing"),
+            "preparing 是 handoff-ready 的紧邻后继，必须判定为已握手（否则误报超时）"
+        );
+        for later in [
+            "fetching",
+            "merging",
+            "deps",
+            "frontend",
+            "building",
+            "verifying",
+            "restarting",
+            "done",
+            "rolling-back",
+            "rolled-back",
+        ] {
+            assert!(
+                phase_is_handoff_ready_or_later(later),
+                "{later} 晚于 handoff-ready，视窗必然已就绪，不得判为未握手"
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_phase_rejects_pre_handoff_and_failed_states() {
+        // failed 有独立分支处理（中止退出而非判定就绪），此处必须为 false，
+        // 否则会把「脚本启动即失败」误判成交接成功而照常退出。
+        assert!(!phase_is_handoff_ready_or_later("failed"));
+        // 握手之前的阶段不应被视为就绪
+        assert!(!phase_is_handoff_ready_or_later(""));
+        assert!(!phase_is_handoff_ready_or_later("unknown"));
+        assert!(!phase_is_handoff_ready_or_later("checking"));
+    }
+
+    #[test]
+    fn handoff_phase_covers_every_phase_the_script_writes() {
+        // 三源一致性：脚本里出现的每个 Write-State -Phase 值，要么在
+        // phase_is_handoff_ready_or_later 的白名单内，要么是 failed（独立分支）。
+        // 漏一个 → 那个阶段出现时判为「未握手」→ 误报超时（本次 bug 的成因）。
+        let script = include_str!("../../../scripts/app-update/windows.ps1");
+        let mut seen = std::collections::BTreeSet::new();
+        for line in script.lines() {
+            if let Some(pos) = line.find("Write-State -Phase '") {
+                let rest = &line[pos + "Write-State -Phase '".len()..];
+                if let Some(end) = rest.find('\'') {
+                    seen.insert(rest[..end].to_string());
+                }
+            }
+        }
+        assert!(!seen.is_empty(), "未能从脚本中解析出任何 Phase（提取逻辑或脚本结构变了）");
+        for phase in &seen {
+            if phase == "failed" {
+                continue; // 独立分支：中止退出，不判就绪
+            }
+            assert!(
+                phase_is_handoff_ready_or_later(phase),
+                "脚本会写入阶段 `{phase}`，但 phase_is_handoff_ready_or_later 不认识它 → \
+                 该阶段出现时会被判为「握手未完成」并误报超时。白名单需同步。"
+            );
+        }
+    }
+
 }

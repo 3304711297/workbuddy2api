@@ -895,3 +895,54 @@ test('脚本内函数必须在任何调用点之前定义（防顶层「未定�
       `且因日志函数本身可能未定义而无任何日志可查：\n${violations.join('\n')}`
   );
 });
+
+test('交接握手判据必须是「已到达或更晚」而非等值比对（防 98.6% 概率误报超时）', () => {
+  // 真实踩坑（2026-09-20）：Rust 侧用 `state.phase == "handoff-ready"` 等值比对，
+  // 而脚本写完 handoff-ready **立刻**写 preparing（同一语句块，实测间隔 2.1ms），
+  // Rust 每 150ms 才轮询一次 ⇒ 约 1.4% 概率命中那个瞬时值，8 秒后误判「握手超时」
+  // 而拒绝退出主窗口；脚本那边则苦等 180s 报 gui-exit-timeout。
+  // 用户看到的现象：「更新失败：等待应用退出超时」。
+  //
+  // 本测试锁两件事：
+  //   ① 轮询循环不得出现 phase 与 "handoff-ready" 的裸等值比对；
+  //   ② 必须经过 phase_is_handoff_ready_or_later 这层判据。
+  const code = stripRustComments(updateRs);
+
+  assert.ok(
+    !/state\.phase\s*==\s*"handoff-ready"/.test(code),
+    '握手轮询里出现了 `state.phase == "handoff-ready"` 等值比对：' +
+      'handoff-ready 仅存活 ~2ms 而轮询间隔 150ms，等值比对必然错过 → 误报超时'
+  );
+  assert.ok(
+    /phase_is_handoff_ready_or_later\s*\(/.test(code),
+    '缺少 phase_is_handoff_ready_or_later 判据调用：交接握手必须判「已到达或更晚的阶段」'
+  );
+});
+
+test('判据白名单必须覆盖脚本会写入的每个阶段（缺一个即误报超时）', () => {
+  // phase 白名单在 Rust 侧硬编码，而阶段名由脚本写死 —— 两者靠人肉同步。
+  // 脚本新增一个阶段而 Rust 侧忘记登记时，那个阶段出现即被判为「未握手」。
+  // 本测试做跨源对拍（与 Rust 内 handoff_phase_covers_every_phase_the_script_writes 同口径，
+  // 但那条 Rust 测试只守白名单函数，这里额外守住"脚本真的只写这些"）。
+  const phaseRe = /Write-State -Phase '([^']+)'/g;
+  const scriptPhases = new Set();
+  let m;
+  while ((m = phaseRe.exec(handoff)) !== null) scriptPhases.add(m[1]);
+
+  assert.ok(scriptPhases.size > 0, '未能从脚本提取到任何 Phase，提取逻辑或脚本结构已变');
+
+  // 从 Rust 侧提取白名单
+  const code = stripRustComments(updateRs);
+  const fnStart = code.indexOf('fn phase_is_handoff_ready_or_later');
+  assert.ok(fnStart > 0, '未找到 phase_is_handoff_ready_or_later 定义');
+  const fnBody = code.slice(fnStart, code.indexOf('}', code.indexOf('matches!', fnStart)));
+  const rustPhases = new Set([...fnBody.matchAll(/"([a-z-]+)"/g)].map((x) => x[1]));
+
+  const missing = [...scriptPhases].filter((p) => p !== 'failed' && !rustPhases.has(p));
+  assert.deepStrictEqual(
+    missing,
+    [],
+    `脚本会写入但 Rust 判据白名单未登记的阶段：${missing.join(', ')}。` +
+      '这些阶段出现时会被判为「握手未完成」并误报超时。'
+  );
+});
