@@ -74,6 +74,21 @@ if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDi
 $logDir = Split-Path -Parent $LogPath
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
+# ⚠️ Write-Log 必须在**任何调用点之前**定义（顶层语句自上而下执行，函数在定义前不可见）。
+# 真实踩坑（2026-09-20）：互斥锁代码块（下方）在冲突分支调用 Write-Log，而当时它定义在
+# 锁块之后 → 一旦锁冲突/异常落到那些分支，脚本抛 CommandNotFoundException 直接死掉，
+# 且因为「写日志的动作本身依赖这个函数」，连一行日志都留不下（无日志无状态文件）。
+function Write-Log {
+    param([string]$Message, [string]$Level = 'INFO')
+    $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    try {
+        # 避开 `Add-Content -Encoding UTF8`：5.1 下新建文件会写入 BOM，
+        # 让日志首行多出不可见字符（用记事本打开才看得出来）。
+        $line = "[$stamp] [$Level] $Message`r`n"
+        [System.IO.File]::AppendAllText($LogPath, $line, (New-Object System.Text.UTF8Encoding $false))
+    } catch { }
+}
+
 # ── 进程互斥锁 (P1 原子抢锁与陈旧自愈，Fail-Closed) ─────────────────────────
 $lockPath = Join-Path $updateDir 'lock.json'
 $script:AcquiredLock = $false
@@ -121,17 +136,6 @@ for ($attempt = 0; $attempt -lt 2; $attempt++) {
 if (-not $script:AcquiredLock) {
     Write-Log '未能成功获取更新互斥锁，中止更新' 'ERROR'
     exit 2
-}
-
-function Write-Log {
-    param([string]$Message, [string]$Level = 'INFO')
-    $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    try {
-        # 同样避开 `Add-Content -Encoding UTF8`：5.1 下新建文件会写入 BOM，
-        # 让日志首行多出不可见字符（用记事本打开才看得出来）。
-        $line = "[$stamp] [$Level] $Message`r`n"
-        [System.IO.File]::AppendAllText($LogPath, $line, (New-Object System.Text.UTF8Encoding $false))
-    } catch { }
 }
 
 # ---------------------------------------------------------------------------
@@ -892,7 +896,12 @@ catch {
 
     $failureTitle = if ($rolledBack) { '更新未完成' } else { '更新失败' }
     $failureStatus = if ($rolledBack) { 'rolled-back' } else { 'failed' }
-    $failureDetail = [string]::Join("`n", @($message, $hint, $rollbackSummary, "详细日志：$LogPath") | Where-Object { $_ })
+    # ⚠️ 不能用 [string]::Join("`n", @(...) | Where-Object {...})：PowerShell 不允许
+    # 方法调用的参数列表里出现管道，解析器会提前闭合参数列表 → 4 个解析错误
+    # （L895 缺 ')' / L768 块未闭合 / L910 意外 '}'）→ **脚本一行都不执行**，
+    # 表现为「点更新一直卡在更新中、无日志无状态文件」（2026-09-20 用户实测踩到）。
+    # 正确写法：管道结果先加括号成表达式，再用 -join 拼接。
+    $failureDetail = (@($message, $hint, $rollbackSummary, "详细日志：$LogPath") | Where-Object { $_ }) -join "`n"
 
     Write-State -Phase 'failed' -Message $failureTitle -FailureKind $kind `
         -Detail $failureDetail

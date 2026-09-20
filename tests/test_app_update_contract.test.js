@@ -16,6 +16,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { stripRustComments } from './helpers/strip-rust-comments.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -774,5 +775,123 @@ test('更新脚本读取当前提交不得在管道中直连 Select-Object（防
   assert.ok(
     !/& git rev-parse[^\n]*\|\s*Select-Object/.test(codeOnly),
     'git rev-parse 在管道中直连了 Select-Object：pwsh 下会导致 $LASTEXITCODE 置空并误报 not-a-git-checkout'
+  );
+});
+
+test('更新脚本必须能被两版 PowerShell 无错解析（防「点更新卡住不动」静默死亡）', () => {
+  // 真实踩坑（2026-09-20）：windows.ps1 第 895 行 `[string]::Join("`n", @(...) | Where-Object { $_ })`
+  // 的第二个实参提前闭合并列（`"详细日志：$LogPath")` 的右括号关掉了 Join( ），
+  // 导致 4 个解析错误（L895 缺 ')' / L768 块未闭合 / L910 意外 '}'）。
+  //
+  // 危险之处：PowerShell 解析失败时**一行都不执行**，于是
+  //   ① 无日志（Write-Log 在 L126 定义、从未被调用）
+  //   ② 无 app-update-state.json（Write-State 从未被调用）
+  //   ③ Rust 侧 8s handoff-ready 握手超时 → 按设计保持 GUI 存活
+  //   ⇒ 用户看到的是「一直卡在更新中」，且没有任何错误提示可查。
+  //   实测该次点击零破坏（工作树/exe/订阅全完好），但更新静默失效。
+  //
+  // 本测试用 PowerShell 自身的 Parser 做静态语法分析（不执行脚本，无副作用）。
+  // Linux CI 无 PowerShell 可执行文件时跳过——语法问题在 Windows CI 档与本地仍会被拦。
+  const scriptPath = join(root, 'scripts', 'app-update', 'windows.ps1');
+
+  // 找出可用的 PowerShell：pwsh (7+) 优先，回退 Windows PowerShell 5.1
+  const candidates = process.platform === 'win32'
+    ? ['pwsh', 'powershell']
+    : ['pwsh'];
+  const shells = candidates.filter((exe) => {
+    const probe = spawnSync(exe, ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], {
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+    return probe.status === 0;
+  });
+
+  if (shells.length === 0) {
+    console.log('  (skip) 本机无 PowerShell 可执行文件，跳过语法解析检查');
+    return;
+  }
+
+  const parseCmd = (file) => [
+    '-NoProfile',
+    '-Command',
+    [
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+      '$e = $null',
+      `[System.Management.Automation.Language.Parser]::ParseFile('${file}', [ref]$null, [ref]$e) | Out-Null`,
+      "if ($e -and $e.Count -gt 0) {",
+      "  $e | ForEach-Object { Write-Output ('L' + $_.Extent.StartLineNumber + ': ' + $_.Message) }",
+      '  exit 1',
+      '} else { exit 0 }',
+    ].join('; '),
+  ];
+
+  for (const shell of shells) {
+    const result = spawnSync(shell, parseCmd(scriptPath), { encoding: 'utf8', timeout: 60000 });
+    assert.strictEqual(
+      result.status,
+      0,
+      `${shell} 解析 windows.ps1 失败（解析错误会让脚本一行都不执行，表现为「点更新一直卡住、无日志无状态」）：\n` +
+        `${result.stdout || ''}${result.stderr || ''}`
+    );
+  }
+});
+
+test('脚本内函数必须在任何调用点之前定义（防顶层「未定义就调用」静默死亡）', () => {
+  // 真实踩坑（2026-09-20）：互斥锁代码块（L77-124）在冲突分支调用 Write-Log，
+  // 而 Write-Log 当时定义在 L126 —— PowerShell 顶层语句自上而下执行，函数在定义前
+  // **不可见**，一旦走到那些分支就抛 CommandNotFoundException 直接死掉。
+  // 更糟的是「写日志的动作本身依赖这个函数」，连一行日志都留不下（无日志无状态文件），
+  // 与语法错误的表现完全一致，极难区分。
+  //
+  // 本测试扫描所有函数定义与**顶层作用域**的调用点，断言定义行 < 首次调用行。
+  // 函数体内的调用不算（它们在运行时才解析，那时定义已存在）。
+  const lines = handoff.split('\n');
+
+  // 收集函数定义，并标出每个函数体的行范围
+  const funcDefs = new Map();
+  const bodySpans = [];
+  let inFunc = false;
+  let brace = 0;
+  let start = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const m = /^function\s+([\w-]+)/.exec(line);
+    if (m) {
+      funcDefs.set(m[1], i + 1);
+      inFunc = true;
+      brace = 0;
+      start = i;
+    }
+    if (inFunc) {
+      brace += (line.match(/{/g) || []).length - (line.match(/}/g) || []).length;
+      if (brace <= 0 && i > start) {
+        bodySpans.push([start, i]);
+        inFunc = false;
+      }
+    }
+  }
+
+  const inBody = (idx) => bodySpans.some(([s, e]) => idx >= s && idx <= e);
+
+  const violations = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (inBody(i)) continue;                          // 函数体内：运行时才解析，跳过
+    const raw = lines[i];
+    if (raw.trimStart().startsWith('#')) continue;    // 整行注释：跳过（防假阳性）
+    const code = raw.replace(/#.*$/, '');             // 行尾注释
+    if (!code.trim() || /^\s*function\s/.test(code)) continue;
+    for (const [name, defLine] of funcDefs) {
+      const callRe = new RegExp(`(?<![-\\w])${name}\\s`);
+      if (callRe.test(code) && defLine > i + 1) {
+        violations.push(`L${i + 1} 调用 ${name}（定义在 L${defLine}）`);
+      }
+    }
+  }
+
+  assert.deepStrictEqual(
+    violations,
+    [],
+    '顶层作用域存在「未定义就调用」：PowerShell 会在该分支抛 CommandNotFoundException 静默死掉，' +
+      `且因日志函数本身可能未定义而无任何日志可查：\n${violations.join('\n')}`
   );
 });
