@@ -87,6 +87,11 @@ function Write-Log {
         $line = "[$stamp] [$Level] $Message`r`n"
         [System.IO.File]::AppendAllText($LogPath, $line, (New-Object System.Text.UTF8Encoding $false))
     } catch { }
+    # 同步回显到脚本自己的控制台窗口（2026-09-20 补）。
+    # 脚本经 `cmd start /min` 启动、拥有一个最小化的控制台 —— 用户就是通过它看进度的
+    # （对齐 Hermes 的 Write-HandoffLog，其内部同样有 Write-Host）。
+    # 只写文件不回显会让那个窗口一片空白，等于白给了一个窗口。
+    try { Write-Host "[$Level] $Message" } catch { }
 }
 
 # ── 进程互斥锁 (P1 原子抢锁与陈旧自愈，Fail-Closed) ─────────────────────────
@@ -152,6 +157,11 @@ $script:UiState = [hashtable]::Synchronized(@{
 })
 $script:UiServer = $null
 $script:ProgressText = '正在准备更新…'
+# 浏览器过渡视窗开关（2026-09-20）：默认**关闭**。
+# 用户偏好对齐 Hermes —— 更新时看最小化的 PowerShell 控制台（脚本经 `cmd start /min`
+# 启动后自身就有控制台，Write-Log 会回显到那里）。设 $true 可启用基于 ui.html 的
+# 无边框 Web 视窗（保留能力，便于日后需要更精致界面时启用）。
+$script:UseWebShim = $false
 
 function Get-UiHtmlPath {
     $p = Join-Path $PSScriptRoot 'ui.html'
@@ -285,25 +295,42 @@ function Start-UiServer([string]$HtmlPath) {
 }
 
 function Start-ProgressWindow {
+    # ── 2026-09-20 起浏览器进度窗默认关闭 ────────────────────────────────────
+    # 用户反馈：Hermes 更新时看到的是**最小化的 PowerShell 控制台**（里面有进度文本），
+    # 而本工具拉起的是一个浏览器窗口（还会建 25MB 临时 profile）—— 不符合预期。
+    # 现在脚本经 `cmd start /min` 启动（见 update.rs），自身就拥有一个可见的最小化
+    # 控制台，Write-Log 会实时回显到那里 —— 这就是用户要的"能看到进度"。
+    # 浏览器窗的代码保留（下方），需要时可设 $script:UseWebShim = $true 启用。
+    # 关键区别：**界面不可用绝不再中止更新**（旧版无浏览器就 exit 1 = 功能全废）。
+    if (-not $script:UseWebShim) {
+        Write-Log '使用最小化控制台显示进度（浏览器过渡视窗已按用户偏好停用）'
+        # 仍写 handoff-ready：Rust 侧据此确认"更新环境已就绪，可以退出主窗口了"。
+        # 该信号与用哪种界面无关 —— 它是"交接就绪"，不是"界面就绪"。
+        Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
+        return
+    }
+
     $htmlPath = Get-UiHtmlPath
     if (-not $htmlPath) {
-        Write-Log '缺少 ui.html 模板文件，无法启动外部更新视窗' 'ERROR'
-        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '缺少更新视窗模板 ui.html'
-        exit 1
+        Write-Log '缺少 ui.html 模板文件，回退到控制台显示进度' 'WARN'
+        Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
+        return
     }
 
     $browser = Get-DefaultBrowserExe
     if (-not $browser) {
-        Write-Log '未检测到支持 --app 模式的 Chromium 浏览器（Edge/Chrome），无法启动外部更新视窗' 'ERROR'
-        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '未检测到支持 --app 模式的 Chromium 浏览器'
-        exit 1
+        # ⚠️ 这里是「回退」不是「失败」：Hermes 原版亦有 WinForms 兜底，
+        # 本工具既然已有控制台可看进度，就不该因缺浏览器而让更新整个失败。
+        Write-Log '未检测到支持 --app 模式的 Chromium 浏览器，回退到控制台显示进度' 'WARN'
+        Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
+        return
     }
 
     $server = Start-UiServer $htmlPath
     if (-not $server) {
-        Write-Log '本地 UI 服务启动或响应超时，无法提供更新视窗' 'ERROR'
-        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '本地更新服务启动失败'
-        exit 1
+        Write-Log '本地 UI 服务启动或响应超时，回退到控制台显示进度' 'WARN'
+        Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
+        return
     }
 
     try {
@@ -316,23 +343,22 @@ function Start-ProgressWindow {
         )
         $bProc = Start-Process -FilePath $browser -ArgumentList $browserArgs -PassThru
         if (-not $bProc -or $bProc.HasExited) {
-            Write-Log '浏览器视窗进程拉起失败或立即退出' 'ERROR'
+            Write-Log '浏览器视窗进程拉起失败或立即退出，回退到控制台显示进度' 'WARN'
             try { $server.Listener.Stop() } catch { }
-            Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message '外部更新视窗启动失败'
-            exit 1
+            Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
+            return
         }
         $server.BrowserProc = $bProc
         $server.Profile = $browserProfile
         $script:UiServer = $server
         Write-Log "微型 Web 过渡视窗已在 127.0.0.1:$($server.Port) 启动（PID $($bProc.Id)）"
     } catch {
-        Write-Log "启动微型 Web 过渡视窗异常：$_" 'ERROR'
+        Write-Log "启动微型 Web 过渡视窗异常（回退到控制台显示进度）：$_" 'WARN'
         try { $server.Listener.Stop() } catch { }
-        Write-State -Phase 'failed' -FailureKind 'ui-unavailable' -Message "启动更新视窗异常：$_"
-        exit 1
+        Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
+        return
     }
 
-    # 只有当 ui.html、server 与 browser 视窗均成功就绪后，才写入 handoff-ready（Fail-Closed 保证）
     Write-State -Phase 'handoff-ready' -Message '更新环境已就绪'
 }
 

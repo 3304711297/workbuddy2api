@@ -155,19 +155,33 @@ test('apply_app_update 已注册到 Tauri 命令表', () => {
   );
 });
 
-test('更新脚本 spawn 禁用 DETACHED_PROCESS（会静默不执行任何脚本）', () => {
-  // 决定性实测：DETACHED_PROCESS(0x8) 下 PowerShell/pwsh 进程 spawn 成功但
-  // **静默不执行任何脚本**就退出（无 console 可初始化）——表现为「点更新闪退、
-  // 无日志、无状态文件」。CREATE_NO_WINDOW(0x08000000) 同样无窗口且不与父
-  // 进程生命周期绑定，但 console 正常初始化，脚本能真实执行。
+test('更新脚本 spawn 既不隐藏控制台也不静默失效（控制台是用户看进度的窗口）', () => {
+  // 历史三重教训（逐条实测过，改动前必读）：
+  //   ① DETACHED_PROCESS(0x8)：PowerShell/pwsh spawn 成功但**静默不执行任何脚本**
+  //      就退出（无 console 可初始化）→「点更新闪退、无日志、无状态文件」。
+  //   ② CREATE_NO_WINDOW(0x08000000)：脚本能跑，但**控制台被完全隐藏** ——
+  //      用户看不到任何进度（2026-09-20 用户实测反馈：Hermes 有窗口、本工具没有）。
+  //   ③ CREATE_NEW_CONSOLE(0x10)：可跑且有窗口，但窗口标题栏是 powershell 的默认外观
+  //      且不经 cmd 包装，脱离性不如 `cmd start /min`（Hermes 采用后者）。
+  //
+  // 当前方案（对齐 Hermes apps/desktop/electron/updater-process.ts）：经
+  // `cmd /d /s /c start "" /min powershell ...` 启动 —— cmd 立即退出、脚本获得
+  // 自己的最小化控制台，既解决 console 初始化又呈现进度。故本处断言：
+  //   · 不得出现 DETACHED_PROCESS
+  //   · 不得设置任何会隐藏窗口的 creation_flags（CREATE_NO_WINDOW）
   const updateRsCode = updateRs.replace(/\/\/[^\n]*/g, '');
   assert.ok(
     !/DETACHED_PROCESS/.test(updateRsCode),
     'spawn 使用了 DETACHED_PROCESS：PowerShell 会静默不执行脚本（无声闪退根因）'
   );
   assert.ok(
-    /CREATE_NO_WINDOW/.test(updateRsCode) && /CREATE_NEW_PROCESS_GROUP/.test(updateRsCode),
-    'spawn 缺少 CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP：需要无窗口 + 父退出后继续运行'
+    !/CREATE_NO_WINDOW/.test(updateRsCode),
+    'spawn 仍设置 CREATE_NO_WINDOW：控制台被隐藏，用户看不到更新进度。' +
+      '应改用 cmd start /min 包装（Hermes 同款）'
+  );
+  assert.ok(
+    !/\.creation_flags\s*\(/.test(updateRsCode),
+    'spawn 仍显式设置 creation_flags：控制台应由 cmd start 分配，勿再干预'
   );
 });
 
@@ -682,16 +696,32 @@ test('更新流程包含 handoff-ready 握手以保护主程序不闪退（Fail-
   assert.ok(/handoff-ready/.test(updateRs), 'Rust update.rs 未检查 handoff-ready 信号');
   assert.ok(/handoff-ready/.test(updateJs), '前端 update-check.js 未识别 handoff-ready 阶段');
 
-  // P0 负路径锁定：Start-ProgressWindow 必须对缺失 ui.html / 缺 Chromium / server失败 / 进程退出做 fail-closed
+  // P0 契约更新（2026-09-20）：界面不可用时**回退**而非中止更新。
+  // 旧契约要求 Start-ProgressWindow 在缺 ui.html / 缺浏览器时 exit 1（fail-closed）。
+  // 但那时脚本无窗口可用；现在脚本经 `cmd start /min` 启动、自身就有一个最小化控制台
+  // 可以显示进度，因此「界面不可用 = 功能全废」已不成立 —— 回退到控制台是更好的行为。
+  // 仍需保证：① 每种界面失败路径都要写 handoff-ready（否则 Rust 侧永远等不到信号）；
+  //           ② 不得再因界面问题 exit 1。
   const spwIdx = handoff.indexOf('function Start-ProgressWindow');
-  const spwBody = handoff.slice(spwIdx, handoff.indexOf('function Update-ProgressWindow'));
+  const spwRaw = handoff.slice(spwIdx, handoff.indexOf('function Update-ProgressWindow'));
+  assert.ok(spwRaw.length > 0, '未找到 Start-ProgressWindow 函数体');
+  // ⚠️ 必须先剥注释再断言：注释里会提到历史行为（如"旧版无浏览器就 exit 1"），
+  // 直接用原文会假阳性（本测试第一版即踩到）。
+  // 剥离「整行注释」即可（PowerShell 的 # 在字符串内也会出现，逐字符剥不安全）
+  const spwBody = spwRaw
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
   assert.ok(
-    /ui-unavailable/.test(spwBody),
-    'Start-ProgressWindow 缺少 ui-unavailable 失败分支'
+    !/exit\s+1/.test(spwBody),
+    'Start-ProgressWindow 仍在界面失败时 exit 1：现在有控制台可显示进度，' +
+      '界面不可用应回退而非中止整个更新'
   );
+  const readyCount = (spwBody.match(/handoff-ready/g) || []).length;
   assert.ok(
-    /exit 1/.test(spwBody),
-    'Start-ProgressWindow 异常时未 exit 1 中止更新，导致主窗口误退出'
+    readyCount >= 2,
+    `Start-ProgressWindow 的 handoff-ready 写入点不足（找到 ${readyCount} 处）：` +
+      '停用路径与每个界面失败回退路径都必须写它，否则 Rust 侧等不到信号会误判超时'
   );
   // 严格过滤非 Chromium 浏览器
   assert.ok(
@@ -944,5 +974,75 @@ test('判据白名单必须覆盖脚本会写入的每个阶段（缺一个即�
     [],
     `脚本会写入但 Rust 判据白名单未登记的阶段：${missing.join(', ')}。` +
       '这些阶段出现时会被判为「握手未完成」并误报超时。'
+  );
+});
+
+test('更新脚本必须以「可见的最小化控制台」启动（用户要能看到进度，对齐 Hermes）', () => {
+  // 背景（2026-09-20 用户实测对比）：Hermes 更新时用户能看到一个最小化的
+  // PowerShell 控制台窗口（里面有进度输出），而 workbuddy2api 用
+  // CREATE_NO_WINDOW 把窗口藏了 —— 于是看不到任何进度。
+  //
+  // Hermes 的做法（apps/desktop/electron/updater-process.ts::wrapHandoffForDetachedConsole）：
+  //   cmd /d /s /c start "" /min powershell ... -File <script> <args>
+  // 注释说明必须用 `cmd start` 包装：`start` 给子进程分配自己的
+  // **（最小化的）控制台**并彻底脱离 cmd.exe —— 直接 detached+hidden spawn 会让
+  // powershell.exe 在 console 初始化阶段就死掉，一行脚本都不执行。
+  //
+  // 实测（本机三种方式对照）：
+  //   cmd start /min          → 脚本执行 ✅  可见窗口 1 个（最小化控制台）
+  //   CREATE_NEW_CONSOLE      → 脚本执行 ✅  可见窗口 1 个
+  //   CREATE_NO_WINDOW        → 脚本执行 ✅  可见窗口 0 个 ← 用户看不到进度
+  //   DETACHED_PROCESS        → 脚本不执行 ❌（历史踩坑）
+  //
+  // 本测试锁：启动命令必须经 `cmd start /min` 包装，且必须使用
+  // CREATE_NO_WINDOW 之外能提供控制台的 flags（不得回退到完全隐藏窗口）。
+  const code = stripRustComments(updateRs);
+
+  assert.ok(
+    /cmd\.exe/.test(code) && /["']\/d["']/.test(code) && /["']\/s["']/.test(code),
+    '启动命令未走 cmd.exe /d /s /c 包装：直接 spawn powershell（尤其 detached+hidden）' +
+      '会让它在 console 初始化阶段就退出，一行脚本都不执行'
+  );
+  assert.ok(
+    /["']start["']/.test(code) && /["']\/min["']/.test(code),
+    '缺少 `start "" /min` 包装：这是给脚本分配可见（最小化）控制台的唯一手段，' +
+      '也是用户能看到进度的来源（对齐 Hermes）'
+  );
+  assert.ok(
+    !/CREATE_NO_WINDOW\s*\|\s*CREATE_NEW_PROCESS_GROUP/.test(code),
+    '仍在使用 CREATE_NO_WINDOW 组合：它会完全隐藏控制台窗口，用户看不到更新进度。' +
+      '应改用 cmd start /min（Hermes 同款，实测可给出可见的最小化控制台）'
+  );
+});
+
+test('脚本必须把进度同时回显到控制台（否则用户在窗口里看不到任何东西）', () => {
+  // 2026-09-20 修复的第二半：只给窗口不给输出 = 白给一个空白窗口。
+  // 脚本经 `cmd start /min` 启动后拥有一个最小化控制台，但实测其 Write-Log
+  // **只写文件日志、零 Write-Host 调用** —— 窗口里一片空白，用户依然看不到进度。
+  // Hermes 的 Write-HandoffLog 内部同时有 Write-Host $line，这是"能看到进度"的必要条件。
+  const logFnStart = handoff.indexOf('function Write-Log');
+  assert.ok(logFnStart > 0, '未找到 Write-Log 定义');
+  // ⚠️ 本文件是 CRLF：不能用 indexOf('\n}') 找函数结尾（匹配不到会切到文件末尾，
+  // 让断言在全库范围内成立 —— 假阴性，测试形同虚设）。改为按行找顶格 '}'。
+  const afterStart = handoff.slice(logFnStart);
+  const linesOfFn = afterStart.split(/\r?\n/);
+  const endIdx = linesOfFn.findIndex((line, i) => i > 0 && line.startsWith('}'));
+  const logFnRaw = linesOfFn.slice(0, endIdx === -1 ? linesOfFn.length : endIdx + 1).join('\n');
+  // ⚠️ 必须先剥整行注释再断言：函数体里那句「对齐 Hermes 的 Write-HandoffLog，
+  // 其内部同样有 Write-Host」会让正则命中注释而漏掉真实回显被删除的情况
+  //（本测试第一版即此假阳性，变异验证当场抓到）。
+  const logFn = logFnRaw
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+
+  assert.ok(
+    /Write-Host/.test(logFn),
+    'Write-Log 未回显到控制台（缺 Write-Host）：脚本虽有最小化控制台窗口，' +
+      '但里面不会有任何进度输出，用户看到的是一个空白窗口'
+  );
+  assert.ok(
+    /AppendAllText/.test(logFn),
+    'Write-Log 未写文件日志：控制台回显不能替代持久日志（更新失败时要靠日志排查）'
   );
 });

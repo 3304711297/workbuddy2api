@@ -93,13 +93,25 @@ pwsh 7+ 与 5.1 都要跑一遍（两者报错数可能不同）。**"无日志�
 `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` 是 AppExecLink 重解析点，`is_file()`
 对它返回 false → which 静默找不到 pwsh → 回退 5.1 → 触发上述 BOM 死亡链。
 判定用 `fs::metadata().is_ok()`（`update.rs::path_is_executable`）。
-⚠️ **spawn 更新脚本绝不能用 `DETACHED_PROCESS`（0x8，「点更新闪退」最终根因）**：
-实测（Rust 同款 creationflags 逐变量对照，覆盖 Store 别名/物理路径 pwsh/PS 5.1），
-该 flag 下 PowerShell 进程 spawn 成功但**静默不执行任何脚本**就退出——无日志、
-无状态文件、无报错。此前曾误判为 Store 别名问题和 BOM 问题（两者是真实缺陷但
-非此现象主因）。正确 flag 是 `CREATE_NO_WINDOW(0x08000000) | CREATE_NEW_PROCESS_GROUP`：
-同样无窗口、不与父进程生命周期绑定，但 console 正常初始化。契约锁定：
-`tests/test_app_update_contract.test.js` 的 spawn flags 断言。
+⚠️ **spawn 更新脚本的三重 flag 陷阱（最终方案：改用 `cmd start /min` 包装，别再直接 spawn powershell）**：
+实测对照（Rust 同款 creationflags 逐变量，覆盖 Store 别名/物理路径 pwsh/PS 5.1）：
+① `DETACHED_PROCESS`(0x8) → 进程 spawn 成功但**静默不执行任何脚本**就退出（无日志、无状态文件）；
+② `CREATE_NO_WINDOW`(0x08000000) → 脚本能跑，但**控制台被完全隐藏**，用户看不到任何进度
+（2026-09-20 用户实测反馈「Hermes 能看到进度，你这个看不到」）；
+③ `CREATE_NEW_CONSOLE`(0x10) → 可跑且有窗口，但脱离性与外观不如方案④。
+**正解（对齐 Hermes `apps/desktop/electron/updater-process.ts:158`）**：
+`cmd /d /s /c start "" /min <powershell> -File <script>` —— cmd 立即退出、脚本获得**自己的最小化控制台**，
+既解决 console 初始化问题（克服 ①），又让 `Write-Host` 的进度对用户可见（克服 ②）。
+Rust 侧**不得再设置任何 `creation_flags`**。契约锁定：
+`tests/test_app_update_contract.test.js` 的 spawn flags 断言（禁 DETACHED_PROCESS / 禁 CREATE_NO_WINDOW / 禁 .creation_flags()）。
+⚠️ **光有控制台窗口不够 —— 脚本必须把进度 `Write-Host` 回显，否则用户在窗口里看到的是空白**：
+实测本脚本 `Write-Host` 调用数曾为 **0**（只写文件日志），给窗口等于白给。修法：`Write-Log` 在
+写文件后追加 `Write-Host "[$Level] $Message"`（Hermes 的 `Write-HandoffLog` 内部同样有 `Write-Host $line`）。
+两个动作缺一不可：**分配控制台（cmd start /min）+ 往里写（Write-Host）**。
+⚠️ **界面不可用应是「回退」而非「中止」（`Start-ProgressWindow` 语义变更）**：
+旧版缺 ui.html / 缺 Chromium 就 `exit 1`，等于「没有浏览器就不能更新」；现在既有控制台可显示进度，
+每条界面失败路径都改为写 `handoff-ready` 后回退到控制台。⚠️ 每个回退出口**都必须写 `handoff-ready`**
+（漏写会让 Rust 侧永远等不到信号、8s 后 Fail-Closed 拒绝退出 ⇒ 又变成「卡在更新中」）。
 ⚠️ **更新脚本中原生命令（git）绝不能管道直连 `Select-Object -First 1`（「不是有效的 git 检出」最终根因）**：
 在 PowerShell 7（`pwsh`）下，原生可执行文件（如 `git rev-parse HEAD`）若直接通过管道流向
 `Select-Object -First 1`，下游提取首行后会提前关闭输入流以终止管道。这会导致 upstream 原生进程被
@@ -262,10 +274,10 @@ workbuddy2api.exe (GUI)
   ⚠️ 探活**只证明进程能服务 HTTP**，不证明上游可用 —— 这是刻意的：上游/网络故障
   不该触发回滚。契约锁定：`tests/test_app_update_contract.test.js` 两条断言。
 
-  **② 应用 = 交接式 + 启动确认**：`apply_app_update` 以 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 分离拉起（严禁使用 `DETACHED_PROCESS`，见第 2 节禁令）
-  `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → **脚本自绘置顶进度小窗**
-  （WinForms + runspace，Hermes 同款全程可见体验；`Start-ProgressWindow` 起窗、
-  `Write-State` 联动刷新、四个出口 `Stop-ProgressWindow`；窗体失败只 WARN 不阻断更新）
+  **② 应用 = 交接式 + 启动确认**：`apply_app_update` 经 `cmd /d /s /c start "" /min <powershell> -File ...` 分离拉起
+  （**不是**直接 spawn powershell + creation_flags，见第 2 节三重 flag 陷阱）
+  `scripts/app-update/windows.ps1` → GUI 自己 `exit(0)` → **脚本自身的「最小化控制台」显示进度**
+  （对齐 Hermes `updater-process.ts:158` 的 `cmd start /min`；`Write-Log` 同时写文件 + `Write-Host` 回显）
   → 脚本等 GUI 消失后
   `git stash`（若有改动）→ `git fetch` + `git merge --ff-only` → `npm run build`
   → **`cargo tauri build --no-bundle`** → 校验产物（尺寸 > 空壳基准 + `index-*.js` 已内嵌）

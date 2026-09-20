@@ -522,17 +522,21 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
     // 脚本随后会立即写入 preparing，此处失败不影响更新流程。
     let _ = std::fs::remove_file(&state_path);
 
-    // 分离启动：CREATE_NO_WINDOW + CREATE_NEW_PROCESS_GROUP，父进程退出后脚本继续运行。
-    // ⚠️ 绝不能用 DETACHED_PROCESS（0x8）：实测（Rust 同款 creationflags 逐变量对照）
-    // 它会让 PowerShell/pwsh **静默不执行任何脚本**就退出（无 console 可初始化）——
-    // 这就是「点更新闪退且无日志无状态文件」的最终根因；之前误判过 Store 别名/BOM。
-    // CREATE_NO_WINDOW 同样无窗口、不与父进程生命周期绑定，但 console 正常初始化。
+    // 分离启动：经 `cmd start /min` 包装，让脚本拥有一个**可见的最小化控制台**。
+    //
+    // ⚠️ 为什么不能直接 spawn powershell（2026-09-17 实测踩坑 + 2026-09-20 用户反馈）：
+    // ① powershell.exe 是 console-subsystem 程序，`DETACHED_PROCESS` 让它在 console
+    //    初始化阶段就死掉，**一行脚本都不执行**（08-09 类故障，Hermes 侧亦有同款记录）。
+    // ② 改用 `CREATE_NO_WINDOW` 虽能跑，但**完全隐藏了控制台** —— 用户看不到任何进度，
+    //    这也是本次用户反馈「Hermes 能看到进度，你这个看不到」的根因。
+    // Hermes 的做法（apps/desktop/electron/updater-process.ts::wrapHandoffForDetachedConsole）：
+    //   cmd /d /s /c start "" /min powershell ... -File <script> <args>
+    // `start` 给子进程分配自己的（最小化）控制台并彻底脱离 cmd.exe（cmd 立即退出），
+    // 既解决 console 初始化问题，又把进度输出呈现给用户。
+    // 本机三方式对照实测：cmd start /min → 跑 ✅ 可见窗口 1；CREATE_NEW_CONSOLE → 跑 ✅ 窗口 1；
+    //                     CREATE_NO_WINDOW → 跑 ✅ 窗口 0；DETACHED_PROCESS → 不跑 ❌。
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
         let run_id = format!(
             "{:x}-{:x}",
             std::process::id(),
@@ -542,8 +546,18 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
                 .as_millis()
         );
         let shell = resolve_powershell();
-        let mut cmd = std::process::Command::new(shell);
-        cmd.arg("-NoProfile")
+
+        // 参数顺序必须与脚本 param() 声明无关地保持「-File <script> -Name <value>」配对。
+        // start 的首个参数是窗口标题（空串），/min 使其最小化启动。
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.arg("/d")
+            .arg("/s")
+            .arg("/c")
+            .arg("start")
+            .arg("")
+            .arg("/min")
+            .arg(&shell)
+            .arg("-NoProfile")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
@@ -570,10 +584,12 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             .arg(port.to_string())
             .current_dir(&root)
             .stdin(std::process::Stdio::null())
-            // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住
+            // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住。
+            // （脚本的进度输出走 Write-Host → 它自己那个最小化控制台，与这两个管道无关）
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+            .stderr(std::process::Stdio::null());
+        // 刻意**不设置** creation_flags：控制台由 `cmd start` 分配（见上方说明）。
+        // 设 CREATE_NO_WINDOW 会把它藏掉，回到「用户看不到进度」的问题。
         cmd.spawn().map_err(|e| format!("无法启动更新程序：{e}"))?;
 
         // 外部视窗交接握手（Fail-Closed 保护）：严格按本次 run_id 比对，
