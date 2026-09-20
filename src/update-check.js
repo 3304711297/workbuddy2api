@@ -329,6 +329,15 @@ function startUpdatePolling() {
       if (titleEl) titleEl.textContent = '更新完成';
       const iconEl = el('update-applying-view')?.querySelector('.update-status-icon');
       if (iconEl) iconEl.classList.remove('spin');
+      // ⚠️ 必须恢复关闭按钮（2026-09-20 用户实测：弹窗关不掉）：
+      // showView('applying') 会隐藏关闭按钮（「正在更新」期间不允许关闭是刻意的），
+      // 但更新已结束，此时不恢复就让用户彻底无法关闭这个弹窗 —— 它还会在每次
+      // 启动时被 resumeInFlightUpdate 重新弹出（state 停在 done 前的那一瞬）。
+      const close = el('update-close');
+      if (close) close.hidden = false;
+      const hintEl = el('update-applying-hint');
+      if (hintEl) hintEl.textContent = '可关闭本窗口。';
+      return;
     }
   }, 1000);
 }

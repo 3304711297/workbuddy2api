@@ -1217,3 +1217,84 @@ test('Rust 侧写入的每个 failureKind 都必须在前端 FAILURE_HINTS 里�
     `Rust 侧会写出这些 failureKind 但前端无提示（用户只能看到笼统兜底文案）：${missing.join(', ')}`
   );
 });
+
+test('「更新完成」状态必须恢复关闭按钮（否则弹窗关不掉）', () => {
+  // 2026-09-20 用户实测：更新完成后自动拉起的应用弹出「更新完成」弹窗，无法关闭。
+  // 根因：showView('applying') 会隐藏关闭按钮（「正在更新」视图不允许关闭，设计如此），
+  // 但 done 分支只改标题、去掉转圈动画，**没有把关闭按钮恢复** —— 于是弹窗永久卡住。
+  // 这条对所有终态都适用：done 要能关，failed/rolled-back 由既有代码处理（也要能关）。
+  const doneIdx = updateJs.indexOf("phase === 'done'");
+  assert.ok(doneIdx > 0, "未找到 phase === 'done' 分支");
+  // ⚠️ 必须精确定位分支体（到该分支的 return 或收尾 `}` 为止）。
+  // 曾经用「固定 900 字符窗口」导致假阴性：删掉分支里的恢复代码后，窗口仍覆盖到
+  // 函数外的其它 update-close 代码，断言照样通过（变异验证当场抓到）。
+  const tail = updateJs.slice(doneIdx);
+  const tailLines = tail.split(/\r?\n/);
+  const endIdx = tailLines.findIndex((line, i) => i > 0 && /^\s*\}\s*$/.test(line));
+  assert.ok(endIdx > 0, 'done 分支体边界未定位到');
+  const doneBody = tailLines.slice(1, endIdx)
+    .filter((line) => !line.trimStart().startsWith('//'))
+    .join('\n');
+  // 反向自检：分支体必须短且确实只含 done 逻辑（防止边界失控使断言失效）
+  assert.ok(
+    doneBody.includes('更新完成') && doneBody.length < 700,
+    `done 分支体切片异常（长度 ${doneBody.length}）：边界定位不可信，后续断言等于没验证`
+  );
+
+  assert.ok(
+    /update-close/.test(doneBody),
+    'done 分支未恢复关闭按钮（#update-close 的 hidden 仍为 true）—— 用户无法关闭「更新完成」弹窗'
+  );
+  assert.ok(
+    /hidden\s*=\s*false/.test(doneBody),
+    'done 分支未把关闭按钮的 hidden 置为 false'
+  );
+  assert.ok(
+    /可关闭/.test(doneBody),
+    'done 分支未提示可关闭，用户不知道该点哪里'
+  );
+});
+
+test('更新脚本必须抑制控制台的 QuickEdit 模式（否则点击窗口会冻结构建）', () => {
+  // 2026-09-20 用户实测：cargo tauri build 阶段长时间无输出，按下回车才继续。
+  // 根因：`cmd start /min` 分配的控制台默认开启 QuickEdit 模式；一旦用户点击窗口
+  // 或误触，控制台进入「标记/选择」状态，**所有写入 stdout 的进程会被内核阻塞**，
+  // 直到按回车或 ESC。日志证据：编译本身 1m40s，但墙上时间 172s（19:39:47→19:42:39）。
+  //
+  // 正解：脚本启动时关闭 QuickEdit（SetConsoleMode 去掉 ENABLE_QUICK_EDIT_MODE）。
+  // 只清 ENABLE_QUICK_EDIT_MODE 而保留 ENABLE_EXTENDED_FLAGS 是不够的 ——
+  // Windows 文档明确：必须同时设置 ENABLE_EXTENDED_FLAGS 才会使 QuickEdit 的清除生效。
+  assert.ok(
+    /SetConsoleMode|GetConsoleMode/.test(handoff),
+    '脚本未处理控制台模式：QuickEdit 会让点击窗口冻结整个构建（用户实测「按回车才继续」）'
+  );
+  const qIdx = handoff.search(/QuickEdit|0x0040|ENABLE_EXTENDED_FLAGS/);
+  assert.ok(qIdx > 0, '脚本未针对 QuickEdit 做处理（未出现相关常量或注释）');
+  // 必须同时设置 ENABLE_EXTENDED_FLAGS（否则清除 QuickEdit 不生效）
+  assert.ok(
+    /ENABLE_EXTENDED_FLAGS|0x0080/.test(handoff),
+    '未设置 ENABLE_EXTENDED_FLAGS：只清 ENABLE_QUICK_EDIT_MODE 不生效（Windows 要求两者配合）'
+  );
+
+  // ⚠️ 常量值必须正确（实测 cmd start /min 分配的控制台 mode=0x01F7，其中
+  //    ENABLE_QUICK_EDIT_MODE(0x0040) 为 True —— 默认确实开着）。
+  //    写错一个 hex 位就会静默失效，而症状（点窗口后卡住）极难与其它卡顿区分。
+  assert.ok(
+    /ENABLE_QUICK_EDIT_MODE\s*=\s*0x0*40\b/.test(handoff) || /0x0040/.test(handoff),
+    'ENABLE_QUICK_EDIT_MODE 常量值不是 0x0040（写错则该位清不掉）'
+  );
+  assert.ok(
+    /ENABLE_EXTENDED_FLAGS\s*=\s*0x0*80\b/.test(handoff) || /0x0080/.test(handoff),
+    'ENABLE_EXTENDED_FLAGS 常量值不是 0x0080'
+  );
+  // 必须真的调用 SetConsoleMode（只 Get 不 Set 等于没修）
+  assert.ok(
+    /SetConsoleMode/.test(handoff),
+    '脚本只读控制台模式却没调用 SetConsoleMode：QuickEdit 不会被关闭'
+  );
+  // 必须清位（& ~ENABLE_QUICK_EDIT_MODE），而不是简单赋值
+  assert.ok(
+    /&\s*~\s*ENABLE_QUICK_EDIT_MODE/.test(handoff),
+    '未用按位清除（& ~ENABLE_QUICK_EDIT_MODE）：直接赋值会覆盖掉其它必需的控制台模式位'
+  );
+});

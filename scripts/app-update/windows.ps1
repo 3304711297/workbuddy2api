@@ -92,6 +92,56 @@ if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDi
 $logDir = Split-Path -Parent $LogPath
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
+# ── 关闭控制台的 QuickEdit 模式（2026-09-20 用户实测修复）────────────────────
+# 症状：cargo tauri build 阶段长时间毫无输出，**按一下回车才继续**。
+# 根因：`cmd start /min` 分配的控制台默认开启 QuickEdit。用户一旦点击窗口（或误触），
+# 控制台进入「标记/选择」状态，**任何往 stdout 写入的进程都会被内核阻塞**，
+# 直到按回车或 ESC 才恢复。实测证据：编译本身 1m40s，但墙上时间 172s
+# （19:39:47 开始 → 19:42:39 才继续），中间 19:41:29 有一条 tauri 的输出。
+#
+# 解法：清掉 ENABLE_QUICK_EDIT_MODE。⚠️ 只清它不够 —— Windows 要求**同时设置
+# ENABLE_EXTENDED_FLAGS(0x0080)** 才会让 QuickEdit 的清除生效（MSDN 原文：
+# "To enable or disable this mode, use ENABLE_EXTENDED_FLAGS in the mode parameter
+#  and include or clear ENABLE_QUICK_EDIT_MODE."）。
+# 全部失败也不影响功能：这只是体验优化，出错就静默跳过（不因它中止更新）。
+try {
+    $qkSig = @'
+using System;
+using System.Runtime.InteropServices;
+public static class Wb2aConsole {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+    public const int STD_INPUT_HANDLE = -10;
+    public const uint ENABLE_EXTENDED_FLAGS = 0x0080;
+    public const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+    public static string DisableQuickEdit() {
+        IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
+        uint mode;
+        if (!GetConsoleMode(h, out mode)) { return "GetConsoleMode failed"; }
+        uint updated = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
+        if (!SetConsoleMode(h, updated)) { return "SetConsoleMode failed"; }
+        return "ok";
+    }
+}
+'@
+    Add-Type -TypeDefinition $qkSig -ErrorAction Stop
+    $qkResult = [Wb2aConsole]::DisableQuickEdit()
+    # 此处还不能用 Write-Log（它定义在下方），直接写文件
+    $qkLine = "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] [INFO] 控制台 QuickEdit 已关闭（$qkResult）`r`n"
+    [System.IO.File]::AppendAllText($LogPath, $qkLine, (New-Object System.Text.UTF8Encoding $false))
+} catch {
+    # 无控制台（被重定向/服务态运行）时会失败，属正常，静默略过
+    try {
+        $qkLine = "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] [WARN] 无法关闭控制台 QuickEdit（$_），将跳过`r`n"
+        [System.IO.File]::AppendAllText($LogPath, $qkLine, (New-Object System.Text.UTF8Encoding $false))
+    } catch { }
+}
+
+
 # ⚠️ Write-Log 必须在**任何调用点之前**定义（顶层语句自上而下执行，函数在定义前不可见）。
 # 真实踩坑（2026-09-20）：互斥锁代码块（下方）在冲突分支调用 Write-Log，而当时它定义在
 # 锁块之后 → 一旦锁冲突/异常落到那些分支，脚本抛 CommandNotFoundException 直接死掉，
