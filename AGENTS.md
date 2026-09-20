@@ -18,10 +18,10 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：423 passed 为当前基线 (含长思考超时与防惊群契约)
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：551 passed 为当前基线 (含长思考超时与防惊群契约)
 ./.venv/Scripts/python.exe tests/run_isolated_tests.py   # 同上，但在「禁真实 DNS/socket + 用户目录指向临时目录 + 清空 WORKBUDDY* 环境变量」下再跑一遍
-npm test                                          # 前端：202 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：85 passed
+npm test                                          # 前端：219 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：90 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
