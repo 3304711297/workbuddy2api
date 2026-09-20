@@ -1187,3 +1187,33 @@ test('resume 进行中的更新前必须核实更新进程仍存活（防卡在�
     'lib.rs 未注册 app_update_resume'
   );
 });
+
+test('Rust 侧写入的每个 failureKind 都必须在前端 FAILURE_HINTS 里有对应提示', () => {
+  // 2026-09-20 疏漏（自己引入的）：app_update_resume 在收尾残留状态时会写
+  // failureKind='updater-gone'，但前端 FAILURE_HINTS 没有该键 —— 用户看到的是
+  // 兜底的「请查看日志了解详情」，而不是「上次更新没跑完，可重新发起」。
+  //
+  // 判据：扫描 Rust 源码里所有 `"failureKind": "xxx"` 字面量（那是 PowerShell 写状态
+  // 文件的字段名对应物），逐个要求前端有提示。比手工维护两份清单可靠：
+  // 以后在 Rust 侧新增任何失败分类，这里都会立刻红。
+  const code = stripRustComments(updateRs);
+  const produced = new Set();
+  for (const m of code.matchAll(/"failureKind"\s*:\s*"([a-z0-9-]+)"/g)) {
+    produced.add(m[1]);
+  }
+  assert.ok(
+    produced.size > 0,
+    '未从 Rust 源码提取到任何 failureKind 字面量：提取逻辑或写法已变（本测试会空过）'
+  );
+
+  const hintsIdx = updateJs.indexOf('const FAILURE_HINTS');
+  assert.ok(hintsIdx > 0, '未找到 FAILURE_HINTS');
+  const hintsBlock = updateJs.slice(hintsIdx, updateJs.indexOf('};', hintsIdx) + 2);
+  const missing = [...produced].filter((k) => !new RegExp(`['"]?${k}['"]?\\s*:`).test(hintsBlock));
+
+  assert.deepStrictEqual(
+    missing,
+    [],
+    `Rust 侧会写出这些 failureKind 但前端无提示（用户只能看到笼统兜底文案）：${missing.join(', ')}`
+  );
+});
