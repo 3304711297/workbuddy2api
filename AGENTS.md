@@ -152,6 +152,14 @@ Get-CimInstance Win32_Process -Filter "Name='workbuddy2api.exe'" |
 
 ## 3. 会让当前聊天断掉的操作（重要）
 
+⚠️ **更新途中被硬断电 / 强杀后，工作树会领先于运行产物，下一次更新会「跳过」你本来要拿到的修复**（2026-09-20 实测）：
+断电时脚本刚跑完 `git merge --ff-only`（工作树已到新 commit），但 `cargo tauri build` 没跑完。
+用户随后手动 `npm run build && cargo tauri build` 重建，得到的 exe 就烘焙在那个**已合并的** commit 上。
+此时再点更新 → 脚本报「工作树（X）已比运行中的产物（Y）新，需要重建」+「远端 main 无新提交」→
+只重建、**不 fetch/merge** → 用户以为更新成功了，实际拿不到后来的修复。
+**判据**：`update-check.json` 的 `current_sha`（= exe 烘焙值）落后于 `git rev-parse main`
+时，点更新不会拉新代码。要验证更新链路，必须先让**远端与工作树**产生真实差距（推一个新提交）。
+
 本机 Hermes 的对话模型就走这条反代链路。**以下操作会切断 8787、中断进行中的会话**：
 
 - 退出 / 重启 GUI（内核是它的子进程）
