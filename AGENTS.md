@@ -370,6 +370,29 @@ workbuddy2api.exe (GUI)
   失败分类在「脚本 kind / Rust 字段 / 前端 FAILURE_HINTS」三处必须一致
   （`tests/test_app_update_contract.test.js` 会逐项对拍，漏一处即红）。
 
+  ⚠️ **`dirty` 判定必须问真实 git，绝不能用 mtime 启发式**（2026-09-20 用户实测
+  `update-check.json` 报 `dirty:true` 而 `git status` 为空）：旧实现拿 `.git/index`
+  的 mtime 与 `.git/HEAD` 比大小，但 **commit 只写 index，HEAD 文件仅作符号引用
+  （`ref: refs/heads/main`），只在 checkout / 切分支时才重写** ⇒ 每次提交后
+  `index > HEAD` 恒成立，**干净树被永久误报为「有未提交改动」**，与「宁可漏报也不
+  误报」的原意完全相反（用户在更新弹窗看到虚假的恐吓文案）。
+  现改为跑 `git status --porcelain`（本机 17ms）：有输出（含 `??` 未跟踪文件——
+  脚本用 `git stash push -u`，未跟踪文件同样会进 stash）= 脏；空 = 干净；
+  执行失败 = 报「不脏」（漏报优先）。必须 `env_remove` 掉
+  `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`——命令行 git 会继承它们并去查
+  **别的仓库**（还会「成功」返回空结果），属于静默错答案。契约锁定：
+  `update.rs::working_tree_dirty_is_false_after_clean_commit` +
+  `working_tree_dirty_detects_unstaged_and_staged_changes`（双向：误报与漏报各一条）。
+
+  ⚠️ **契约测试的断言范围必须绑在「被约束的那个 spawn 点」，不是整个文件**：
+  `test_app_update_contract` 里「不得使用 CREATE_NO_WINDOW」一条原本扫全文，
+  而 `working_tree_dirty` 跑 git 子进程时用 CREATE_NO_WINDOW 抑制黑框闪窗是
+  **正当**的 —— 扫全文会把合法用法判成回归。已收窄到 `apply_app_update` 函数体
+  （按 `pub fn apply_app_update` 定位、取到下一个顶格 `}`），并加了一条反向自检
+  （切片里必须含 `cmd.exe` 与 `/min`，否则说明边界定位失效、后续断言等于没验证）。
+  ⚠️ 切片时注意 `stripRustComments` **刻意保留行尾的 `\r`**（保证 LF/CRLF 结果一致），
+  拆行要用正则 `\r?\n`（或先归一化行尾）并 `trimEnd()`，否则顶格 `}` 永远匹配不上。
+
 - **`model_list_mode` 开关的作用域（别把它当成万能的）**：
   本开关**只改变内核向客户端暴露的清单**（`/v1/models`），**管不到客户端自己写死的模型表**。
   典型困惑：用户选了「仅展示可用模型」，但 Hermes 模型选择器里仍有需授权模型——

@@ -425,29 +425,54 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
     Ok(result)
 }
 
-/// 工作区是否有未提交改动的近似判定。
+/// 工作区是否有未提交改动的判定。
 ///
-/// 精确比对需要完整 git 实现（index vs HEAD tree）；这里用两个高置信信号：
-/// ① 存在 `MERGE_HEAD` / `rebase-merge` / `rebase-apply` 等中间态（必然「不干净」）；
-/// ② `.git/index` 的 mtime 晚于 `HEAD` 引用文件 —— 提交或暂存都会先更新 HEAD/index。
-/// 宁可漏报（脚本仍会 stash）也不误报，因为误报会让用户在干净树上看到「有改动」的恐吓文案。
+/// ⚠️ **必须问真实的 git，不能用 mtime 启发式**（2026-09-20 修正）：
+/// 旧实现拿 `.git/index` 的 mtime 与 `.git/HEAD` 比大小，理由是「提交或暂存都会先
+/// 更新 HEAD/index」——但这半句是错的：**commit 只写 index，HEAD 文件仅作符号引用
+/// （`ref: refs/heads/main`），只在 checkout / 切分支时才重写**。于是每次提交后
+/// `index > HEAD` 恒成立，**干净树被永久误报为「有未提交改动」**（用户实测：
+/// `update-check.json` 报 `dirty: true`，而 `git status --porcelain` 输出为空）。
+/// 这与本函数原本宣称的「宁可漏报也不误报」完全相反。
+///
+/// 改为直接跑 `git status --porcelain`（实测本机 17ms，够快；失败时报「不脏」保持
+/// 漏报优先的取向，与 `MERGE_HEAD` 那条同样宁可漏报也不吓唬用户）：
+///   · 有输出（含 `??` 未跟踪文件）= 脏 —— 脚本用 `git stash push -u`，未跟踪文件
+///     同样会被保存并可能因 pop 冲突而回不来，所以它也算「不干净」；
+///   · 空输出 = 干净。
+///
+/// `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` 必须剔除：命令行 git 会继承它们，
+/// 一旦被设置就会查询别的仓库（甚至会「成功」返回空结果），属于静默错答案。
 fn working_tree_dirty(root: &Path) -> bool {
-    let Some(git_dir) = resolve_git_dir(root) else {
-        return false;
-    };
-    if git_dir.join("MERGE_HEAD").exists()
-        || git_dir.join("rebase-merge").exists()
-        || git_dir.join("rebase-apply").exists()
-    {
-        return true;
+    // 合并/变基中间态：必然「不干净」，且此时 git status 也可能被卡住，先判掉。
+    if let Some(git_dir) = resolve_git_dir(root) {
+        if git_dir.join("MERGE_HEAD").exists()
+            || git_dir.join("rebase-merge").exists()
+            || git_dir.join("rebase-apply").exists()
+        {
+            return true;
+        }
     }
-    let (Ok(idx), Ok(head)) = (
-        git_dir.join("index").metadata(),
-        git_dir.join("HEAD").metadata(),
-    ) else {
-        return false;
-    };
-    matches!((idx.modified(), head.modified()), (Ok(a), Ok(b)) if a > b)
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain"])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    // Windows 下不弹黑框（GUI 进程调用命令行工具时的常规防御）。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.output() {
+        Ok(out) if out.status.success() => !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        // git 不可用 / 非检出 / 执行失败：按「不脏」处理（漏报优先，避免无谓的恐吓文案）。
+        _ => false,
+    }
 }
 
 /// 交接握手判据：状态是否已到达 `handoff-ready` **或任何更晚的阶段**。
@@ -790,6 +815,44 @@ mod tests {
         dir
     }
 
+    /// 在测试目录里跑一条 git 命令。
+    ///
+    /// 宿主配置必须隔离：`user.name`/`user.email` 用环境变量直接给定（CI 容器里没有
+    /// 全局身份，不隔离就 commit 失败），并把 global/system 配置指向空设备（防止
+    /// 宿主设了 `hooksPath`/`core.fsmonitor` 之类改变本测试所依赖的行为）。
+    fn git_run(root: &Path, args: &[&str]) {
+        let null_cfg = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", null_cfg)
+            .env("GIT_CONFIG_SYSTEM", null_cfg)
+            .env("GIT_AUTHOR_NAME", "dirty-test")
+            .env("GIT_AUTHOR_EMAIL", "dirty-test@example.com")
+            .env("GIT_COMMITTER_NAME", "dirty-test")
+            .env("GIT_COMMITTER_EMAIL", "dirty-test@example.com")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE");
+        let out = cmd
+            .output()
+            .expect("git 不可用：dirty 判定测试需要真实 git 可执行文件");
+        assert!(
+            out.status.success(),
+            "git {:?} 失败：{}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// 建一个真实 git 仓库并完成一次初始提交（默认分支 main）。
+    fn git_init_commit(root: &Path) {
+        git_run(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("file.txt"), "base").unwrap();
+        git_run(root, &["add", "-A"]);
+        git_run(root, &["commit", "-q", "-m", "base"]);
+    }
+
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -977,6 +1040,61 @@ mod tests {
         assert!(!working_tree_dirty(&root));
         std::fs::write(git.join("MERGE_HEAD"), SHA_B).unwrap();
         assert!(working_tree_dirty(&root), "合并中间态必须判为不干净");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 干净树（刚提交完）必须判为「不脏」。
+    ///
+    /// ⚠️ 这条锁定的是一个真实误报（2026-09-20 用户实测）：旧实现拿
+    /// `.git/index` 的 mtime 与 `.git/HEAD` 比大小，而 **commit 只更新 index、
+    /// 不更新 HEAD 文件**（HEAD 只在 checkout / 分支切换时才重写）——
+    /// 于是每次提交之后，`index > HEAD` 恒成立，**干净树被永久误报为「有未提交改动」**，
+    /// 用户在有可用更新时会看到「检测到工作区有未提交改动」的恐吓文案。
+    /// 这与该函数文档宣称的「宁可漏报也不误报」正好相反。
+    #[test]
+    fn working_tree_dirty_is_false_after_clean_commit() {
+        let root = tmp_dir("clean_commit");
+        git_init_commit(&root);
+
+        // 前置：确认这个仓库确实是干净的（否则测试自身前提不成立）
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+            "测试前提不成立：新建仓库在提交后本应是干净的"
+        );
+
+        assert!(
+            !working_tree_dirty(&root),
+            "刚提交完的干净工作树被判为「有未提交改动」——用户在更新弹窗里会看到\
+             虚假的恐吓文案（index.mtime 在每次提交后都晚于 HEAD 文件）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 有未提交改动时必须判为「脏」（反向锁定，防止修复过度而永远说「干净」）。
+    #[test]
+    fn working_tree_dirty_detects_unstaged_and_staged_changes() {
+        let root = tmp_dir("dirty_real");
+        git_init_commit(&root);
+
+        // ① 未暂存的改动
+        std::fs::write(root.join("file.txt"), "modified").unwrap();
+        assert!(working_tree_dirty(&root), "未暂存的改动必须判为不干净");
+
+        // ② 已暂存的改动（模拟 git add 之后）
+        git_run(&root, &["add", "-A"]);
+        assert!(working_tree_dirty(&root), "已暂存的改动必须判为不干净");
+
+        // ③ 未跟踪文件（更新脚本会用 `git stash -u` 一并保存，故也属「不干净」）
+        git_run(&root, &["reset", "-q", "--hard"]);
+        std::fs::write(root.join("untracked.txt"), "new").unwrap();
+        assert!(working_tree_dirty(&root), "未跟踪文件也会被 stash -u 保存，应判为不干净");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

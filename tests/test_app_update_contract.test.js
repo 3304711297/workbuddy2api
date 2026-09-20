@@ -166,21 +166,41 @@ test('更新脚本 spawn 既不隐藏控制台也不静默失效（控制台是�
   //
   // 当前方案（对齐 Hermes apps/desktop/electron/updater-process.ts）：经
   // `cmd /d /s /c start "" /min powershell ...` 启动 —— cmd 立即退出、脚本获得
-  // 自己的最小化控制台，既解决 console 初始化又呈现进度。故本处断言：
-  //   · 不得出现 DETACHED_PROCESS
-  //   · 不得设置任何会隐藏窗口的 creation_flags（CREATE_NO_WINDOW）
-  const updateRsCode = updateRs.replace(/\/\/[^\n]*/g, '');
+  // 自己的最小化控制台，既解决 console 初始化又呈现进度。
+  //
+  // ⚠️ **断言范围必须限定在 apply_app_update 内**（2026-09-20 收窄）：本文件别处
+  // 的 `working_tree_dirty` 会跑 `git status`，那里用 CREATE_NO_WINDOW 抑制黑框闪窗
+  // 是**正当**的（GUI 调命令行工具的常规防御，与更新脚本的控制台无关）。扫全文会
+  // 把这类合法用法判成回归 —— 约束要绑在被约束的那个 spawn 点，不是整个文件。
+  const code = stripRustComments(updateRs);
+  const fnStart = code.indexOf('pub fn apply_app_update');
+  assert.ok(fnStart > 0, '未找到 apply_app_update 定义');
+  // 函数体：从定义起到下一个顶格 '}'（Rust 顶层 fn 的收尾）。
+  // ⚠️ stripRustComments 保留 `\r`（它刻意不吞行尾以保证 LF/CRLF 结果一致），
+  // 所以必须按 /\r?\n/ 拆行并 trimEnd，否则 `}` 永远匹配不上顶格行。
+  const afterStart = code.slice(fnStart);
+  const bodyLines = afterStart.split(/\r?\n/).map((l) => l.trimEnd());
+  const endIdx = bodyLines.findIndex((line, i) => i > 0 && line === '}');
+  assert.ok(endIdx > 0, 'apply_app_update 函数体边界未找到（顶层 } 缺失）');
+  const spawnCode = bodyLines.slice(1, endIdx).join('\n');
+  // 反向自检：边界必须落在真正的函数收尾上，而不是别处（否则断言范围会失控或为空）。
   assert.ok(
-    !/DETACHED_PROCESS/.test(updateRsCode),
+    spawnCode.includes('cmd.exe') && spawnCode.includes('/min'),
+    'apply_app_update 函数体切片异常：未包含预期的 cmd start /min 启动代码 —— ' +
+      '边界定位不可信，后续断言等于没验证'
+  );
+
+  assert.ok(
+    !/DETACHED_PROCESS/.test(spawnCode),
     'spawn 使用了 DETACHED_PROCESS：PowerShell 会静默不执行脚本（无声闪退根因）'
   );
   assert.ok(
-    !/CREATE_NO_WINDOW/.test(updateRsCode),
+    !/CREATE_NO_WINDOW/.test(spawnCode),
     'spawn 仍设置 CREATE_NO_WINDOW：控制台被隐藏，用户看不到更新进度。' +
       '应改用 cmd start /min 包装（Hermes 同款）'
   );
   assert.ok(
-    !/\.creation_flags\s*\(/.test(updateRsCode),
+    !/\.creation_flags\s*\(/.test(spawnCode),
     'spawn 仍显式设置 creation_flags：控制台应由 cmd start 分配，勿再干预'
   );
 });
