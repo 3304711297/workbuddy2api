@@ -2536,6 +2536,20 @@ def _is_blank_refusal(result) -> bool:
         total = (prompt_t or 0) + (completion_t or 0)
     if total != 0:
         return False
+    # usage 内部一致性（外部评审 P1 采纳）：total_tokens==0 但明细非零属自相矛盾的报文
+    # （如 total=0 / prompt=100），说明「零 token」这个证据本身不可信 → Fail-Closed 判否。
+    # 任何一项明细非零都不得重试，否则会把有实质产出的响应再发一次。
+    if any(_usage_int(v) for v in (
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+    )):
+        return False
+    for detail_key in ("completion_tokens_details", "prompt_tokens_details"):
+        detail = usage.get(detail_key)
+        if isinstance(detail, dict) and _usage_int(detail.get("reasoning_tokens")):
+            return False
 
     text = msg.get("content")
     if isinstance(text, list):  # 多模态 content 数组：只拼文本块
@@ -3095,12 +3109,16 @@ class AccountRotator:
 
 
 async def _failover_jitter(rid: str = "") -> None:
-    """多账号故障转移时的防风控微抖动（随机休眠 0.5~1.2s），降低同设备同 IP 毫秒级突发请求的风控关联度。"""
+    """重试前的防风控微抖动（随机休眠 0.5~1.2s），降低同设备同 IP 毫秒级突发请求的风控关联度。
+
+    触发场景有两类，文案不写死具体哪一种：
+    ① 多账号 failover 切号后重试；② 空拒答的同账号重试（不切号）。
+    """
     if not CONFIG.get("failover_jitter", True):
         return
     jitter = random.uniform(0.5, 1.2)
     prefix = f"[{rid}] " if rid else ""
-    _log(f"{prefix}⏳ 多账号避让防风控抖动：等待 {jitter:.2f}s 后以新账号发起重试...")
+    _log(f"{prefix}⏳ 防关联防风控抖动：等待 {jitter:.2f}s 后重试...")
     await asyncio.sleep(jitter)
 
 
@@ -4532,6 +4550,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     ttft_ms = None
     retry_count = 0
     retry_reason = None
+    blank_retries = 0
     curr_uid = uid
     curr_headers = dict(headers)
 
@@ -4595,6 +4614,17 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             except (asyncio.CancelledError, Exception):
                                 pass
                         raise
+                    # 空拒答（上游抽样误伤）：本路径是「先聚合后伪流式下发」，
+                    # 判定发生在任何字节发往客户端之前 → 无需缓冲窗口，直接同账号重试。
+                    if _is_blank_refusal(collected) and blank_retries < _BLANK_REFUSAL_MAX_RETRIES:
+                        blank_retries += 1
+                        _log(f"{prefix}⚠️ 上游抽样空拒答 (finish={collected['choices'][0].get('finish_reason')}, "
+                             f"tokens=0, 正文仅拒答文案)，同账号重试 "
+                             f"({blank_retries}/{_BLANK_REFUSAL_MAX_RETRIES})...")
+                        collected = None
+                        ttft_ms = None
+                        await _failover_jitter(rid)
+                        continue
         except httpx.HTTPError as e:
             if rotator and attempt < max_attempts - 1:
                 failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
@@ -5276,7 +5306,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     def _reset_attempt_state() -> None:
         """丢弃本轮的缓冲与统计，为新一次尝试腾出干净状态。"""
-        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress
+        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter
         pending_events.clear()
         attempt_content.clear()
         tool_names.clear()
@@ -5287,6 +5317,9 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         ttft_ms = None
         err_msg = None
         attempt_saw_progress = False
+        # saw_filter 是「本次尝试」的观测：跨尝试残留会污染最终日志标签
+        # （重试成功仍显示「内容审核拦截」），必须一并清除。
+        saw_filter = False
 
     def _record_usage_once(*args, **kwargs):
         nonlocal usage_recorded

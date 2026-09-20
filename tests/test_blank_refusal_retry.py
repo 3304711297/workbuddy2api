@@ -65,6 +65,11 @@ def frames_success(text: str = "正常回答") -> list[bytes]:
     ]
 
 
+def _sse_events(frames: list[bytes]) -> list[bytes]:
+    """把多帧合成「一个字节块」下发——模拟上游把同一请求的多帧塞进一次 TCP 交付。"""
+    return [b"".join(frames)]
+
+
 def frames_long_content_filter() -> list[bytes]:
     """有实质内容的 content_filter：长正文 + 计费 token，属正常语义，不得重试。"""
     return [
@@ -245,6 +250,122 @@ def test_is_blank_refusal_predicate_matrix():
     assert converter._is_blank_refusal(None) is False
     assert converter._is_blank_refusal({}) is False
     assert converter._is_blank_refusal({"choices": []}) is False
+
+
+def _usage_result(content, finish, usage):
+    return {"choices": [{"index": 0, "message": {"role": "assistant", "content": content},
+                         "finish_reason": finish}], "usage": usage}
+
+
+def test_usage_internal_inconsistency_fails_closed():
+    """外部评审 P1 采纳：total_tokens==0 但明细非零属自相矛盾报文，不得判为空拒答。
+
+    理由：这种情况下「零 token」这个证据本身不可信；若放行重试，会把可能
+    已有实质产出的响应再发一次（误重试比漏重试危险）。
+    """
+    assert converter._is_blank_refusal(
+        _usage_result("hi", "content_filter", {"total_tokens": 0, "prompt_tokens": 100})) is False
+    assert converter._is_blank_refusal(
+        _usage_result("hi", "content_filter", {"total_tokens": 0, "completion_tokens": 7})) is False
+    assert converter._is_blank_refusal(
+        _usage_result("hi", "content_filter", {"total_tokens": 0, "input_tokens": 3})) is False
+    assert converter._is_blank_refusal(
+        _usage_result("hi", "content_filter", {"total_tokens": 0, "output_tokens": 3})) is False
+    assert converter._is_blank_refusal(
+        _usage_result("hi", "content_filter",
+                      {"total_tokens": 0, "completion_tokens_details": {"reasoning_tokens": 5}})) is False
+    assert converter._is_blank_refusal(
+        _usage_result("hi", "content_filter",
+                      {"total_tokens": 0, "prompt_tokens_details": {"reasoning_tokens": 2}})) is False
+    # 真·全零（实测样本形状）仍必须判是
+    assert converter._is_blank_refusal(_usage_result(
+        REFUSAL_TEXT, "content_filter",
+        {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0})) is True
+    # 只有 total_tokens 字段也接受（无明细可矛盾）
+    assert converter._is_blank_refusal(
+        _usage_result(None, "content_filter", {"total_tokens": 0})) is True
+
+
+def test_safe_stream_blank_refusal_retried_same_account(monkeypatch, no_sleep, quiet_side_effects):
+    """带 tools 的流式路径（_safe_stream_upstream）也必须接入空拒答重试。
+
+    该路径是「先聚合后伪流式下发」，判定发生在任何字节发往客户端之前，
+    所以重试时拒答文案天然不会泄漏。
+    """
+    scripts = [
+        _sse_events(frames_refusal()),
+        _sse_events(frames_success("带工具路径的正常回答")),
+    ]
+    client = _ScriptedClient(scripts)
+    monkeypatch.setattr(converter, "_shared_client_ctx", lambda timeout=None: _Ctx(client))
+
+    async def _go():
+        out = []
+        gen = converter._safe_stream_upstream(
+            url="https://api.test/v2/chat/completions",
+            headers={"Authorization": "Bearer fake"},
+            body={"model": "deepseek-v4.1-flash",
+                  "tools": [{"type": "function", "function": {"name": "t", "parameters": {}}}]},
+            model_name="deepseek-v4.1-flash",
+            uid="uid-test",
+        )
+        async for chunk in gen:
+            out.append(chunk)
+        return b"".join(out)
+
+    payload = asyncio.run(_go())
+
+    assert client.calls == 2, "带 tools 的流式路径必须重试空拒答"
+    assert "带工具路径的正常回答" in payload.decode("utf-8")
+    assert REFUSAL_TEXT not in payload.decode("utf-8"), "被重试掉的拒答文案不得泄漏"
+
+
+def test_safe_stream_blank_refusal_exhausted_passes_through(monkeypatch, no_sleep, quiet_side_effects):
+    """带 tools 的流式路径：重试耗尽后原样下发拒答（不无限重试）。"""
+    scripts = [_sse_events(frames_refusal()), _sse_events(frames_refusal())]
+    client = _ScriptedClient(scripts)
+    monkeypatch.setattr(converter, "_shared_client_ctx", lambda timeout=None: _Ctx(client))
+
+    async def _go():
+        out = []
+        gen = converter._safe_stream_upstream(
+            url="https://api.test/v2/chat/completions",
+            headers={"Authorization": "Bearer fake"},
+            body={"model": "deepseek-v4.1-flash",
+                  "tools": [{"type": "function", "function": {"name": "t", "parameters": {}}}]},
+            model_name="deepseek-v4.1-flash",
+            uid="uid-test",
+        )
+        async for chunk in gen:
+            out.append(chunk)
+        return b"".join(out)
+
+    payload = asyncio.run(_go())
+
+    assert client.calls == 2, "上限 1 次重试（共 2 次尝试）"
+    # 伪流式下发会把正文按 32 字符切片，故这里校验「重组后的完整正文」与终结态
+    text = payload.decode("utf-8")
+    joined = "".join(
+        (json.loads(l[6:]).get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+        for l in text.splitlines() if l.startswith("data: {")
+    )
+    assert joined == REFUSAL_TEXT, "重试耗尽必须原样下发拒答正文，不得静默吞掉"
+    assert "\"finish_reason\": \"content_filter\"" in text, "终结态必须如实保留 content_filter"
+
+
+def test_reset_attempt_state_clears_filter_flag(monkeypatch, no_sleep, quiet_side_effects):
+    """saw_filter 是「本次尝试」的观测：重试后不得残留，否则重试成功的日志仍被误标。"""
+    payload, client = _run_stream(monkeypatch, [frames_refusal(), frames_success("干净回答")])
+
+    assert client.calls == 2
+    assert "干净回答" in payload.decode("utf-8")
+
+
+def test_failover_jitter_wording_covers_same_account_retry(monkeypatch):
+    """抖动日志不得断言「新账号」——空拒答重试是同账号，写死会误导排障。"""
+    import inspect
+    src = inspect.getsource(converter._failover_jitter)
+    assert "新账号" not in src, "抖动日志文案不得写死「新账号」（同账号重试也复用它）"
 
 
 # ── 流式路径 ────────────────────────────────────────────────────────────
