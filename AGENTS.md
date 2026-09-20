@@ -57,6 +57,25 @@ npm run build && cd src-tauri && cargo tauri build --no-bundle
 读无 BOM 的 UTF-8 文件时按 ANSI/GBK 解码，中文注释变乱码打散引号配对 → **19 个解析
 错误 → 脚本在写第一行日志之前就死了**，表现为「点更新闪退且无日志无状态文件」。
 5.1 只认 BOM 才按 UTF-8 读。写入后必须确认文件头是 `EF BB BF`（契约测试锁定）。
+⚠️ **方法调用的参数列表里禁止出现管道（2026-09-20 用户实测「点更新一直卡在更新中」的根因）**：
+`[string]::Join("`n", @(...) | Where-Object { $_ })` 会被解析器提前闭合参数列表，
+产生 **4 个解析错误**（报在 L895 缺 `)`、L768 块未闭合、L910 意外 `}`——**报错行会误导，
+真凶是那一行的管道**）。PowerShell 解析失败时**一行都不执行**，于是无日志、无状态文件，
+而 Rust 侧 8s `handoff-ready` 握手超时后按设计保持 GUI 存活 ⇒ 用户看到「一直卡在更新中」
+且无任何可查线索。正确写法：管道结果先加括号成表达式，再用 `-join` 拼接：
+`(@($a, $b) | Where-Object { $_ }) -join "`n"`。同类禁令适用于任何 `.Method(... | ...)`。
+⚠️ **脚本内函数必须在任何调用点之前定义（同一轮实测发现的第二处静默死亡）**：
+顶层语句自上而下执行，**函数在定义前不可见**；互斥锁代码块在冲突/异常分支调用
+`Write-Log`，而它定义在锁块之后 → 一旦锁冲突就抛 `CommandNotFoundException`，
+且因「写日志的动作本身依赖这个函数」连一行日志都留不下（与上面的语法错误表现完全一致、
+极难区分）。**新增函数时，把定义放在首个调用点之前**；契约测试已锁定「顶层调用点
+不得早于定义」（函数体内的调用不算——运行时才解析）。
+⚠️ **这两类"解析/定义阶段静默死亡"的通用排查手段**：`Parser::ParseFile` 静态分析
+（解析不执行、无副作用）比追日志快得多：
+`[System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errors)`，
+pwsh 7+ 与 5.1 都要跑一遍（两者报错数可能不同）。**"无日志无状态文件" ≠ 脚本内某步失败，
+而应首先怀疑脚本根本没跑起来**——优先查 `update` 目录里有无浏览器临时 profile
+（`$env:TEMP/workbuddy2api-update-ui-*`，脚本跑到启动视窗才会有），它是"脚本执行过"的铁证。
 ⚠️ **`which()` 在 Windows 不能用 `is_file()`**：Store 版 pwsh 的
 `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` 是 AppExecLink 重解析点，`is_file()`
 对它返回 false → which 静默找不到 pwsh → 回退 5.1 → 触发上述 BOM 死亡链。
