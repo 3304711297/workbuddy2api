@@ -52,6 +52,20 @@
     ⚠️ 必须由 GUI 传入其配置真源（`load_app_config().port`）。**不得**在本脚本里
     写死 8787：端口可配置，用户配成 9000 时新版会正常监听 9000，而写死 8787 的
     探活必然失败 → 90 秒后误判 startup-unhealthy → 把**正常的新版**回滚掉。
+
+.PARAMETER AutoStartProxy
+    用户是否开启了「启动时自动拉起反代内核」（settings.json 的 auto_start_proxy）。
+
+    ⚠️ **必须传字符串 'true'/'false'，不能声明成 [bool]**：实测（PowerShell 5.1 与
+    pwsh 7 均同）`-File script.ps1 -Flag true` 这类传参在 [bool] 参数上一律失败
+    （「无法将 System.String 转换为 System.Boolean」），脚本直接退出。字符串参数
+    由脚本内部转成布尔（见下方 $AutoStartProxy -eq 'true'）。
+
+    ⚠️ 为什么它决定成败（2026-09-20 用户实测，差点回滚掉一次**成功**的更新）：
+    脚本第 7 步的启动确认要求「进程存活 **且** 端口能探活 /health」。但用户关掉
+    自动启动时，新 GUI 起来后**不会**自动拉起内核，端口自然不监听 —— 于是必然
+    90s 超时 → 判 startup-unhealthy → 把刚构建好的新版回滚掉。
+    正解：未开自动启动时**只验进程存活**（端口能探到算加分，不作硬条件）。
 #>
 [CmdletBinding()]
 param(
@@ -62,8 +76,12 @@ param(
     [string]$StatePath,
     [string]$CurrentBuildSha = '',
     [Parameter(Mandatory = $true)][int]$Port,
-    [string]$RunId = ''
+    [string]$RunId = '',
+    [string]$AutoStartProxy = 'false'
 )
+
+# 字符串 → 布尔（[bool] 参数经 -File 传参无法绑定，见 .PARAMETER AutoStartProxy）
+$autoStartProxyEnabled = ($AutoStartProxy -eq 'true')
 
 $ErrorActionPreference = 'Stop'
 
@@ -552,6 +570,30 @@ function Wait-WorkBuddyHealthy {
     if (-not $Process) {
         return @{ ok = $false; reason = '新版应用未能启动（Start-WorkBuddy 返回空）' }
     }
+
+    # ── 判据按「用户是否开着自动启动内核」分流（2026-09-20 用户实测修复）──────
+    # auto_start_proxy=false 时，新 GUI 起来后**不会**自动拉起内核，端口永远不监听。
+    # 若仍坚持「必须探到端口 2xx」，则必然 90s 超时 → 判 startup-unhealthy →
+    # **把刚刚成功构建并启动的新版回滚掉**（本次是用户手动从托盘启动内核才碰巧躲过）。
+    # 未开启自动启动时的正确判据：只需确认进程存活且稳定活过观察期。
+    if (-not $autoStartProxyEnabled) {
+        Write-Log '用户未开启「启动时自动拉起内核」：启动确认只验进程存活（不要求端口探活）'
+        # 观察期内进程必须一直存活才判通过：立即返回会把「启动即崩」的坏版本放行。
+        # 3 秒足够暴露「dll 缺失 / 配置解析失败」这类瞬时崩溃，又不至于让用户干等。
+        $observeDeadline = (Get-Date).AddSeconds(3)
+        while ((Get-Date) -lt $observeDeadline) {
+            if ($Process.HasExited) {
+                return @{ ok = $false; reason = "新版应用启动后立即退出（退出码 $($Process.ExitCode)）" }
+            }
+            Start-Sleep -Milliseconds 300
+        }
+        # 顺手看一次端口：探到就算加分（用户可能在设置里改了但我们读到的配置是旧的），
+        # 探不到也不影响结论 —— 这正是本分支存在的意义。
+        $probe = Test-ProxyEndpoint -Url $PROXY_HEALTH_URL
+        $extra = if ($probe.ok) { "，且反代已在 $PROXY_HEALTH_URL 响应" } else { '，反代未自动启动（符合用户设置）' }
+        return @{ ok = $true; reason = "新版应用已启动并存活 3 秒$extra" }
+    }
+
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if ($Process.HasExited) {

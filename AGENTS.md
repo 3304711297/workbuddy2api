@@ -393,6 +393,32 @@ workbuddy2api.exe (GUI)
   ⚠️ 切片时注意 `stripRustComments` **刻意保留行尾的 `\r`**（保证 LF/CRLF 结果一致），
   拆行要用正则 `\r?\n`（或先归一化行尾）并 `trimEnd()`，否则顶格 `}` 永远匹配不上。
 
+  ⚠️ **启动确认的判据必须按「用户是否开着自动启动内核」分流（2026-09-20 用户实测，
+  差点回滚掉一次成功的更新）**：`Wait-WorkBuddyHealthy` 原本要求「进程存活 **且**
+  端口能探活」。但 `auto_start_proxy=false` 的用户，新 GUI 起来后**不会**自动拉起
+  内核，端口自然不监听 ⇒ 必然 90s 超时 ⇒ 判 `startup-unhealthy` ⇒ **把刚构建好的
+  新版回滚掉**（本次是用户手动从托盘启动内核才碰巧躲过）。
+  正解：Rust 侧从配置真源读 `load_app_config().auto_start_proxy` 传给脚本
+  `-AutoStartProxy`；未开启时只验进程存活（观察期 3 秒防「启动即崩」被放行，
+  端口探到算加分）。
+  ⚠️ **传参必须声明成 `[string]$AutoStartProxy`，不能是 `[bool]`**：实测
+  （PS 5.1 与 pwsh 7 均同）`-File script.ps1 -Flag true` 在 `[bool]` 参数上一律绑定
+  失败（「无法将 System.String 转换为 System.Boolean」）并直接退出。脚本内自行
+  `($AutoStartProxy -eq 'true')` 转布尔。**任何经 `-File` 传递的布尔值都要走字符串。**
+
+  ⚠️ **接续「进行中的更新」前必须核实更新进程仍存活（2026-09-20 用户实测，弹窗关不掉）**：
+  脚本被用户关窗杀死后，`state.json` 永久停在 `restarting`（再没机会写终态）。
+  前端原先只查 `phase` 是否属于「进行中」，于是**每次启动都弹出关不掉的「正在更新」
+  弹窗** —— 应用本身可用但启动即被劫持，用户连重启软件都摆脱不了。
+  正解：新增 `app_update_resume` 命令，判据收紧为「phase 在进行中 **且**
+  `state.updater_pid` 的进程仍活着」，且命令行须含 `windows.ps1` 与 `app-update`
+  （**PID 会被系统复用**，只看 PID 存在会把无关进程当成更新进程 ⇒ 永远接续死掉的
+  更新）。进程已死则把残留收尾成 `failed` + `updater-gone`（不写 `done`：无从确认
+  更新是否真的完成，谎报 done 会让用户以为成功而不再检查）。
+  ⚠️ `phase_is_in_progress` 与 `phase_is_handoff_ready_or_later` 是**两个不同判据**
+  （前者问「还有没有活干」、后者问「握手是否过点」），**不要合并**；前者绝不含
+  `done`/`failed`/`rolled-back` 终态。
+
 - **`model_list_mode` 开关的作用域（别把它当成万能的）**：
   本开关**只改变内核向客户端暴露的清单**（`/v1/models`），**管不到客户端自己写死的模型表**。
   典型困惑：用户选了「仅展示可用模型」，但 Hermes 模型选择器里仍有需授权模型——

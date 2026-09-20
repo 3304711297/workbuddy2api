@@ -1066,3 +1066,124 @@ test('脚本必须把进度同时回显到控制台（否则用户在窗口里�
     'Write-Log 未写文件日志：控制台回显不能替代持久日志（更新失败时要靠日志排查）'
   );
 });
+
+test('健康确认必须按「用户是否开着自动启动内核」分流（否则误判失败并回滚好版本）', () => {
+  // 2026-09-20 用户实测踩到（差点把一次**成功**的更新回滚掉）：
+  // 用户的 settings.json 里 auto_start_proxy=false —— 新 GUI 启动后**不会**自动拉起
+  // 反代内核，端口 8787 自然不监听。而 Wait-WorkBuddyHealthy 的判据是「进程存活
+  // **且**端口能探活」，于是必然 90s 超时 → 判 startup-unhealthy → 把刚构建好的
+  // 新版回滚掉。本次是用户手动从托盘启动内核才碰巧躲过。
+  //
+  // 正解：脚本接收 -AutoStartProxy（字符串 'true'/'false'，由 Rust 从配置真源传），
+  // 未开启自动启动时**只验进程存活**，端口探活降级为「能探到更好」的加分项而非硬条件。
+  assert.ok(
+    /\$AutoStartProxy/.test(handoff),
+    '脚本缺少 $AutoStartProxy：无法区分「内核该不该自动起来」，会把不开自动启动的用户的正常更新判失败'
+  );
+  assert.ok(
+    /\[string\]\$AutoStartProxy/.test(handoff),
+    '脚本未声明 [string]$AutoStartProxy 参数：Rust 侧传了也不会生效' +
+      '（注意必须声明成 [string] —— 实测 [bool] 参数经 -File 传参一律绑定失败）'
+  );
+
+  // 健康确认函数体里必须出现该开关的分流
+  const fnStart = handoff.indexOf('function Wait-WorkBuddyHealthy');
+  assert.ok(fnStart > 0, '未找到 Wait-WorkBuddyHealthy 定义');
+  const fnLines = handoff.slice(fnStart).split(/\r?\n/);
+  const bodyEnd = fnLines.findIndex((line, i) => i > 0 && line.trimEnd() === '}');
+  const fnBody = fnLines.slice(0, bodyEnd === -1 ? fnLines.length : bodyEnd + 1)
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+  assert.ok(
+    /\$autoStartProxyEnabled/.test(fnBody),
+    'Wait-WorkBuddyHealthy 未按自动启动开关分流：仍会在用户未开自动启动时探活失败，' +
+      '把成功的新版回滚掉'
+  );
+});
+
+test('Rust 侧必须把「自动启动内核」配置传给更新脚本', () => {
+  // 配置真源是 load_app_config().auto_start_proxy（与前端 settings.js 读的同一份）。
+  // 不得写死 false/true —— 写死 false 会让开着自动启动的用户白等 90s 探活；
+  // 写死 true 则回到本条修复要解决的误判。
+  const code = stripRustComments(updateRs);
+  assert.ok(
+    /auto_start_proxy/.test(code),
+    'update.rs 未读取 auto_start_proxy：脚本拿不到「该不该等端口」，健康确认无法正确分流'
+  );
+  assert.ok(
+    /"-AutoStartProxy"/.test(code),
+    'update.rs 未把 -AutoStartProxy 传给脚本：脚本只能走默认分支'
+  );
+  // 传参形态必须是字符串 true/false —— 实测 [bool] 参数经 -File 传参一律转换失败
+  // 传参必须是字符串 true/false：两种等价写法（三元 / if-else）都接受。
+  // 实测 [bool] 参数经 -File 传参在 PS 5.1 与 pwsh 7 上一律绑定失败并直接退出。
+  assert.ok(
+    /auto_start_proxy[\s\S]{0,120}"true"[\s\S]{0,40}"false"/.test(code),
+    '未把 auto_start_proxy 转成字符串 true/false：实测 [bool] 参数经 -File 传参一律绑定失败' +
+      '（「无法将 System.String 转换为 System.Boolean」），脚本会直接退出'
+  );
+});
+
+test('resume 进行中的更新前必须核实更新进程仍存活（防卡在非终态无限弹窗）', () => {
+  // 2026-09-20 用户实测：更新脚本被用户关掉窗口杀死后，state.json 永久停在
+  // 'restarting'（脚本没机会写 done）。前端 resumeInFlightUpdate 只看 phase 是否属于
+  // 「进行中」，于是**每次启动应用都弹出关不掉的「正在更新」弹窗**，用户连重启软件
+  // 都摆脱不了（应用照常可用，但启动即被劫持）。
+  //
+  // 正解：让 Rust 侧核实 state.updater_pid 指向的进程是否还活着，前端只认它的结论。
+  // 进程已死 ⇒ 更新不可能再推进 ⇒ 不接续进度视图。
+
+  // ① 前端必须改走 app_update_resume（而不是自己只看 phase 就 openOverlay）
+  const resumeStart = updateJs.indexOf('async function resumeInFlightUpdate');
+  assert.ok(resumeStart > 0, '未找到 resumeInFlightUpdate 定义');
+  const resumeBody = updateJs.slice(resumeStart, resumeStart + 2200)
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('//'))
+    .join('\n');
+  assert.ok(
+    /app_update_resume/.test(resumeBody),
+    'resumeInFlightUpdate 未调用 app_update_resume：脚本已死时会弹「正在更新」且用户关不掉'
+  );
+  // 必须「先问再开窗」——先 openOverlay 再问等于没问
+  const callIdx = resumeBody.indexOf('app_update_resume');
+  const openIdx = resumeBody.indexOf('openOverlay()');
+  assert.ok(openIdx > 0, 'resumeInFlightUpdate 未调用 openOverlay（提取逻辑或结构已变）');
+  assert.ok(
+    callIdx < openIdx,
+    'resumeInFlightUpdate 先 openOverlay 再问存活：顺序反了，弹窗已经开了'
+  );
+
+  // ② Rust 侧必须真的实现这两个函数
+  const code = stripRustComments(updateRs);
+  assert.ok(
+    /fn app_update_resume\s*\(/.test(code),
+    'update.rs 未实现 app_update_resume：前端调它会报 command not found'
+  );
+  assert.ok(
+    /fn updater_process_alive\s*\(/.test(code),
+    'update.rs 未实现 updater_process_alive：没有进程存活判据'
+  );
+  // 必须校验命令行是本项目的更新脚本 —— 否则 PID 被复用时会把别的进程当成更新进程
+  const aliveFn = code.slice(code.indexOf('fn updater_process_alive'));
+  assert.ok(
+    /windows\.ps1/.test(aliveFn.slice(0, 2000)),
+    'updater_process_alive 未校验命令行含 windows.ps1：PID 复用会误判「更新仍在进行」'
+  );
+
+  // ③ 「进行中」白名单不得包含终态（含终态会让 done/failed 也被接续）
+  const inProgIdx = code.indexOf('fn phase_is_in_progress');
+  assert.ok(inProgIdx > 0, 'update.rs 未实现 phase_is_in_progress');
+  const inProgBody = code.slice(inProgIdx, inProgIdx + 700);
+  for (const terminal of ['done', 'failed', 'rolled-back']) {
+    assert.ok(
+      !new RegExp(`"${terminal}"`).test(inProgBody),
+      `phase_is_in_progress 含终态 '${terminal}'：终态不该被当成「仍在推进」而接续弹窗`
+    );
+  }
+
+  // ④ 命令必须注册
+  assert.ok(
+    /commands::app_update_resume/.test(libRs),
+    'lib.rs 未注册 app_update_resume'
+  );
+});

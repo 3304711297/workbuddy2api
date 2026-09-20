@@ -607,6 +607,18 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
             // 用户在新版正常启动时被判 startup-unhealthy 并错误回滚。
             .arg("-Port")
             .arg(port.to_string())
+            // 用户是否开着「启动时自动拉起内核」。取配置真源（与前端 settings.js 同一份）。
+            // ⚠️ 必须传，不能由脚本猜：关掉自动启动的用户，新 GUI 起来后端口不会监听，
+            // 而脚本的启动确认若坚持探活就必然超时 → 把**成功的新版**回滚掉
+            // （2026-09-20 用户实测，靠手动从托盘启动内核才躲过）。
+            // 传字符串 'true'/'false'：实测 [bool] 参数经 -File 传参在 PowerShell 5.1
+            // 与 pwsh 7 上均绑定失败（「无法将 System.String 转换为 System.Boolean」）。
+            .arg("-AutoStartProxy")
+            .arg(if crate::load_app_config().auto_start_proxy {
+                "true"
+            } else {
+                "false"
+            })
             .current_dir(&root)
             .stdin(std::process::Stdio::null())
             // stdout/stderr 交由脚本自己写日志文件，避免句柄继承导致父进程退出被拖住。
@@ -789,7 +801,129 @@ pub fn app_update_state() -> Result<Option<AppUpdateState>, String> {
     }))
 }
 
-/// 更新阶段状态（前端轮询显示用）
+/// 该状态是否表示「更新仍在推进」（用于决定要不要接续显示进度）。
+///
+/// ⚠️ **终态（`done` / `failed` / `rolled-back`）绝不能算「推进中」**：它们表示
+/// 脚本已经收尾，接续它们只会让用户每次启动都看到一个早已结束的弹窗。
+/// 与 `phase_is_handoff_ready_or_later` 是不同的判据 —— 那个问「握手是否已过点」，
+/// 这个问「还有没有活干」，别合并。
+fn phase_is_in_progress(phase: &str) -> bool {
+    matches!(
+        phase,
+        "handoff-ready"
+            | "preparing"
+            | "fetching"
+            | "merging"
+            | "deps"
+            | "frontend"
+            | "building"
+            | "verifying"
+            | "restarting"
+            | "rolling-back"
+    )
+}
+
+/// 更新进程（`windows.ps1`）是否仍存活。
+///
+/// ⚠️ **PID 必须与命令行同时校验**：PID 会被系统复用，只看「PID 存在」会把无关进程
+/// 误认成更新进程，于是**永远接续**一个早已死掉的更新（用户关不掉弹窗）。
+/// 命令行须含 `windows.ps1` 且属于本项目（`app-update`）。
+///
+/// 用 tasklist 而非 PowerShell：实测 tasklist 约 20ms、PowerShell 约 100ms，
+/// 而这是个会在启动路径上被调用的查询。查不到（无此 PID）即判「不存活」。
+#[cfg(target_os = "windows")]
+fn updater_process_alive(pid: u64) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let pid = pid as u32;
+
+    // ① 进程是否真存在（tasklist 过滤后无输出 = 不存在；报错则保守判「存活」，
+    //    宁可让用户看到一次残留弹窗，也不要在查询失败时谎报「更新已结束」）
+    let listed = match std::process::Command::new("tasklist")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return true,
+    };
+    let text = String::from_utf8_lossy(&listed.stdout);
+    // CSV 形态：`"powershell.exe","1234",...`；无匹配时是本地化提示（不含引号字段）
+    if !text.trim_start().starts_with('"') {
+        return false;
+    }
+
+    // ② 命令行必须确实是本项目的更新脚本（防 PID 复用误判）
+    let script = format!(
+        "(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction SilentlyContinue).CommandLine"
+    );
+    let cmdline = match std::process::Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_lowercase().to_string(),
+        // 查询失败：保守判「存活」（见上）
+        Err(_) => return true,
+    };
+    cmdline.contains("windows.ps1") && cmdline.contains("app-update")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn updater_process_alive(_pid: u64) -> bool {
+    false
+}
+
+/// 接续判断：本次启动是否应继续显示某个「进行中」的更新。
+///
+/// 返回 `Some(state)` 表示确实还在推进（照常显示进度视图）；`None` 表示不该接续。
+///
+/// ⚠️ 这条防线的由来（2026-09-20 用户实测）：更新脚本被用户关窗杀死后，state.json
+/// 永久停在 `restarting`（脚本再没机会写终态）。前端原先只查 `phase` 是否属于
+/// 「进行中」，于是**每次启动应用都弹出关不掉的「正在更新」弹窗** —— 应用本身可用，
+/// 但启动即被劫持，用户连重启软件都摆脱不了。
+/// 判据从「phase 看起来在进行中」收紧为「phase 在进行中 **且** 更新进程还活着」。
+#[tauri::command]
+pub fn app_update_resume() -> Result<Option<AppUpdateState>, String> {
+    let Some(state) = app_update_state()? else {
+        return Ok(None);
+    };
+    if !phase_is_in_progress(&state.phase) {
+        return Ok(None);
+    }
+    match state.updater_pid {
+        // 进程已死：更新不可能再推进，不接续（并顺手把状态收尾成终态，
+        // 避免每次启动都重走一遍这段判断）。
+        Some(pid) if !updater_process_alive(pid) => {
+            let _ = mark_stale_update_finished(&state);
+            Ok(None)
+        }
+        // 没有 updater_pid 字段（旧版脚本写入的状态）：保守不接续 —— 无从证明它还在跑。
+        None => Ok(None),
+        Some(_) => Ok(Some(state)),
+    }
+}
+
+/// 把「脚本已死但状态停在非终态」的残留收尾成 `failed`，让前端不会再接续它。
+///
+/// 用 `failed` + `updater-gone` 而非 `done`：我们**无法确认**更新是否成功
+/// （脚本可能死在构建中途），谎报 `done` 会让用户以为更新已完成而不再检查。
+fn mark_stale_update_finished(state: &AppUpdateState) -> std::io::Result<()> {
+    let dir = local_app_dir().join("update");
+    let path = dir.join("app-update-state.json");
+    // 保留原字段形态（camelCase，与脚本一致），只改 phase/message/failureKind
+    let payload = serde_json::json!({
+        "run_id": state.run_id,
+        "updater_pid": state.updater_pid,
+        "phase": "failed",
+        "message": "上次更新未正常结束（更新进程已退出）",
+        "failureKind": "updater-gone",
+        "detail": "更新脚本已不在运行，无法继续。请重新点击「检查更新」发起一次完整更新。",
+        "updatedAt": chrono::Utc::now().timestamp_millis(),
+        "pid": state.pid,
+    });
+    atomic_write_file(&path, &payload.to_string())
+}
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AppUpdateState {
     #[serde(default)]

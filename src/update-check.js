@@ -442,10 +442,16 @@ export function initUpdateCheck() {
 }
 
 async function resumeInFlightUpdate() {
+  // ⚠️ 必须问 Rust 的 `app_update_resume`，**不能**只查 phase 就开窗（2026-09-20 用户实测）：
+  // 更新脚本被关窗杀死后 state.json 会永久停在 `restarting`，只查 phase 会让**每次启动
+  // 都弹出关不掉的「正在更新」弹窗**（应用本身可用，但启动即被劫持，用户连重启软件都摆脱不了）。
+  // 该命令内部还会核实更新进程是否仍存活，已死则把残留状态收尾成终态并返回 null。
   let state = null;
   try {
-    state = await invokeTauri('app_update_state');
+    state = await invokeTauri('app_update_resume');
   } catch {
+    // 命令不可用（旧版 Rust 侧）时保守不接续：宁可漏显示一次进度，
+    // 也不要因为无法核实存活而弹出一个用户关不掉的窗。
     return;
   }
   if (!state?.phase) return;

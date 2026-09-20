@@ -579,7 +579,8 @@ pub fn run_app() {
             commands::lan_ipv4,
             commands::check_app_update,
             commands::apply_app_update,
-            commands::app_update_state
+            commands::app_update_state,
+            commands::app_update_resume
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
