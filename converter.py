@@ -2466,6 +2466,86 @@ def _is_content_policy_violation(status_code: int, err_text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 空拒答（blank refusal）：上游安全策略抽样误伤的空转拒答
+#
+# 实测样本（2026-09-20，converter.log 与 usage/snapshots.jsonl 双重留痕）：
+#   HTTP 200 + finish_reason=content_filter + tokens=0，
+#   正文只有一句拒答文案（实测 "Sorry, I can't respond to this question."）。
+#
+# ⚠️ 两个必须记住的实测事实（否则修复会静默失效）：
+#   ① **拒答文案确实在 content 里**（快照 resp 字段原文可证），
+#      所以判据用的是「正文长度上限」，绝不能用「not content」——后者永远不成立。
+#   ② 上游拼写是**下划线** ``content_filter``，而旧代码只比对连字符
+#      ``content-filter``，导致真实命中从未被识别；同时旧的字节扫描把模型正文里
+#      出现的「敏感/审核」字样当成命中，实测 7 次全是假阳性（均为成功响应）。
+#      ⇒ 必须归一化拼写 + 结构化判定。
+# ---------------------------------------------------------------------------
+
+_FINISH_CONTENT_FILTER = "content_filter"
+
+# 观察窗阈值：拒答文案实测 38 字符，留足余量；真实回答会迅速越过该线。
+_BLANK_REFUSAL_MAX_CHARS = 200
+
+# 上限 1 次重试（共 2 次尝试）。实测命中率 0.24% → 重试后约 0.0006%。
+_BLANK_REFUSAL_MAX_RETRIES = 1
+
+
+def _normalize_finish_reason(value) -> str:
+    """归一化 finish_reason 拼写：去空白 + 小写 + 连字符转下划线。
+
+    上游实测下发 ``content_filter``（下划线），而历史代码按 ``content-filter``
+    （连字符）比对——两种拼写必须视为等价，否则真实拦截永远不会被识别。
+    """
+    if value is None:
+        return ""
+    return str(value).strip().lower().replace("-", "_")
+
+
+def _is_blank_refusal(result) -> bool:
+    """判定「空拒答」：抽样误伤的空转拒答，而非有实质产出的正常 content_filter。
+
+    四项全中才算（任何一项不满足都不重试）：
+    ① finish_reason 归一化后 == content_filter；
+    ② 无 tool_calls；
+    ③ usage 明确为 0 token（缺失证据一律 Fail-Closed 判否）；
+    ④ 正文长度 ≤ _BLANK_REFUSAL_MAX_CHARS（拒答文案很短；长正文是有内容的正常语义）。
+    """
+    if not isinstance(result, dict):
+        return False
+    choices = result.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    choice = choices[0]
+    if _normalize_finish_reason(choice.get("finish_reason")) != _FINISH_CONTENT_FILTER:
+        return False
+    msg = choice.get("message")
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("tool_calls"):
+        return False
+
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    total = _usage_int(usage.get("total_tokens"))
+    if total is None:
+        prompt_t = _usage_int(usage.get("prompt_tokens"))
+        completion_t = _usage_int(usage.get("completion_tokens"))
+        if prompt_t is None and completion_t is None:
+            return False  # 无 token 证据 → 不重试（Fail-Closed）
+        total = (prompt_t or 0) + (completion_t or 0)
+    if total != 0:
+        return False
+
+    text = msg.get("content")
+    if isinstance(text, list):  # 多模态 content 数组：只拼文本块
+        text = "".join(b.get("text") or "" for b in text if isinstance(b, dict))
+    if text and len(str(text)) > _BLANK_REFUSAL_MAX_CHARS:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 降级事件观测（内存环形记录，随内核重启清零；/api/rate_limit 暴露给消费端）
 # ---------------------------------------------------------------------------
 
@@ -3549,6 +3629,7 @@ async def chat_completions(request: Request,
     # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
     retry_budget = rotator.get_retry_budget(model_name)
     max_attempts = retry_budget + 1
+    blank_retries = 0
     fallback_tried = False
     actual_model = body["model"]
     fallback_reason = None
@@ -3592,6 +3673,16 @@ async def chat_completions(request: Request,
                                           requested_model=model_name, fallback_reason=fallback_reason)
                             return JSONResponse(status_code=r.status_code, content=_openai_error_body(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
+                        # 空拒答（上游抽样误伤）：同账号重试，绝不切号（切号只会白烧另一账号额度）
+                        if _is_blank_refusal(collected) and blank_retries < _BLANK_REFUSAL_MAX_RETRIES:
+                            blank_retries += 1
+                            _log(f"[{rid}] ⚠️ 上游抽样空拒答 (finish={collected['choices'][0].get('finish_reason')}, "
+                                 f"tokens=0, 正文仅拒答文案)，同账号重试 "
+                                 f"({blank_retries}/{_BLANK_REFUSAL_MAX_RETRIES})...")
+                            collected = None
+                            ttft_ms = None
+                            await _failover_jitter(rid)
+                            continue
                         break
         except HTTPException as e:
             _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}",
@@ -3836,6 +3927,7 @@ async def anthropic_messages(
     # 非流式
     retry_budget = rotator.get_retry_budget(model_name)
     max_attempts = retry_budget + 1
+    blank_retries = 0
     fallback_tried = False
     actual_model = body["model"]
     fallback_reason = None
@@ -3880,6 +3972,16 @@ async def anthropic_messages(
                                           requested_model=model_name, fallback_reason=fallback_reason)
                             return JSONResponse(status_code=r.status_code, content=_anthropic_error_body(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
+                        # 空拒答（上游抽样误伤）：同账号重试，绝不切号
+                        if _is_blank_refusal(collected) and blank_retries < _BLANK_REFUSAL_MAX_RETRIES:
+                            blank_retries += 1
+                            _log(f"[{rid}] ⚠️ 上游抽样空拒答 (finish={collected['choices'][0].get('finish_reason')}, "
+                                 f"tokens=0, 正文仅拒答文案)，同账号重试 "
+                                 f"({blank_retries}/{_BLANK_REFUSAL_MAX_RETRIES})...")
+                            collected = None
+                            ttft_ms = None
+                            await _failover_jitter(rid)
+                            continue
                         break
         except HTTPException:
             raise
@@ -4093,6 +4195,7 @@ async def openai_responses(
 
     retry_budget = rotator.get_retry_budget(model_name) if rotator else 1
     max_attempts = retry_budget + 1
+    blank_retries = 0
     fallback_tried = False
     actual_model = body["model"]
     fallback_reason = None
@@ -4133,6 +4236,16 @@ async def openai_responses(
                             _record_usage(actual_model, False, t0, error=f"HTTP {r.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
                             return JSONResponse(status_code=r.status_code, content=_openai_error_body(raw, r.status_code))
                         collected, ttft_ms = await _collect_stream(r, t0)
+                        # 空拒答（上游抽样误伤）：同账号重试，绝不切号
+                        if _is_blank_refusal(collected) and blank_retries < _BLANK_REFUSAL_MAX_RETRIES:
+                            blank_retries += 1
+                            _log(f"[{rid}] ⚠️ 上游抽样空拒答 (finish={collected['choices'][0].get('finish_reason')}, "
+                                 f"tokens=0, 正文仅拒答文案)，同账号重试 "
+                                 f"({blank_retries}/{_BLANK_REFUSAL_MAX_RETRIES})...")
+                            collected = None
+                            ttft_ms = None
+                            await _failover_jitter(rid)
+                            continue
                         break
         except HTTPException as e:
             _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
@@ -4186,7 +4299,7 @@ def _log_finish(model_name: str, t0: float, result: dict, rid: str = "", *,
     tcs = msg.get("tool_calls") or []
     usage = result.get("usage") or {}
     tag = ""
-    if finish == "content-filter":
+    if _normalize_finish_reason(finish) == _FINISH_CONTENT_FILTER:
         tag = " ⚠️内容审核拦截"
     tc_names = [t.get("function", {}).get("name") for t in tcs]
     model_disp = model_name
@@ -5017,7 +5130,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     def _feed_and_coalesce(chunk: bytes):
         """字节 chunk → 行缓冲 → 单趟事件解析/统计/清洗 → reasoning 合并 → (转发事件列表)。"""
-        nonlocal buf, finish_reason, saw_filter, ttft_ms
+        nonlocal buf, finish_reason, saw_filter, ttft_ms, attempt_saw_progress
         for line in line_buf.feed(chunk):
             buf += line + b"\n"
         # buf 现在累积了完整行；按空行切完整 SSE 事件
@@ -5051,10 +5164,6 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                     cleaned_lines.append(b"data: [DONE]")
                     continue
 
-                # 检查风控特征（直接字节比对，避免额外 decode 开销）
-                if b"content-filter" in payload or b"\xe6\x95\x8f\xe6\x84\x9f" in payload or b"\xe5\xae\xa1\xe6\xa0\xb8" in payload:
-                    saw_filter = True
-
                 try:
                     obj = json.loads(payload)
                 except Exception:
@@ -5067,13 +5176,30 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                 for ch in obj.get("choices") or []:
                     if ch.get("finish_reason"):
                         finish_reason = ch["finish_reason"]
+                        # 结构化识别审核拦截：上游实测下发下划线 content_filter，
+                        # 旧代码只比对连字符 → 真实命中从未被识别（必须归一化）。
+                        if _normalize_finish_reason(ch["finish_reason"]) == _FINISH_CONTENT_FILTER:
+                            saw_filter = True
                     delta = ch.get("delta") or {}
                     if ttft_ms is None and t0 and delta.get("content"):
                         ttft_ms = int((time.time() - t0) * 1000)
+                    # 正文累积：既供空拒答长度阈值判定，也供「是否已越过观察窗」放行
+                    if isinstance(delta.get("content"), str) and delta["content"]:
+                        attempt_content.append(delta["content"])
+                        if not attempt_saw_progress and _progress_reached():
+                            attempt_saw_progress = True
+                    # reasoning 到达即视为实质推进：空拒答 tokens=0、一个字都不生成，
+                    # 真思考流必须逐帧透传，否则 Thought 周期会被整段憋在缓冲里。
+                    if _reasoning_text(obj):
+                        attempt_saw_progress = True
                     for tc in delta.get("tool_calls") or []:
                         nm = (tc.get("function") or {}).get("name")
                         if nm:
                             tool_names.append(nm)
+                    if delta.get("tool_calls"):
+                        attempt_saw_progress = True
+                    if not attempt_saw_progress and _progress_reached():
+                        attempt_saw_progress = True
 
                 # 空 delta 清洗（若未改变则保留原行 bytes，避免 dumps 序列化）
                 if strip_empty:
@@ -5105,6 +5231,62 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     curr_headers = dict(headers)
 
     usage_recorded = False
+    blank_retries = 0                  # 空拒答同账号重试计数（上限 _BLANK_REFUSAL_MAX_RETRIES）
+    pending_events: list[bytes] = []   # 首包确认窗口内缓冲的帧（重试时丢弃，防拒答文案泄漏）
+    attempt_saw_progress = False       # 本轮是否已出现「实质推进」（见 _progress_reached）
+    attempt_content: list[str] = []    # 本轮累积正文，供长度阈值与空拒答判定复用
+
+    def _progress_reached() -> bool:
+        """本轮是否已出现可放行客户端的实质推进。
+
+        空拒答与正常回答在**首个正文帧**上无法区分（拒答文案也走 content delta），
+        因此判据不能是「有 content」，而是下面四类确定性信号：
+        ① 工具调用；② 非 content_filter 的 finish；③ 非零 token 的 usage；
+        ④ 正文累积越过 _BLANK_REFUSAL_MAX_CHARS（真实回答会迅速越过，拒答文案不会）。
+        另：reasoning 到达即放行——空拒答的 tokens=0 意味着一个字都没生成，
+        真思考流必须逐帧透传，否则会把 Thought 周期整段憋住。
+        """
+        if attempt_saw_progress:
+            return True
+        if tool_names:
+            return True
+        fr = _normalize_finish_reason(finish_reason)
+        if fr and fr != _FINISH_CONTENT_FILTER:
+            return True
+        for v in usage.values():
+            iv = _usage_int(v)
+            if iv and iv > 0:
+                return True
+        if sum(len(p) for p in attempt_content) > _BLANK_REFUSAL_MAX_CHARS:
+            return True
+        return False
+
+    def _pending_refusal_view() -> dict:
+        """把首包窗口内的观测还原成聚合结果形状，复用 _is_blank_refusal 判定。"""
+        return {
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant",
+                            "content": "".join(attempt_content) or None,
+                            "tool_calls": [{"function": {"name": n}} for n in tool_names] or None},
+                "finish_reason": finish_reason,
+            }],
+            "usage": dict(usage),
+        }
+
+    def _reset_attempt_state() -> None:
+        """丢弃本轮的缓冲与统计，为新一次尝试腾出干净状态。"""
+        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress
+        pending_events.clear()
+        attempt_content.clear()
+        tool_names.clear()
+        usage.clear()
+        line_buf = _SseLineBuffer()
+        buf = b""
+        finish_reason = None
+        ttft_ms = None
+        err_msg = None
+        attempt_saw_progress = False
 
     def _record_usage_once(*args, **kwargs):
         nonlocal usage_recorded
@@ -5160,14 +5342,43 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                             fallback_notified = True
                             req_m = requested_model or model_name
                             yield f": fallback: requested_model={req_m} actual_model={actual_model} reason={fallback_reason or '11102 unauthorized'}\n\n".encode("utf-8")
-                        async for chunk in r.aiter_bytes():
-                            if chunk:
-                                if _capture_raw:
-                                    raw_parts.append(chunk)
-                                for evt in _feed_and_coalesce(chunk):
-                                    yield evt
+                        byte_iter = r.aiter_bytes()
+                        async for chunk in byte_iter:
+                            if not chunk:
+                                continue
+                            if _capture_raw:
+                                raw_parts.append(chunk)
+                            for evt in _feed_and_coalesce(chunk):
+                                # 观察窗：首个实质推进到达前先缓冲，到达后一次性冲刷并按序直通。
+                                # 全程无推进（= 空拒答）则一直留在缓冲里，等流结束后判定。
+                                if not attempt_saw_progress:
+                                    pending_events.append(evt)
+                                    continue
+                                while pending_events:
+                                    yield pending_events.pop(0)
+                                yield evt
                         for evt in coal.flush():
+                            if not attempt_saw_progress:
+                                pending_events.append(evt)
+                                continue
+                            while pending_events:
+                                yield pending_events.pop(0)
                             yield evt
+                        # 流已正常结束仍停留在观察窗内 ⇒ 判定是否为空拒答（抽样误伤）
+                        if pending_events:
+                            if (_is_blank_refusal(_pending_refusal_view())
+                                    and blank_retries < _BLANK_REFUSAL_MAX_RETRIES
+                                    and attempt + 1 < max_attempts):
+                                blank_retries += 1
+                                _log(f"{prefix}⚠️ 上游抽样空拒答 (finish={finish_reason}, tokens=0, "
+                                     f"正文仅拒答文案)，同账号重试 "
+                                     f"({blank_retries}/{_BLANK_REFUSAL_MAX_RETRIES})...")
+                                _reset_attempt_state()
+                                await _failover_jitter(rid)
+                                continue
+                            # 非空拒答或已达上限：原样透传，保留诚实的错误面
+                            while pending_events:
+                                yield pending_events.pop(0)
                         break
             except httpx.HTTPError as e:
                 if rotator and attempt < max_attempts - 1:
@@ -5189,7 +5400,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             _mark_model_available(body.get("model", model_name), uid=curr_uid)
             _clear_account_cooldown(curr_uid, model_name, req_start_ms=t0 * 1000)
         elapsed = time.time() - t0 if t0 else 0
-        tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
+        tag = " ⚠️内容审核拦截" if (saw_filter or _normalize_finish_reason(finish_reason) == _FINISH_CONTENT_FILTER) else ""
         req_m = requested_model or model_name
         model_disp = req_m
         if actual_model != req_m:
