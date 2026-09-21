@@ -4105,6 +4105,13 @@ async def chat_completions(request: Request,
                                 _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
+                            elif _is_unauthorized_model_error(r.status_code, err_str):
+                                # 11102 且不在降级映射表：无降级可走，但**必须记账**。降级分支内的记账只覆盖
+                                # GPT_FALLBACK_MAP 的 7 个模型；其余（实测 gemini-3.5-flash 无海外授权、
+                                # deepseek-v4.1-flash-sg 上游无此 id）此前直接落到错误返回、从不记账，于是
+                                # model_list_mode=available 的清单会继续把它标成 available —— 清单里看得见、
+                                # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
+                                _mark_model_unavailable(body.get("model") or model_name, uid=uid)
                             if attempt < max_attempts - 1:
                                 failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
                                 if failover:
@@ -4407,6 +4414,13 @@ async def anthropic_messages(
                                 _log(f"[{rid}] ⚠️ 原请求模型 {model_name} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
+                            elif _is_unauthorized_model_error(r.status_code, err_str):
+                                # 11102 且不在降级映射表：无降级可走，但**必须记账**。降级分支内的记账只覆盖
+                                # GPT_FALLBACK_MAP 的 7 个模型；其余（实测 gemini-3.5-flash 无海外授权、
+                                # deepseek-v4.1-flash-sg 上游无此 id）此前直接落到错误返回、从不记账，于是
+                                # model_list_mode=available 的清单会继续把它标成 available —— 清单里看得见、
+                                # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
+                                _mark_model_unavailable(body.get("model") or model_name, uid=uid)
                             if attempt < max_attempts - 1:
                                 failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
                                 if failover:
@@ -4673,6 +4687,13 @@ async def openai_responses(
                                 _record_fallback_event(model_name, actual_model, fallback_reason)
                                 body["model"] = fb
                                 continue
+                            elif _is_unauthorized_model_error(r.status_code, err_str):
+                                # 11102 且不在降级映射表：无降级可走，但**必须记账**。降级分支内的记账只覆盖
+                                # GPT_FALLBACK_MAP 的 7 个模型；其余（实测 gemini-3.5-flash 无海外授权、
+                                # deepseek-v4.1-flash-sg 上游无此 id）此前直接落到错误返回、从不记账，于是
+                                # model_list_mode=available 的清单会继续把它标成 available —— 清单里看得见、
+                                # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
+                                _mark_model_unavailable(body.get("model") or model_name, uid=uid)
                             if attempt < max_attempts - 1 and rotator:
                                 failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
                                 if failover:
@@ -5150,6 +5171,13 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                             body["model"] = fb
                             continue
+                        elif _is_unauthorized_model_error(r.status_code, err_str):
+                            # 11102 且不在降级映射表：无降级可走，但**必须记账**。降级分支内的记账只覆盖
+                            # GPT_FALLBACK_MAP 的 7 个模型；其余（实测 gemini-3.5-flash 无海外授权、
+                            # deepseek-v4.1-flash-sg 上游无此 id）此前直接落到错误返回、从不记账，于是
+                            # model_list_mode=available 的清单会继续把它标成 available —— 清单里看得见、
+                            # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
+                            _mark_model_unavailable(body.get("model") or model_name, uid=curr_uid)
                         if rotator and attempt < max_attempts - 1:
                             failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                             if failover:
@@ -5929,6 +5957,13 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 _log(f"{prefix}⚠️ 原请求模型 {req_m} (映射: {body['model']}) 上游未授权 (11102)，平滑降级至实际模型 {actual_model} 重试 (原因: {fallback_reason})")
                                 body["model"] = fb
                                 continue
+                            elif _is_unauthorized_model_error(r.status_code, err_str):
+                                # 11102 且不在降级映射表：无降级可走，但**必须记账**。降级分支内的记账只覆盖
+                                # GPT_FALLBACK_MAP 的 7 个模型；其余（实测 gemini-3.5-flash 无海外授权、
+                                # deepseek-v4.1-flash-sg 上游无此 id）此前直接落到错误返回、从不记账，于是
+                                # model_list_mode=available 的清单会继续把它标成 available —— 清单里看得见、
+                                # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
+                                _mark_model_unavailable(body.get("model") or model_name, uid=curr_uid)
                             if rotator and attempt < max_attempts - 1:
                                 failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
                                 if failover:

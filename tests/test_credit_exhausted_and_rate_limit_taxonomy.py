@@ -87,7 +87,112 @@ def test_account_fault_uses_short_cooldown_not_next_day():
     assert str(entry["code"]) == "14017", "必须记录真实码，不得写成 14018"
 
 
-def test_credit_exhausted_uses_long_cooldown():
+# frozen_evening 需要真实模块做代理
+_REAL_DATETIME = datetime
+_REAL_TIME = time
+
+# --------------------------------------------------------------------------
+# 时钟固定（日边界断言的正确姿势）
+# --------------------------------------------------------------------------
+class _FrozenDateTime(datetime.datetime):
+    """把 `converter` 看到的「现在」钉死，使日边界断言与运行时刻无关。
+
+    ⚠️ **仅仅继承 datetime 是不够的**：`datetime.datetime.now()` 是 classmethod，子类
+    继承它照样读真实时钟。必须**显式覆盖 now()** 才会真正冻结（本文件初版漏了这一步，
+    `test_frozen_clock_is_effective` 当场把它抓了出来）。
+
+    为什么必须冻结：日额度/额度耗尽在无 reset 时的兜底终点是**次日 00:00**，而断言用的
+    是「剩余量 > 400s」这类下限。跑在 23:54 时距次日 00:00 天然只剩 350s —— 断言必然
+    假红而实现完全正确（真实故障模式：午夜前半小时随机变红，然后被误当成真回归去改实现）。
+    修法不是放宽阈值，而是钉死时钟：固定 18:00，兜底终点距现在恒 6h。
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        fixed = cls._fixed
+        return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+
+@pytest.fixture()
+def frozen_evening(monkeypatch):
+    """把 converter 的 datetime **和 time** 一起冻结在 UTC+8 当日 18:00。
+
+    ⚠️ 只冻结 datetime 是不够的（本文件第二次踩到）：日边界是个**绝对时刻**
+    （次日 00:00），只挪「现在」而 `time.time()` 仍读真实墙钟时，量出来的剩余时间
+    依然是「真实现在 → 次日 00:00」≈ 42s，断言照样假红。两者必须同时冻结，
+    「距日边界恒 6h」才成立。
+    """
+    tz8 = datetime.timezone(datetime.timedelta(hours=8))
+    fixed = _FrozenDateTime(2026, 9, 21, 18, 0, 0, tzinfo=tz8)
+    _FrozenDateTime._fixed = fixed
+    fixed_epoch = fixed.timestamp()
+
+    class _FrozenTime:
+        """time 代理：time()/monotonic() 都钉在冻结时刻（其余委托真实模块）。
+
+        本文件只用 time.time() 与 time.monotonic() 计算剩余量；把两者一起钉住，
+        断言才与运行时刻无关。
+        """
+        time = staticmethod(lambda: fixed_epoch)
+        monotonic = staticmethod(lambda: 0.0)
+        strftime = staticmethod(_REAL_TIME.strftime)
+        localtime = staticmethod(_REAL_TIME.localtime)
+
+        def __getattr__(self, name):
+            return getattr(_REAL_TIME, name)
+
+    class _Mod:
+        # timedelta / timezone 必须是**真模块级**属性：写成 `datetime.timedelta` 会解析成
+        # `_FrozenDateTime.timedelta`（类体内 datetime 已绑定）→ AttributeError。
+        datetime = _FrozenDateTime
+        timedelta = _REAL_DATETIME.timedelta
+        timezone = _REAL_DATETIME.timezone
+
+    monkeypatch.setattr(converter, "datetime", _Mod)
+    monkeypatch.setattr(converter, "time", _FrozenTime)
+    yield fixed
+
+
+def _remaining(entry) -> float:
+    return entry["monotonic_until"] - converter.time.monotonic()
+
+
+def _assert_long_cooldown(effective: float, hour: int, what: str):
+    """冻结时钟下的长冷却断言：必须对齐日边界，且**不得**退化成瞬时窗。
+
+    ⚠️ 「排除某个秒数区间」是不够的：日边界兜底的真实剩余时间会随运行时刻变化，
+    午夜前几分钟天然掉进瞬时窗的数值范围，那种断言在午夜前必然假红（实测 23:54 命中）。
+    正解是**钉死时钟**（frozen_evening，恒 18:00 → 剩余恒 6h），此后 `> 400` 才是
+    诚实断言：它只可能因实现退化成软限流而失败，不再受墙钟摆布。
+    """
+    expect_ms, _ = converter._next_day_reset_ms(hour)
+    expect = (expect_ms - converter.time.time() * 1000) / 1000.0
+    assert abs(effective - expect) < 5, (
+        f"{what}: 生效冷却未对齐日边界（{effective}s，期望 ≈{expect}s）"
+    )
+    assert effective > 400, (
+        f"{what}退化成了瞬时软窗（{effective}s）—— 冷却一过立刻重选同一账号，二次撞墙"
+    )
+
+
+def test_frozen_clock_is_effective(frozen_evening):
+    """自检：冻结 fixture 必须真的改到 `converter` 看到的时钟。
+
+    没有这条，下面所有「与日边界对齐」的断言都可能因 fixture 失效而**空过**——
+    实测变异验证正是这样漏掉过一次（冻结失效时不报错、断言照样绿）。
+    """
+    tz8 = datetime.timezone(datetime.timedelta(hours=8))
+    seen = converter.datetime.datetime.now(tz8)
+    assert (seen.hour, seen.minute) == (18, 0), (
+        f"datetime 冻结未生效，converter 看到的是 {seen}；相关断言等于没验证"
+    )
+    # time 也必须冻结：日边界是绝对时刻，只挪 datetime 时剩余量仍按真实墙钟算
+    assert abs(converter.time.time() - seen.timestamp()) < 1, (
+        "time 冻结未生效 —— 只冻结 datetime 会让「距日边界恒 6h」不成立"
+    )
+    assert converter.time.monotonic() == 0.0
+
+def test_credit_exhausted_uses_long_cooldown(frozen_evening):
     """14018 必须走长冷却（额度耗尽当日不可恢复）。
 
     ⚠️ 断言不能写死「剩余 > 1h」：兜底是**下一个 00:00（UTC+8）**，若在 23:00 后
@@ -100,12 +205,12 @@ def test_credit_exhausted_uses_long_cooldown():
     assert entry is not None
     assert entry["kind"] == "credit_exhausted"
     # 1) 明确排除瞬时软窗（255s~345s）—— 这才是「5 分钟后重试」的成因
-    effective = entry["monotonic_until"] - time.monotonic()
-    assert effective > 400, f"14018 不得落入瞬时软窗（{effective}s）"
+    effective = entry["monotonic_until"] - converter.time.monotonic()
+    _assert_long_cooldown(effective, converter._CREDIT_EXHAUSTED_FALLBACK_HOUR, "14018 额度耗尽")
     # 2) 必须对齐下一个日边界（本仓本地时区口径的 00:00）
     expect_day_ms, _ = converter._next_day_reset_ms(converter._CREDIT_EXHAUSTED_FALLBACK_HOUR)
-    remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
-    expect_remaining = (expect_day_ms - time.time() * 1000) / 1000.0
+    remaining = (entry["resetAtMs"] - converter.time.time() * 1000) / 1000.0
+    expect_remaining = (expect_day_ms - converter.time.time() * 1000) / 1000.0
     assert abs(remaining - expect_remaining) < 5, \
         f"14018 兜底应对齐日边界: 实得 {remaining}s 期望 {expect_remaining}s"
 
@@ -141,7 +246,7 @@ def test_same_text_429_without_credit_code_stays_soft_rate_limit():
     assert converter._is_rate_limit_signal(429, raw) is True
 
 
-def test_credit_exhausted_reset_is_next_day_boundary():
+def test_credit_exhausted_reset_is_next_day_boundary(frozen_evening):
     """额度耗尽的兜底冷却终点必须是次日 00:00（UTC+8），而不是几十分钟。
 
     注意：本用例只覆盖**兜底**路径（报文无 reset 时）。一旦上游下发 reset，
@@ -149,7 +254,7 @@ def test_credit_exhausted_reset_is_next_day_boundary():
     test_credit_exhausted_reset_prefers_upstream_reset）。
     """
     reset_ms, reset_local = converter._credit_exhausted_reset()
-    remaining = (reset_ms - time.time() * 1000) / 1000.0
+    remaining = (reset_ms - converter.time.time() * 1000) / 1000.0
     assert 0 < remaining <= 24 * 3600 + 60
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} 00:00:00", reset_local)
 
@@ -254,10 +359,10 @@ def test_daily_quota_reset_beyond_two_hours_is_honored():
     entry = converter._RATE_LIMIT_STATE["m-daily"]
     assert entry["kind"] == "daily_quota", f"6004 应归每日额度: {entry['kind']}"
     # 展示字段：对齐上游墙钟
-    remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
+    remaining = (entry["resetAtMs"] - converter.time.time() * 1000) / 1000.0
     assert 5.4 * 3600 < remaining < 5.6 * 3600, f"resetAtMs 未对齐上游: {remaining}s"
     # 生效字段：真正决定账号何时回到池子的那个
-    effective = entry["monotonic_until"] - time.monotonic()
+    effective = entry["monotonic_until"] - converter.time.monotonic()
     assert effective > 7200, f"生效冷却被 2h 封顶截断了: {effective}s"
     assert 5.4 * 3600 < effective < 5.6 * 3600, f"生效冷却未对齐上游 reset: {effective}s"
 
@@ -268,13 +373,13 @@ def test_transient_rate_code_keeps_short_cooldown():
     converter._record_rate_limit("m-transient", '{"code":6006,"msg":"请求频率过高，请稍后再试"}',
                                  uid="u1", status_code=400)
     entry = converter._RATE_LIMIT_STATE["m-transient"]
-    effective = entry["monotonic_until"] - time.monotonic()
+    effective = entry["monotonic_until"] - converter.time.monotonic()
     assert 200 < effective < 400, f"瞬时频控不应长冷却: {effective}s"
     assert entry["kind"] == "rate_limit"
 
 
 @pytest.mark.parametrize("code", [6004, 6008, "6004", "6008"])
-def test_daily_quota_without_reset_does_not_reenter_pool_in_5min(code):
+def test_daily_quota_without_reset_does_not_reenter_pool_in_5min(code, frozen_evening):
     """**关键契约**：每日额度（6004/6008）**无 reset 时间**时不得退化成 5 分钟软限流。
 
     这是「分类做了、兜底没跟上」的残留缺口：6004/6008 是 TPD/RPD（按日额度），
@@ -293,13 +398,13 @@ def test_daily_quota_without_reset_does_not_reenter_pool_in_5min(code):
     converter._record_rate_limit("m-daily-noreset", raw, uid="u1", status_code=400)
     entry = converter._RATE_LIMIT_STATE["m-daily-noreset"]
     assert entry["kind"] == "daily_quota", f"code {code} 应归每日额度"
-    effective = entry["monotonic_until"] - time.monotonic()
+    effective = entry["monotonic_until"] - converter.time.monotonic()
     # 1) 明确排除瞬时软窗（含 ±45s 抖动范围）——这才是「二次撞墙」的成因
-    assert effective > 400, f"每日额度无 reset 时退化成软限流窗口（{effective}s），会二次撞墙"
+    _assert_long_cooldown(effective, converter._DAILY_QUOTA_FALLBACK_HOUR, "每日额度无 reset 兜底")
     # 2) 必须对齐到下一个日边界（而非任意长数字）
     expect_day_ms, _ = converter._next_day_reset_ms(converter._DAILY_QUOTA_FALLBACK_HOUR)
-    remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
-    expect_remaining = (expect_day_ms - time.time() * 1000) / 1000.0
+    remaining = (entry["resetAtMs"] - converter.time.time() * 1000) / 1000.0
+    expect_remaining = (expect_day_ms - converter.time.time() * 1000) / 1000.0
     assert abs(remaining - expect_remaining) < 5, \
         f"应兜底到下一个日边界: 实得 {remaining}s 期望 {expect_remaining}s"
     assert abs(effective - expect_remaining) < 5, "生效冷却与展示字段须同源"
@@ -312,7 +417,7 @@ def test_daily_quota_without_reset_and_credit_exhausted_share_day_boundary():
     assert a == b, "两处日边界兜底必须一致"
 
 
-def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
+def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch, frozen_evening):
     """端到端：14018 记账后冷却必须远超软限流窗口，且封禁落进账号冷却表。
 
     ⚠️ 同样不得写死「> 3600s」：日边界兜底在 23:00 后天然不足 1h。判据改为
@@ -326,11 +431,11 @@ def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
         entry = converter._RATE_LIMIT_STATE["deepseek-v4.1-flash"]
         assert str(entry["code"]) == "14018"
         assert entry["kind"] == "credit_exhausted"
-        effective = entry["monotonic_until"] - time.monotonic()
-        assert effective > 400, f"额度耗尽掉进瞬时软窗: {effective}s"
+        effective = entry["monotonic_until"] - converter.time.monotonic()
+        _assert_long_cooldown(effective, converter._CREDIT_EXHAUSTED_FALLBACK_HOUR, "额度耗尽")
         expect_day_ms, _ = converter._next_day_reset_ms(converter._CREDIT_EXHAUSTED_FALLBACK_HOUR)
-        remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
-        expect_remaining = (expect_day_ms - time.time() * 1000) / 1000.0
+        remaining = (entry["resetAtMs"] - converter.time.time() * 1000) / 1000.0
+        expect_remaining = (expect_day_ms - converter.time.time() * 1000) / 1000.0
         assert abs(remaining - expect_remaining) < 5, \
             f"额度耗尽应兜底到日边界: 实得 {remaining}s 期望 {expect_remaining}s"
         assert ("u-empty", "deepseek-v4.1-flash") in converter._ACCOUNT_COOLDOWNS
@@ -348,7 +453,7 @@ def test_record_rate_limit_soft_429_keeps_short_cooldown():
                                      uid="u-ok", status_code=429)
         entry = converter._RATE_LIMIT_STATE["glm-5.3"]
         assert entry["kind"] == "rate_limit"
-        remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
+        remaining = (entry["resetAtMs"] - converter.time.time() * 1000) / 1000.0
         assert 200 < remaining < 400
     finally:
         converter._RATE_LIMIT_STATE.clear()
