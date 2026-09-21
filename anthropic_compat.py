@@ -7,10 +7,56 @@ and OpenAI Chat Completions API.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
 _ATTRIBUTION_PREFIX = "x-anthropic-billing-header:"
+
+# Claude Code 的**客户端侧用量提示**：随 token-usage 附件开关，以元消息形式追加在
+# 会话尾部。两种形态（可裸放，也可被 `<system-reminder>` 包住）：
+#   ① `Token usage: 190010/180000; -10010 remaining`
+#   ② `<total_tokens>15000000 tokens left</total_tokens>`（补零的倒计时）
+# 这些是**客户端自己的账**，对上游模型没有任何信息价值：白占上下文、占掉提示词
+# 缓存位（Claude Code 会把它们标成 cache_control: ephemeral），而倒计时里的负数更会
+# 被模型当成"我快没额度了"的错误指令去读（本仓 `_looks_like_harness_user` 已把
+# `<system-reminder>` 整体列为 harness 标记，说明这类注入在本仓是被识别为噪声的）。
+#
+# 采纳自 orangeboyChen/codebuddy2api #178（上游为 TS 实现同名规则，本仓按 Python 复刻）。
+# 复刻时刻意保留其两个设计取舍：
+#   1. **带壳形态先匹配**，裸形态后匹配 —— 否则壳标签会残留在正文里；
+#   2. 倒计时**必须带数字载荷**（`<N> token(s) left`）才算提示 ——
+#      否则用户自己贴的 `<total_tokens>` 片段（例如 schema 示例）会被误删。
+_TOTAL_TOKENS_COUNTDOWN = (
+    r"<total_tokens>\s*-?[\d,._]+\s*tokens?\s+left\s*</total_tokens>"
+)
+
+_CLIENT_USAGE_HINT_RES = [
+    # ① Token usage 带壳 / 裸形态
+    re.compile(r"<system-reminder>\s*Token usage:[^<]*</system-reminder>", re.IGNORECASE),
+    re.compile(r"Token usage:\s*-?\d+\s*/\s*-?\d+\s*;\s*-?\d+\s+remaining", re.IGNORECASE),
+    # ② total_tokens 倒计时带壳 / 裸形态（必须在 ① 之后，保证壳先被一起吃掉）
+    re.compile(r"<system-reminder>\s*" + _TOTAL_TOKENS_COUNTDOWN + r"\s*</system-reminder>",
+               re.IGNORECASE),
+    re.compile(_TOTAL_TOKENS_COUNTDOWN, re.IGNORECASE),
+]
+
+
+def _strip_client_usage_hints(text: str) -> str:
+    """剥离 Claude Code 注入的客户端用量提示，返回剥离后的文本。
+
+    ⚠️ 只删提示本身，**同一块里的真实正文必须原样保留**（上游 #178 专门有一条
+    用例守这个：`<total_tokens>…</total_tokens>\\nfix the failing test` 剥离后
+    仍要留下 `fix the failing test`）。因此这里做的是**子串替换**，不是整条丢消息。
+
+    剥离后若为空串，就如实返回空串（由调用方决定「丢弃整条」还是「留空壳」）——
+    不要回退成原文，否则调用方的空值判定永远不成立。
+    """
+    if not text:
+        return text
+    for rx in _CLIENT_USAGE_HINT_RES:
+        text = rx.sub("", text)
+    return text.strip()
 
 
 def _strip_attribution(text: str) -> str:
@@ -23,7 +69,7 @@ def _strip_attribution(text: str) -> str:
         for line in lines
         if not line.strip().lower().startswith(_ATTRIBUTION_PREFIX)
     ]
-    return "\n".join(filtered).strip()
+    return _strip_client_usage_hints("\n".join(filtered)).strip()
 
 
 def _extract_system_prompt(system_raw: Union[str, List[Any], None]) -> Optional[str]:
@@ -130,8 +176,12 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
 
         if role == "assistant":
             if isinstance(content, str):
-                openai_msgs.append({"role": "assistant", "content": content})
-            elif isinstance(content, list):
+                cleaned = _strip_client_usage_hints(content)
+                # 整条只是客户端用量提示（剥离后空）→ 丢掉这条元消息，不留空壳
+                if cleaned.strip() or not content.strip():
+                    openai_msgs.append({"role": "assistant", "content": cleaned})
+                continue
+            if isinstance(content, list):
                 text_parts: List[str] = []
                 thinking_parts: List[str] = []
                 tool_calls: List[dict] = []
@@ -143,7 +193,7 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                     if btype == "text":
                         text = block.get("text", "")
                         if text:
-                            text_parts.append(text)
+                            text_parts.append(_strip_client_usage_hints(text))
                     elif btype == "thinking":
                         thinking = block.get("thinking", "")
                         if thinking:
@@ -188,7 +238,10 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
 
         elif role == "user":
             if isinstance(content, str):
-                openai_msgs.append({"role": "user", "content": content})
+                cleaned = _strip_client_usage_hints(content)
+                # 整条只是客户端用量提示 → 丢弃；否则保留剥离后的正文
+                if cleaned.strip() or not content.strip():
+                    openai_msgs.append({"role": "user", "content": cleaned})
             elif isinstance(content, list):
                 tool_results: List[dict] = []
                 user_blocks: List[dict] = []
@@ -217,11 +270,12 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                 if user_blocks:
                     has_images = any(b.get("type") == "image" for b in user_blocks)
                     if not has_images:
-                        texts = [b.get("text", "") for b in user_blocks if b.get("type") == "text"]
-                        openai_msgs.append({
-                            "role": "user",
-                            "content": "\n".join(texts),
-                        })
+                        texts = [_strip_client_usage_hints(b.get("text", ""))
+                                 for b in user_blocks if b.get("type") == "text"]
+                        joined = "\n".join(t for t in texts if t.strip())
+                        # 整条只是客户端用量提示 → 丢弃这条元消息，不留空 user
+                        if joined.strip() or all(not t.strip() for t in texts):
+                            openai_msgs.append({"role": "user", "content": joined})
                     else:
                         parts = [_translate_content_part(b) for b in user_blocks]
                         openai_msgs.append({

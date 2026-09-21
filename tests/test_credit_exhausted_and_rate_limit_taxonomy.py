@@ -88,13 +88,26 @@ def test_account_fault_uses_short_cooldown_not_next_day():
 
 
 def test_credit_exhausted_uses_long_cooldown():
-    """14018 必须走长冷却（额度耗尽当日不可恢复）。"""
+    """14018 必须走长冷却（额度耗尽当日不可恢复）。
+
+    ⚠️ 断言不能写死「剩余 > 1h」：兜底是**下一个 00:00（UTC+8）**，若在 23:00 后
+    运行，距日边界天然不足 1h（会按当天时刻假红）。正确判据是「对齐日边界且明确
+    排除瞬时软窗」，与 `test_daily_quota_without_reset_...` 同源。
+    """
     converter._RATE_LIMIT_STATE.clear()
     converter._record_rate_limit("m-14018", SAMPLE_14018, uid="u1", status_code=429)
     entry = converter._RATE_LIMIT_STATE.get("m-14018")
     assert entry is not None
     assert entry["kind"] == "credit_exhausted"
-    assert entry["resetAtMs"] - int(time.time() * 1000) > 3600 * 1000, "14018 必须是长冷却"
+    # 1) 明确排除瞬时软窗（255s~345s）—— 这才是「5 分钟后重试」的成因
+    effective = entry["monotonic_until"] - time.monotonic()
+    assert effective > 400, f"14018 不得落入瞬时软窗（{effective}s）"
+    # 2) 必须对齐下一个日边界（本仓本地时区口径的 00:00）
+    expect_day_ms, _ = converter._next_day_reset_ms(converter._CREDIT_EXHAUSTED_FALLBACK_HOUR)
+    remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
+    expect_remaining = (expect_day_ms - time.time() * 1000) / 1000.0
+    assert abs(remaining - expect_remaining) < 5, \
+        f"14018 兜底应对齐日边界: 实得 {remaining}s 期望 {expect_remaining}s"
 
 
 def test_credit_exhausted_detects_top_level_code():
@@ -300,7 +313,11 @@ def test_daily_quota_without_reset_and_credit_exhausted_share_day_boundary():
 
 
 def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
-    """端到端：14018 记账后冷却剩余时间必须远超软限流窗口（几十分钟级）。"""
+    """端到端：14018 记账后冷却必须远超软限流窗口，且封禁落进账号冷却表。
+
+    ⚠️ 同样不得写死「> 3600s」：日边界兜底在 23:00 后天然不足 1h。判据改为
+    「排除瞬时软窗 + 与日边界同源」，避免按运行时刻假红。
+    """
     converter._RATE_LIMIT_STATE.clear()
     converter._ACCOUNT_COOLDOWNS.clear()
     try:
@@ -309,8 +326,13 @@ def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
         entry = converter._RATE_LIMIT_STATE["deepseek-v4.1-flash"]
         assert str(entry["code"]) == "14018"
         assert entry["kind"] == "credit_exhausted"
+        effective = entry["monotonic_until"] - time.monotonic()
+        assert effective > 400, f"额度耗尽掉进瞬时软窗: {effective}s"
+        expect_day_ms, _ = converter._next_day_reset_ms(converter._CREDIT_EXHAUSTED_FALLBACK_HOUR)
         remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
-        assert remaining > 3600, f"额度耗尽冷却过短: {remaining}s"
+        expect_remaining = (expect_day_ms - time.time() * 1000) / 1000.0
+        assert abs(remaining - expect_remaining) < 5, \
+            f"额度耗尽应兜底到日边界: 实得 {remaining}s 期望 {expect_remaining}s"
         assert ("u-empty", "deepseek-v4.1-flash") in converter._ACCOUNT_COOLDOWNS
     finally:
         converter._RATE_LIMIT_STATE.clear()

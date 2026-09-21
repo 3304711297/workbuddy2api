@@ -21,6 +21,7 @@ Codex CLI 会把大量运行时提示、完整工具 schema、长历史、以及
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -139,16 +140,27 @@ def project_responses_chat_body(body: dict) -> tuple[dict, dict]:
 
         if role == "system":
             if _looks_like_harness_system(text):
-                dropped_harness_messages += 1
-                continue
+                # 块级剥离：样板挖掉后若还有实质指引就当作真实 system 保留
+                # （harness 常把「Codex CLI」自述与仓库真实规则塞在同一条里）
+                residue = _strip_harness_blocks(text)
+                if not residue:
+                    dropped_harness_messages += 1
+                    continue
+                text = residue
             guidance = _truncate_text(text, MAX_SYSTEM_GUIDANCE_CHARS)
             if guidance:
                 preserved_guidance.append(guidance)
             continue
 
         if role == "user" and _looks_like_harness_user(text):
-            dropped_harness_messages += 1
-            continue
+            # 同上：只丢「纯脚手架」的整条，留下与真实指令混合的那部分
+            residue = _strip_harness_blocks(text)
+            if not residue:
+                dropped_harness_messages += 1
+                continue
+            msg = dict(msg)
+            msg["content"] = residue
+            text = residue
 
         projected_msg = _project_conversation_message(msg)
         if projected_msg is not None:
@@ -661,6 +673,52 @@ def _looks_like_harness_user(text: str) -> bool:
 
 def _looks_like_harness_system(text: str) -> bool:
     return any(marker in text for marker in HARNESS_SYSTEM_MARKERS)
+
+
+# harness 样板里**成对可切**的区间：命中即整条丢会把同条里的真实正文一起删掉
+# （harness 常把 `# AGENTS.md instructions` 这类样板与真实用户指令塞在同一条里）。
+# 这里按块剥离：剥掉样板段落后，若这条还有实质内容就保留，否则才整条丢。
+_BLOCK_STRIP_RES = [
+    # XML 风格的自闭区间（环境/权限/协作模式/技能清单等）
+    re.compile(r"<(environment_context|permissions instructions|collaboration_mode|"
+               r"skills_instructions)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL),
+    # <system-reminder>…</system-reminder>（可能与真实指令同条）
+    re.compile(r"<system-reminder\b[^>]*>.*?</system-reminder>", re.IGNORECASE | re.DOTALL),
+]
+
+# 逐行丢弃的样板行前缀（整行都是脚手架，没有正文价值）。
+# 除固定前缀外，**harness 标记本身所在的整行也算脚手架** —— 否则「标记 + 真实指引」
+# 同条时会把 `You are a coding agent running in the Codex CLI.` 这类自述留下当指引，
+# 白占上下文（这正是本模块存在的理由）。
+_BLOCK_STRIP_LINE_PREFIXES = tuple(
+    dict.fromkeys(
+        (
+            "# AGENTS.md instructions",
+            "# AGENTS.md spec",
+            "# claudeMd",
+        )
+        + HARNESS_USER_MARKERS
+        + HARNESS_SYSTEM_MARKERS
+    )
+)
+
+
+def _strip_harness_blocks(text: str) -> str:
+    """剥掉 harness 样板区块，返回**剩下的实质正文**（可能为空串）。
+
+    与 `_looks_like_harness_user/system` 的区别：那两个是「像不像脚手架」的**布尔**判定，
+    本函数是「把脚手架挖掉、留下真话」的处理。调用方据返回是否为空决定丢弃还是保留。
+    """
+    if not text:
+        return ""
+    for rx in _BLOCK_STRIP_RES:
+        text = rx.sub("\n", text)
+    prefixes = tuple(p.lower().strip() for p in _BLOCK_STRIP_LINE_PREFIXES)
+    kept = [
+        line for line in text.splitlines()
+        if not line.strip().lower().startswith(prefixes)
+    ]
+    return "\n".join(kept).strip()
 
 
 def _message_cost(msg: dict) -> int:
