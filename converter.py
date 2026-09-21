@@ -2032,12 +2032,42 @@ def _usage_int(v) -> int | None:
         return None
 
 
+def _usage_cache_counts(usage) -> tuple[int | None, int | None]:
+    """从上游 usage 提取提示词缓存读数，返回 (read, write)。
+
+    上游（CodeBuddy 后端）实测**同义多命名**下发，按「精确优先、名称兜底」取值：
+      · read  = `prompt_cache_hit_tokens` | `prompt_tokens_details.cached_tokens` | `cached_tokens`
+      · write = `prompt_cache_write_tokens` | `cache_creation_input_tokens`
+
+    ⚠️ 两者缺失一律返回 None，**绝不合成 0**：`0` 是「确实一次未命中」的有效观测，
+    与「上游根本没告诉我们」是两回事——混为一谈会让缓存命中率统计出现假分母
+    （把不报 cache 的模型算成 0 命中）。落盘侧同样只在有值时写字段。
+    """
+    if not isinstance(usage, dict):
+        return None, None
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+
+    read = usage.get("prompt_cache_hit_tokens")
+    if read is None:
+        read = details.get("cached_tokens")
+    if read is None:
+        read = usage.get("cached_tokens")
+
+    write = usage.get("prompt_cache_write_tokens")
+    if write is None:
+        write = usage.get("cache_creation_input_tokens")
+
+    return _usage_int(read), _usage_int(write)
+
+
 def _record_usage(model: str, ok: bool, t0: float, *,
                   input_tokens=None, output_tokens=None,
                   ttft_ms=None, error=None,
                   retry_count: int = 0, retry_reason: str | None = None,
                   requested_model: str | None = None,
                   fallback_reason: str | None = None,
+                  cache_read_tokens=None, cache_write_tokens=None,
                   snapshot_resp: str | None = None):
     """向 CONFIG['usage_log'] 追加一行用量统计（JSONL，append 模式，每行写完即落盘）。
 
@@ -2045,6 +2075,8 @@ def _record_usage(model: str, ok: bool, t0: float, *,
              "output_tokens": int|null, "latency_ms": int, "ttft_ms": int|null,
              "error": str|null, "retry_count": int, "retry_reason": str|null}
     若发生降级（requested_model != model），附带 requested_model / actual_model / fallback_reason。
+    上游下发提示词缓存读数时附带 cache_read_tokens / cache_write_tokens
+    （**缺失不写该键**——与「命中 0」语义不同，见 `_usage_cache_counts`）。
     未启用 --usage-log 时直接丢弃；写入任何异常一律静默吞掉，绝不影响请求响应。
     快照腿独立于用量开关：只要入口设置了快照上下文即落快照。
     """
@@ -2078,6 +2110,13 @@ def _record_usage(model: str, ok: bool, t0: float, *,
             rec["actual_model"] = model
             if fallback_reason:
                 rec["fallback_reason"] = fallback_reason
+        # 提示词缓存读数：仅在拿到时附键（缺失 = 上游未告知 ≠ 命中 0）
+        _cr = _usage_int(cache_read_tokens)
+        _cw = _usage_int(cache_write_tokens)
+        if _cr is not None:
+            rec["cache_read_tokens"] = _cr
+        if _cw is not None:
+            rec["cache_write_tokens"] = _cw
         with _USAGE_LOCK:  # 并发请求下保证逐行完整追加
             _sync_usage_ring_locked()  # 先吸纳外部直接写盘的行，再追加本行
             with open(path, "a", encoding="utf-8") as f:
@@ -4121,12 +4160,14 @@ async def chat_completions(request: Request,
         _clear_account_cooldown(uid, model_name, req_start_ms=t0 * 1000)
     # 用量统计：成功请求记一行（usage 与 _log_finish 取同一来源）
     _u = collected.get("usage") or {}
+    _cr, _cw = _usage_cache_counts(_u)
     _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   requested_model=model_name,
                   fallback_reason=fallback_reason,
+                  cache_read_tokens=_cr, cache_write_tokens=_cw,
                   snapshot_resp=_snapshot_excerpt(collected))
     resp_headers = {"X-WorkBuddy-Active-Account": uid} if uid else {}
     if actual_model != model_name:
@@ -4411,12 +4452,14 @@ async def anthropic_messages(
     _log_finish(model_name, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     _mark_model_available(body["model"], uid=uid)  # 实际成功模型，含 fallback
     _u = collected.get("usage") or {}
+    _cr, _cw = _usage_cache_counts(_u)
     _record_usage(actual_model, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
                   ttft_ms=ttft_ms,
                   requested_model=model_name,
                   fallback_reason=fallback_reason,
+                  cache_read_tokens=_cr, cache_write_tokens=_cw,
                   snapshot_resp=_snapshot_excerpt(collected))
 
     if uid:
@@ -4670,7 +4713,8 @@ async def openai_responses(
     if uid:
         _clear_account_cooldown(uid, model_name, req_start_ms=t0 * 1000)
     _u = collected.get("usage") or {}
-    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, snapshot_resp=_snapshot_excerpt(collected))
+    _cr, _cw = _usage_cache_counts(_u)
+    _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, cache_read_tokens=_cr, cache_write_tokens=_cw, snapshot_resp=_snapshot_excerpt(collected))
 
     responses_obj = chat_response_to_responses(collected, model=model_name)
     final_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else None
@@ -5042,6 +5086,7 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
     req_m = requested_model or model_name
     _log_finish(req_m, t0, collected, rid, actual_model=actual_model, fallback_reason=fallback_reason)
     _u = usage or {}
+    _cr, _cw = _usage_cache_counts(_u)
     _record_usage(actual_model or model_name, True, t0,
                   input_tokens=_u.get("prompt_tokens"),
                   output_tokens=_u.get("completion_tokens"),
@@ -5050,6 +5095,7 @@ async def _pseudo_stream_response(collected: dict, model_name: str = "?", t0: fl
                   retry_reason=retry_reason,
                   requested_model=req_m,
                   fallback_reason=fallback_reason,
+                  cache_read_tokens=_cr, cache_write_tokens=_cw,
                   snapshot_resp=_snapshot_excerpt(collected))
 
 
