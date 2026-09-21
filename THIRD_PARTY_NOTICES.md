@@ -18,6 +18,7 @@
   | --- | --- | --- |
   | `turing_helper.js` —— 通过 WorkBuddy 桌面端自带 Turing Shield SDK 取设备风控 token（SDK 目录自动发现，不写死路径） | `turing_helper.cjs`（改名为 `.cjs` 以适配本仓库 `package.json` 的 `type: module`） | 思路与自动发现逻辑借鉴自上游；本仓库按自身 Node 环境做了适配 |
   | `X-Device-Token` 设备风控头注入机制（敏感请求注入设备 token，取不到时优雅降级） | `converter.py` → `_get_turing_device_token()` / `_find_node_runtime()` / `CredentialManager._build_headers_from()` | 注入策略与降级语义借鉴自上游 converter.py 的同名机制，实现为本仓库独立版本（进程内 10 分钟缓存、子进程 20 秒超时） |
+  | `7eb98db3` —— HTTP 200 内嵌错误不得当成功（上游在 `admin/routers/proxy.py` 引入 `_iter_json_objects` / `_is_error_obj` / `_sse_has_content` 与 64KB 带内探测窗口） | `converter.py` → `_parse_non_sse_body` / `UpstreamInBandError` / `_collect_stream` 的 `probe_lines` 缓冲、`_has_stream_payload`、`UpstreamEmptyStreamError` | 采纳其「200 不等于成功」的语义，但触发形态按本仓库实测独立实现：本仓库三次真实请求均返回 200、未复现上游假设的拦截形态，故只按自身取证到的三种正文（完整 `chat.completion` / 错误信封 / 网关 HTML）分类，**仅第一种算成功**；`UpstreamInBandError` 刻意继承 `httpx.HTTPError`，以复用各协议入口既有的换号 / 记失败 / 协议化错误链路。分片聚合路径另加零帧哨兵（见 `tests/test_empty_stream_sentinel.py`） |
 
 ## 2. DistPub/workbuddy2api（xiaofan6ya 仓库的增强分支）
 
@@ -60,11 +61,13 @@
 | 借鉴源 | 许可证 | 借鉴项 | 移植落点与说明 |
 |---|---|---|---|
 | `linguo2625469/workbuddy2api-panel`（基于 `Sliverkiss/workbuddy2api`） | MIT | 请求体上限保护机制（413 Payload Too Large）与多账号网关核心架构 | `converter.py`：引入 `MAX_BODY_MB` 与 `RequestBodyLimitMiddleware`，超限请求直接秒拒返回标准 413 `request_body_too_large`，防御超大 payload 击穿本地内存与上游 WAF；参考原版多账号池与路由调度思路 |
-| `ardeyouxipianyi/workbuddy2api-intl` & `turbomind66/workbuddy2api-python` | MIT | 官方客户端 User-Agent 仿真与可配置环境变量 | `converter.py`：出站 UA 从硬编码升级为仿真官方客户端规范（`CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），并支持 `WORKBUDDY2API_USER_AGENT` 动态覆盖，规避上游非标 UA 导致的 10085 拦截与归因异常 |
+| `ardeyouxipianyi/workbuddy2api-hub`（原 `workbuddy2api-intl`，已更名） & `turbomind66/workbuddy2api-python` | MIT | 官方客户端 User-Agent 仿真与可配置环境变量 | `converter.py`：出站 UA 从硬编码升级为仿真官方客户端规范（`CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），并支持 `WORKBUDDY2API_USER_AGENT` 动态覆盖，规避上游非标 UA 导致的 10085 拦截与归因异常 |
 | `momo0410/workbuddy-switch-gateway` | MIT | 按积分到期日分层选号调度算法（先烧快过期额度） | `converter.py`：`AccountRotator` 引入 `get_candidate_uids_tiered` 与多格式到期日解析，按日粒度优先将即将过期的账号排在最前，避免额度失效浪费 |
 | `ShouZhuo0413/codebuddy2api` & `hawklithm/workbuddy2api` | MIT | OpenAI Responses 协议（`POST /v1/responses`）双向适配层与流式事件状态机 | `responses_compat.py`：实现 Responses 请求/工具/多轮消息与 Chat 互转，及 `ResponsesStreamConverter` 流式语义事件流，原生直连驱动 Codex CLI |
 | `neipor/codebuddy-cli2api` | MIT | 远程多模态图片自动转 Data-URI 机制 | `converter.py`：实现 `_url_to_data_uri` 与 `_inline_remote_images`，自动异步下载 http(s) 远程图片并内联为 base64 data URI，解除腾讯后端仅接受 data URI 的 400 约束 |
 | `icebears111/workbuddy2api` | MIT | 上游内容安全审核错误码（11140）拦截与防误判机制 | `converter.py`：引入 `_is_content_policy_violation` 与 `_safe_err_raw` 结构化包装，识别 11140 安全审核拦截并立即返回明确错误，严禁将其误判为限流或故障进行盲目切号重试与账号冷却 |
+| `Sliverkiss/workbuddy2api` | MIT | Go 原版的多账号池 / 加权调度核心架构（横向对比）；**其源码同时被用作错误码语义的上游真源** | 架构层面参考其多账号池与加权选号思路；本轮起另作语义真源使用：据其实现确认 `14017 = ErrAccountFault`（试用未激活，**非**额度耗尽）、`model usage limit exceeded = ErrSoftRate`（软限流）、`quota exceeded = HardCredit`（计费额度），据此纠正了本仓库错误分类的词表方向与冷却分层（14017 走短冷却可自愈、计费额度与频控限流分属不同错码族） |
+| `orangeboyChen/codebuddy2api` | MIT | `#178` —— 剥离 Claude Code 客户端注入的 token 用量提示 | `anthropic_compat.py` → `_strip_client_usage_hints` / `_CLIENT_USAGE_HINT_RES`；`responses_projection.py` → `_strip_harness_blocks`。上游为 TypeScript 实现，本仓库按 Python 复刻其两条设计取舍（带壳形态先匹配；倒计时必须带数字载荷），并额外覆盖本仓库特有的「空壳消息丢弃」与「harness 标记与真实指令同条」边界（见 `tests/test_client_usage_hint_strip.py`、`tests/test_harness_block_strip.py`） |
 
 ---
 
