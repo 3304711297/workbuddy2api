@@ -189,9 +189,11 @@ pub fn proxy_start(
     }
 
     // 旧进程句柄已在此处关闭（上方 already-running 检查排除了运行中状态），
-    // 启动新子进程前做日志轮转：超过 1MB 的旧日志整体改名为 .1，避免无限增长；
+    // 启动新子进程前做日志轮转：超过阈值的旧日志整体后移（stdout 1MB/保留 1 份、
+    // 结构化日志 5MB/保留 3 份），避免无限增长；
+    // ⚠️ 必须在 spawn 之前——Windows 上对内核正在写的 converter.log 做 rename 会失败/丢写。
     // rename 失败（文件被占用）静默跳过，不影响本次启动
-    rotate_proxy_log_if_oversized();
+    rotate_all_logs_if_oversized();
 
     // 重定向标准输出与错误输出到本地日志文件，供控制台实时查看
     let log_path = log_file_path();
@@ -223,38 +225,94 @@ fn log_file_path() -> PathBuf {
     dir.join("proxy_stdout.log")
 }
 
-/// 日志轮转：proxy_stdout.log 超过 1MB 时整体重命名为 proxy_stdout.log.1（覆盖旧备份）。
-/// 只允许在反代子进程确定未运行（旧句柄已关闭）的时机调用，进程运行中绝不截断/移动；
+/// 日志轮转：proxy_stdout.log 超过 1MB / converter.log 超过 5MB 时整体后移到 `.1`（…`.N`）。
+/// 只允许在反代子进程确定未运行（旧句柄已关闭）的时机调用，进程运行中绝不截断/移动——
+/// Windows 上对正在被写入的文件 rename 会直接失败甚至丢写，上游
+/// `momo0410/workbuddy-switch-gateway` 的实测教训即「必须在启动内核之前轮转」；
 /// rename 失败（Windows 文件占用等）时静默跳过，不阻断启动/停止流程。
 fn rotate_proxy_log_if_oversized() {
-    const ROTATE_THRESHOLD_BYTES: u64 = 1024 * 1024;
-    let log = log_file_path();
-    if let Ok(meta) = std::fs::metadata(&log) {
-        if meta.len() > ROTATE_THRESHOLD_BYTES {
-            let backup = log.with_file_name("proxy_stdout.log.1");
-            let _ = std::fs::rename(&log, &backup);
-        }
+    rotate_log_if_oversized(&log_file_path(), STDOUT_LOG_THRESHOLD_BYTES, STDOUT_LOG_KEEP);
+}
+
+/// 结构化日志（converter.log，内核 `--log` 目标）超阈值时轮转。
+/// 它是**请求级表格日志**（每条请求一行摘要 + 耗时），增长远比 uvicorn 的 stdout 快，
+/// 故阈值放到 5MB、保留 3 份（`.1`/`.2`/`.3`）——日志页只读尾部，留 3 份足够回看历史。
+fn rotate_structured_log_if_oversized() {
+    rotate_log_if_oversized(
+        &structured_log_path(),
+        STRUCTURED_LOG_THRESHOLD_BYTES,
+        STRUCTURED_LOG_KEEP,
+    );
+}
+
+/// stdout 日志轮转口径：1MB / 保留 1 份（既有行为，勿改）
+const STDOUT_LOG_THRESHOLD_BYTES: u64 = 1024 * 1024;
+const STDOUT_LOG_KEEP: usize = 1;
+/// 结构化日志轮转口径：5MB / 保留 3 份
+const STRUCTURED_LOG_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
+const STRUCTURED_LOG_KEEP: usize = 3;
+
+/// 启动内核**之前**轮转两个日志文件（proxy_start 的唯一入口）。
+/// 顺序无关：两个文件各自独立判断阈值。
+fn rotate_all_logs_if_oversized() {
+    rotate_proxy_log_if_oversized();
+    rotate_structured_log_if_oversized();
+}
+
+/// 通用日志轮转：`path` 超过 `threshold_bytes` 时整体后移，最多保留 `keep` 份副本
+/// （`path.1` 最新 … `path.keep` 最旧；更旧的先删）。
+/// 逐级后移保证**副本数不会越轮越多**（第 keep 份先删掉再挪，不是无限追加）。
+/// 路径不存在/非普通文件（metadata 失败）、或任一 rename 失败时静默跳过并返回，
+/// 绝不因轮转失败阻断内核启动/停止——轮转是尽力而为的卫生动作，不是启动前置条件。
+fn rotate_log_if_oversized(path: &std::path::Path, threshold_bytes: u64, keep: usize) {
+    if keep == 0 {
+        return;
     }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return; // 不存在（或不可访问）→ 无可轮转
+    };
+    if !meta.is_file() || meta.len() <= threshold_bytes {
+        return;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let backup_of = |i: usize| path.with_file_name(format!("{name}.{i}"));
+    // 先删掉即将越界的第 keep 份，再从最旧往最新逐级后移，最后把当前文件挪到 .1
+    let _ = std::fs::remove_file(backup_of(keep));
+    for i in (1..keep).rev() {
+        let _ = std::fs::rename(backup_of(i), backup_of(i + 1));
+    }
+    let _ = std::fs::rename(path, backup_of(1));
 }
 
 /// 读取文件尾部并裁剪到 max_bytes（从字符边界起切，防多字节字符 panic）。
 /// 文件不存在/读取失败返回 None。
+///
+/// 实现上**从文件末尾 seek**（`SeekFrom::End` 等价于 `len - max_bytes`）后只读这一段，
+/// 不再把整个文件 `std::fs::read` 进内存——日志页每 5s 轮询一次，整文件读入在
+/// 数 MB 级日志上会反复制造无谓的内存与 IO 峰值（converter.log 无上限时尤其明显）。
 fn read_file_tail_clipped(p: &std::path::Path, max_bytes: usize) -> Option<String> {
-    if !p.exists() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = std::fs::File::open(p).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes as u64);
+    if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
         return None;
     }
-    let bytes = std::fs::read(p).ok()?;
-    let raw = String::from_utf8_lossy(&bytes).to_string();
-    if raw.len() <= max_bytes {
-        return Some(raw);
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+
+    // 起点可能落在多字节字符中间：跳过开头的 UTF-8 续接字节（0b10xxxxxx），
+    // 否则 `from_utf8_lossy` 会在这里凭空插入一个 U+FFFD 替换字符。
+    let mut cut = 0usize;
+    if start > 0 {
+        while cut < buf.len() && (buf[cut] & 0xC0) == 0x80 {
+            cut += 1;
+        }
     }
-    // 日志含中文/emoji 时，字节偏移可能落在多字节字符中间，
-    // 直接切片会 panic "byte index is not a char boundary"，需向后对齐。
-    let mut start = raw.len() - max_bytes;
-    while start < raw.len() && !raw.is_char_boundary(start) {
-        start += 1;
-    }
-    Some(raw[start..].to_string())
+    Some(String::from_utf8_lossy(&buf[cut..]).to_string())
 }
 
 /// 结构化日志文件路径（内核 --log 指向此文件，含请求摘要/耗时/级别过滤后的行）
@@ -2023,6 +2081,194 @@ mod test_snapshot_query_tests {
                    vec!["--snapshots".to_string(), "--snapshots-keep".to_string(), "500".to_string()]);
     }
 }
+
+#[cfg(test)]
+mod cleanup_log_rotation_tests {
+    use super::*;
+
+    /// 每个用例独占一个临时目录（进程内 + 序号去重），结束即删。
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wba_logrot_{}_{}_{}",
+            std::process::id(),
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(path: &std::path::Path, content: &str) {
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn read(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    /// 路径不存在时必须静默返回，绝不 panic、绝不让调用方（启动流程）失败。
+    #[test]
+    fn rotate_missing_path_is_silent_noop() {
+        let dir = tmp_dir("missing");
+        let missing = dir.join("converter.log");
+        rotate_log_if_oversized(&missing, 10, 3); // 不得 panic
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未超阈值不轮转（阈值判定必须严格大于，避免恰好等于阈值时反复挪动）。
+    #[test]
+    fn rotate_below_or_equal_threshold_keeps_file_in_place() {
+        let dir = tmp_dir("below");
+        let p = dir.join("converter.log");
+        write(&p, "0123456789"); // 10 字节
+        rotate_log_if_oversized(&p, 10, 3);
+        assert!(p.exists());
+        assert!(!p.with_file_name("converter.log.1").exists());
+        assert_eq!(read(&p), "0123456789");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 超阈值：整体后移到 .1，历史副本逐级顺移，最旧的第 keep 份被丢弃。
+    #[test]
+    fn rotate_shifts_backups_and_never_grows_beyond_keep() {
+        let dir = tmp_dir("shift");
+        let p = dir.join("converter.log");
+        write(&p, "NEW_NEW_NEW_NEW"); // > 阈值 5
+        write(&p.with_file_name("converter.log.1"), "OLD1");
+        write(&p.with_file_name("converter.log.2"), "OLD2");
+        write(&p.with_file_name("converter.log.3"), "OLD3");
+
+        rotate_log_if_oversized(&p, 5, 3);
+
+        assert!(!p.exists(), "原文件应被挪走");
+        assert_eq!(read(&p.with_file_name("converter.log.1")), "NEW_NEW_NEW_NEW");
+        assert_eq!(read(&p.with_file_name("converter.log.2")), "OLD1");
+        assert_eq!(read(&p.with_file_name("converter.log.3")), "OLD2");
+        assert!(
+            !p.with_file_name("converter.log.4").exists(),
+            "副本数不得越轮越多（.4 不应存在）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 连续多轮轮转后副本数量恒为 keep（不增不减）。
+    #[test]
+    fn rotate_repeatedly_keeps_exactly_keep_backups() {
+        let dir = tmp_dir("repeat");
+        let p = dir.join("converter.log");
+        for round in 0..5 {
+            write(&p, &format!("round{round}_payload_over_threshold"));
+            rotate_log_if_oversized(&p, 4, 3);
+        }
+        assert_eq!(read(&p.with_file_name("converter.log.1")), "round4_payload_over_threshold");
+        assert!(p.with_file_name("converter.log.2").exists());
+        assert!(p.with_file_name("converter.log.3").exists());
+        assert!(!p.with_file_name("converter.log.4").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// keep=0 视为「不保留」，直接不动文件（防御脏参数）。
+    #[test]
+    fn rotate_keep_zero_is_noop() {
+        let dir = tmp_dir("keep0");
+        let p = dir.join("converter.log");
+        write(&p, "AAAAAAAAAAAA");
+        rotate_log_if_oversized(&p, 1, 0);
+        assert_eq!(read(&p), "AAAAAAAAAAAA");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 两个日志文件走同一实现，口径分别为 stdout 1MB/1 份、结构化日志 5MB/3 份。
+    #[test]
+    fn log_rotation_quota_matches_contract() {
+        assert_eq!(STDOUT_LOG_THRESHOLD_BYTES, 1024 * 1024);
+        assert_eq!(STDOUT_LOG_KEEP, 1);
+        assert_eq!(STRUCTURED_LOG_THRESHOLD_BYTES, 5 * 1024 * 1024);
+        assert_eq!(STRUCTURED_LOG_KEEP, 3);
+    }
+
+    /// ⚠️ 顺序铁律：轮转必须在 spawn 内核**之前**（Windows 上对运行中内核正在写的
+    /// converter.log 做 rename 会失败/丢写）。用源码位置断言把这条锁死。
+    #[test]
+    fn proxy_start_rotates_logs_before_spawning_kernel() {
+        let src = include_str!("proxy.rs");
+        // 用「行首缩进 + 调用」定位调用点（定义处是 `fn rotate_all_logs_if_oversized()`，
+        // 不匹配该形态）；兼容 LF/CRLF（两种行尾下 `\n    rotate...` 都成立）。
+        let rotate_at = src
+            .find("\n    rotate_all_logs_if_oversized();")
+            .expect("proxy_start 必须调用 rotate_all_logs_if_oversized()");
+        let spawn_at = src.find(".spawn()").expect("未找到 spawn 调用");
+        assert!(
+            rotate_at < spawn_at,
+            "日志轮转必须在 spawn 之前执行（实测：运行中 rename 在 Windows 上会失败/丢写）"
+        );
+    }
+
+    /// 尾部读取：文件大小 ≤ 上限时返回全文（与旧的「整文件读」语义一致）。
+    #[test]
+    fn tail_read_returns_whole_small_file() {
+        let dir = tmp_dir("tail_small");
+        let p = dir.join("converter.log");
+        write(&p, "hello\nworld\n");
+        assert_eq!(read_file_tail_clipped(&p, 1024).unwrap(), "hello\nworld\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 尾部读取：只返回末尾 max_bytes 字节（从末尾 seek，不再整文件读入内存）。
+    #[test]
+    fn tail_read_clips_to_last_bytes() {
+        let dir = tmp_dir("tail_clip");
+        let p = dir.join("converter.log");
+        write(&p, "0123456789abcdef");
+        assert_eq!(read_file_tail_clipped(&p, 6).unwrap(), "abcdef");
+        // 边界：恰好等于上限 → 全文
+        assert_eq!(read_file_tail_clipped(&p, 16).unwrap(), "0123456789abcdef");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 多字节字符边界：切点落在 emoji 中间时，不得吐出 U+FFFD 替换字符
+    /// （旧实现从 String 里向后对齐 char boundary，中途经过 lossy 解码会插入替换字符）。
+    #[test]
+    fn tail_read_never_emits_replacement_char_on_multibyte_cut() {
+        let dir = tmp_dir("tail_utf8");
+        let p = dir.join("converter.log");
+        let prefix = "A".repeat(40); // ASCII 前缀
+        let tail = "TAIL-中文结尾😀"; // 含中文与 4 字节 emoji
+        write(&p, &format!("{prefix}😀{tail}"));
+        let len = (prefix.len() + "😀".len() + tail.len()) as u64;
+        // 让起点落在 emoji 中间：max_bytes 使 start = len(prefix) + 2
+        let max_bytes = (len - (prefix.len() as u64 + 2)) as usize;
+        let got = read_file_tail_clipped(&p, max_bytes).unwrap();
+        assert!(
+            !got.contains('\u{FFFD}'),
+            "切点落在多字节字符中间时不得产生替换字符：{got:?}"
+        );
+        assert_eq!(got, tail, "应整体丢弃被切断的那个字符，只留完整尾部");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件不存在 → None（前端据此显示「暂无日志输出」）。
+    #[test]
+    fn tail_read_returns_none_for_missing_file() {
+        let dir = tmp_dir("tail_missing");
+        assert!(read_file_tail_clipped(&dir.join("nope.log"), 100).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空文件 → Some("")（与旧行为一致：不是 None）。
+    #[test]
+    fn tail_read_returns_empty_string_for_empty_file() {
+        let dir = tmp_dir("tail_empty");
+        let p = dir.join("converter.log");
+        write(&p, "");
+        assert_eq!(read_file_tail_clipped(&p, 100).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+} // mod cleanup_log_rotation_tests
 
 #[cfg(test)]
 mod orphan_climb_tests {

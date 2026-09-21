@@ -40,10 +40,19 @@ export async function loadModelsMatrix() {
   }
 }
 
+/**
+ * 倍率数值化（三态语义）：
+ *   - 正数：真实倍率
+ *   - `0`：免费（`免费 (0.00x)` / `x0.00`）
+ *   - `null`：**未知**（credits 缺失 / `—` / 无可解析数字）
+ * 免费与未知必须分开：旧实现把两者都归成 `-1`，导致升序时「未知」被排到「免费」之上，
+ * 且两种语义在排序上完全无法区分（用户看到的是「未知倍率混在免费里一起置顶」）。
+ * @returns {number|null} 倍率数值；未知返回 null（排序时单独置底）
+ */
 function getMultiplierNum(m) {
-  if (!m.credits || m.credits === '—') return -1;
+  if (!m.credits || m.credits === '—') return null;
   const match = String(m.credits).match(/(\d+(?:\.\d+)?)/);
-  return match ? parseFloat(match[1]) : -1;
+  return match ? parseFloat(match[1]) : null;
 }
 
 function applyAndRender() {
@@ -65,7 +74,14 @@ function applyAndRender() {
     });
   } else if (sortField === 'credits') {
     list.sort((a, b) => {
-      const diff = getMultiplierNum(b) - getMultiplierNum(a);
+      const va = getMultiplierNum(a);
+      const vb = getMultiplierNum(b);
+      // 「倍率未知」在升序与降序下**一律置底**：未知不等于 0，也不该被当成最小值。
+      // 旧实现把未知当 -1，升序时会排在免费的 0 之上（未知混进免费一组，语义错乱）。
+      if (va === null && vb === null) return (a.id || '').localeCompare(b.id || '');
+      if (va === null) return 1;
+      if (vb === null) return -1;
+      const diff = vb - va;
       if (diff !== 0) {
         return sortOrder === 'desc' ? diff : -diff;
       }
@@ -355,12 +371,16 @@ window.openModelEdit = (modelId) => {
   const m = currentModelsList.find((x) => x.id === modelId);
   if (!m) return;
   const defaultCtx = m.max_input_tokens;
+  // 硬上限（上游 maxInputTokens）与「客户端默认窗口」是两个量：默认窗口是建议值，
+  // 输入框的 max 必须用**硬上限**，否则用户无法把窗口调到默认值以上（模型本可支持）。
+  // 老版内核无该字段时退化为默认窗口（= 既有行为）。
+  const hardCtx = m.upstream_max_input_tokens || defaultCtx;
   const currentCtx = m.custom_context_window || defaultCtx;
   let html = `
     <div class="zguide-field">
-      <span class="zguide-label">上下文窗口上限 (Tokens) · 上限 ${Math.round(defaultCtx / 1000)}k</span>
+      <span class="zguide-label">上下文窗口上限 (Tokens) · 默认 ${Math.round(defaultCtx / 1000)}k · 硬上限 ${Math.round(hardCtx / 1000)}k</span>
       <input type="number" class="input mono" style="width: 100%;" id="ctx-${esc(modelId)}"
-        value="${esc(currentCtx)}" min="1024" max="${esc(defaultCtx)}" step="1024" />
+        value="${esc(currentCtx)}" min="1024" max="${esc(hardCtx)}" step="1024" />
     </div>`;
   if (m.supports_reasoning) {
     const currentEffort = m.custom_reasoning_effort || 'default';

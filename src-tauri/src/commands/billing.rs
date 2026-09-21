@@ -15,8 +15,15 @@ pub struct ModelMetaItem {
     pub id: String,
     pub name: String,
     pub credits: String,
+    /// 客户端默认上下文窗口（上游 `contextWindow.defaultLength` 优先，缺失时回退硬上限）。
+    /// ⚠️ 刻意**不**取 `maxInputTokens`：那是硬上限，把它当默认窗口会替客户端虚报窗口
+    /// （实测 12 个模型把客户端默认 300000 谎报成 1000000）。
     pub max_input_tokens: i64,
     pub max_output_tokens: i64,
+    /// 上游硬上限（`maxInputTokens` / `maxAllowedSize`），缺失为 None。
+    /// 与 `max_input_tokens` 并存以便 UI 同时展示「默认窗口 / 硬上限」。
+    #[serde(default)]
+    pub upstream_max_input_tokens: Option<i64>,
     pub supports_reasoning: bool,
     pub can_disable_thinking: bool,
     pub supported_efforts: Vec<String>,
@@ -35,6 +42,67 @@ pub struct ModelMetaItem {
 
 fn default_availability() -> String {
     "available".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// 模型条目字段解析（纯函数，便于单测）
+// ---------------------------------------------------------------------------
+
+/// 描述文本长度上限：上游描述偶有超长（部分模型带整段宣传文案），
+/// 截断到 512 个**字符**（非字节，避免在多字节字符中间切开）。
+const DESCRIPTION_MAX_CHARS: usize = 512;
+
+/// 内置兜底窗口：上游两个字段都缺失时使用（既有行为，勿改）。
+const FALLBACK_CONTEXT_WINDOW: i64 = 200_000;
+
+/// 从模型条目取上游硬上限：`maxInputTokens` 优先，回退 `maxAllowedSize`。
+/// 每一档都要求正数（上游偶发下发 0 / 负数占位）——0 不是有效窗口，应继续回退，
+/// 否则控制台会出现「/ 0k」这类无意义展示。
+fn upstream_hard_limit(m: &serde_json::Value) -> Option<i64> {
+    fn positive(v: Option<i64>) -> Option<i64> {
+        v.filter(|x| *x > 0)
+    }
+    positive(m.get("maxInputTokens").and_then(|v| v.as_i64()))
+        .or_else(|| positive(m.get("maxAllowedSize").and_then(|v| v.as_i64())))
+}
+
+/// 从模型条目取客户端默认窗口：`contextWindow.defaultLength` 优先，缺失回退硬上限。
+///
+/// **为什么不是直接用 `maxInputTokens`**：上游 `contextWindow.defaultLength` 才是
+/// 官方客户端实际生效的窗口（实测 300000），而 `maxInputTokens` 是模型能吃的上限
+/// （实测 1000000）。把上限当默认窗口上报，会让 12 个模型对客户端虚报窗口。
+fn upstream_default_window(m: &serde_json::Value) -> Option<i64> {
+    m.pointer("/contextWindow/defaultLength")
+        .and_then(|v| v.as_i64())
+        .filter(|v| *v > 0)
+        .or_else(|| upstream_hard_limit(m))
+}
+
+/// 组装对外字段：`(max_input_tokens, upstream_max_input_tokens)`。
+/// 两者分别表示「客户端默认窗口」与「上游硬上限」，都尽量保留供 UI 展示。
+fn resolve_context_windows(m: &serde_json::Value) -> (i64, Option<i64>) {
+    let hard = upstream_hard_limit(m);
+    let default_window = upstream_default_window(m).unwrap_or(FALLBACK_CONTEXT_WINDOW);
+    (default_window, hard)
+}
+
+/// 是否应从控制台模型表中剔除该条目：
+/// ① 无 id（脏数据）；② 上游显式标记 `disabled === true`；
+/// ③ 历史遗留的名字黑名单（`hunyuan-image-v3.0`，上游曾以未置 disabled 的形态下发）。
+fn is_model_entry_dropped(m: &serde_json::Value) -> bool {
+    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    if id.is_empty() || id == "hunyuan-image-v3.0" {
+        return true;
+    }
+    m.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// 描述截断（按字符，避免切开多字节字符）。
+fn truncate_description(raw: &str) -> String {
+    if raw.chars().count() <= DESCRIPTION_MAX_CHARS {
+        return raw.to_string();
+    }
+    raw.chars().take(DESCRIPTION_MAX_CHARS).collect()
 }
 
 /// 已知模型的完整思考档位矩阵（兜底覆盖表）。
@@ -300,10 +368,12 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
     }
 
     for m in all_models {
-        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        if id.is_empty() || id == "hunyuan-image-v3.0" {
+        // 剔除口径：无 id / disabled === true / 历史黑名单（hunyuan-image-v3.0）。
+        // 旧实现只过滤一个名字，上游新标记 disabled 的条目会照原样进控制台。
+        if is_model_entry_dropped(&m) {
             continue;
         }
+        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         if seen_ids.contains(&id) {
             continue;
         }
@@ -314,9 +384,11 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
 
         let name = m.get("name").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
         let credits = m.get("credits").and_then(|v| v.as_str()).unwrap_or("—").to_string();
-        let max_input = m.get("maxInputTokens").and_then(|v| v.as_i64())
-            .or_else(|| m.get("maxAllowedSize").and_then(|v| v.as_i64()))
-            .unwrap_or(200000);
+        // 上下文窗口两个字段并存：
+        //   max_input_tokens           = 客户端默认窗口（contextWindow.defaultLength 优先）
+        //   upstream_max_input_tokens  = 上游硬上限（maxInputTokens / maxAllowedSize）
+        // 旧实现只读后者当默认窗口上报，导致 12 个模型把默认 300000 谎报成 1000000。
+        let (max_input, upstream_max_input) = resolve_context_windows(&m);
         let max_output = m.get("maxOutputTokens").and_then(|v| v.as_i64()).unwrap_or(32000);
 
         let reasoning_obj = m.get("reasoning");
@@ -356,10 +428,11 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             .or_else(|| catalog.map(|c| c.default_effort.to_string()))
             .unwrap_or_else(|| "auto".to_string());
 
-        let desc = m.get("descriptionZh").and_then(|v| v.as_str())
-            .or_else(|| m.get("descriptionEn").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
+        let desc = truncate_description(
+            m.get("descriptionZh").and_then(|v| v.as_str())
+                .or_else(|| m.get("descriptionEn").and_then(|v| v.as_str()))
+                .unwrap_or(""),
+        );
 
         let mut tags = Vec::new();
         let source_tag = if in_cb && in_wb {
@@ -396,6 +469,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             credits,
             max_input_tokens: max_input,
             max_output_tokens: max_output,
+            upstream_max_input_tokens: upstream_max_input,
             supports_reasoning,
             can_disable_thinking,
             supported_efforts,
@@ -511,6 +585,99 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
 // ---------------------------------------------------------------------------
 // 单元测试：思考档位矩阵解析口径
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod model_entry_parsing_tests {
+    use super::*;
+
+    fn entry(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// 核心回归：上报给客户端的窗口必须是 `contextWindow.defaultLength`（客户端默认窗口），
+    /// 不是 `maxInputTokens`（硬上限）。实测 12 个模型把默认 300000 谎报成 1000000。
+    #[test]
+    fn default_window_prefers_context_window_default_length() {
+        let m = entry(r#"{"id":"a","maxInputTokens":1000000,
+                         "contextWindow":{"defaultLength":300000,"maxLength":1000000}}"#);
+        let (ctx, hard) = resolve_context_windows(&m);
+        assert_eq!(ctx, 300_000, "必须取 contextWindow.defaultLength 作为默认窗口");
+        assert_eq!(hard, Some(1_000_000), "硬上限应保留在独立字段");
+    }
+
+    /// `contextWindow.defaultLength` 缺失 → 回退 `maxInputTokens`（兼容老条目）。
+    #[test]
+    fn default_window_falls_back_to_hard_limit_when_default_missing() {
+        let m = entry(r#"{"id":"a","maxInputTokens":1000000}"#);
+        let (ctx, hard) = resolve_context_windows(&m);
+        assert_eq!(ctx, 1_000_000);
+        assert_eq!(hard, Some(1_000_000));
+
+        // contextWindow 存在但 defaultLength 缺失/非法（0/负数/非整数）同样回退
+        for json in [
+            r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"maxLength":1000000}}"#,
+            r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"defaultLength":0}}"#,
+            r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"defaultLength":-5}}"#,
+            r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"defaultLength":"300000"}}"#,
+            r#"{"id":"a","maxInputTokens":64000,"contextWindow":null}"#,
+        ] {
+            let (ctx, _) = resolve_context_windows(&entry(json));
+            assert_eq!(ctx, 64_000, "非法/缺失的 defaultLength 应回退硬上限：{json}");
+        }
+    }
+
+    /// 硬上限取值口径保持既有：`maxInputTokens` 优先，回退 `maxAllowedSize`；非正数视为缺失。
+    #[test]
+    fn hard_limit_prefers_max_input_tokens_then_max_allowed_size() {
+        assert_eq!(upstream_hard_limit(&entry(r#"{"maxInputTokens":10,"maxAllowedSize":20}"#)), Some(10));
+        assert_eq!(upstream_hard_limit(&entry(r#"{"maxAllowedSize":20}"#)), Some(20));
+        assert_eq!(upstream_hard_limit(&entry(r#"{"maxInputTokens":0,"maxAllowedSize":20}"#)), Some(20));
+        assert_eq!(upstream_hard_limit(&entry(r#"{"maxInputTokens":-1}"#)), None);
+        assert_eq!(upstream_hard_limit(&entry(r#"{}"#)), None);
+    }
+
+    /// 两个字段都缺失 → 内置兜底 200000（既有行为，勿改）。
+    #[test]
+    fn missing_windows_fall_back_to_builtin_default() {
+        let (ctx, hard) = resolve_context_windows(&entry(r#"{"id":"a"}"#));
+        assert_eq!(ctx, FALLBACK_CONTEXT_WINDOW);
+        assert_eq!(ctx, 200_000);
+        assert_eq!(hard, None);
+    }
+
+    /// 剔除口径：无 id / `disabled === true` / 历史黑名单。
+    #[test]
+    fn drop_rules_cover_disabled_and_legacy_blacklist() {
+        assert!(is_model_entry_dropped(&entry(r#"{"id":""}"#)));
+        assert!(is_model_entry_dropped(&entry(r#"{}"#)));
+        assert!(is_model_entry_dropped(&entry(r#"{"id":"hunyuan-image-v3.0"}"#)));
+        assert!(is_model_entry_dropped(&entry(r#"{"id":"x","disabled":true}"#)));
+        // disabled 非 true（false / 缺失 / 非布尔）不剔除
+        assert!(!is_model_entry_dropped(&entry(r#"{"id":"x"}"#)));
+        assert!(!is_model_entry_dropped(&entry(r#"{"id":"x","disabled":false}"#)));
+        assert!(!is_model_entry_dropped(&entry(r#"{"id":"x","disabled":"true"}"#)));
+    }
+
+    /// 描述截断到 512 字符；短文本原样保留；多字节字符不得被切开。
+    #[test]
+    fn description_is_truncated_to_512_chars_on_char_boundary() {
+        let short = "短描述";
+        assert_eq!(truncate_description(short), short);
+
+        let exactly = "a".repeat(DESCRIPTION_MAX_CHARS);
+        assert_eq!(truncate_description(&exactly), exactly);
+
+        let long = "a".repeat(DESCRIPTION_MAX_CHARS + 100);
+        assert_eq!(truncate_description(&long).chars().count(), DESCRIPTION_MAX_CHARS);
+        assert_eq!(truncate_description(&long), exactly);
+
+        // 全中文（每字符 3 字节）：按字符截断，结果仍是合法 UTF-8 且长度正确
+        let cn = "中".repeat(DESCRIPTION_MAX_CHARS + 10);
+        let got = truncate_description(&cn);
+        assert_eq!(got.chars().count(), DESCRIPTION_MAX_CHARS);
+        assert_eq!(got, "中".repeat(DESCRIPTION_MAX_CHARS));
+    }
+}
 
 #[cfg(test)]
 mod reasoning_matrix_tests {

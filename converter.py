@@ -2612,32 +2612,197 @@ def _upstream_error_code(err_text: str):
     return code
 
 
-def _rate_limit_phrase_hit(text: str) -> bool:
+def _authoritative_code(data) -> str | None:
+    """取顶层业务码（权威源）。顶层无码、或为非零以外的占位（0/null/非数字）时返回 None。
+
+    ⚠️ 这条区分是本模块的关键：上游有两种信封形态——
+      ① 业务码在顶层：``{"code":11102,"msg":...,"details":{"code":6004,...}}``
+         → **顶层码权威**，嵌套的同名字段只是元数据，下钻会制造假冷却
+         （既有契约 `test_rate_limit_regex_must_not_bypass_signal_gate` 锁定）；
+      ② 业务码在嵌套：``{"error":{"data":{"code":14018,...}}}``（实测额度耗尽形态）
+         → 顶层无码，必须下钻才能识别。
+    因此只在「顶层码缺失或为 0 信封」时才允许递归查找。
+    """
+    if not isinstance(data, dict):
+        return None
+    code = data.get("code")
+    if code is None:
+        return None
+    s = str(code).strip()
+    if not s or s == "0":
+        return None
+    return s
+
+
+# 递归查找业务码的节点预算：畸形/超大报文不得让遍历开销失控。
+_CODE_SEARCH_BUDGET = 200
+
+
+def _find_code_anywhere(obj, wanted: set, _budget: list | None = None) -> bool:
+    """在任意嵌套层级查找 `code` 字段是否命中 wanted（含嵌套信封）。
+
+    上游会把业务码藏在嵌套信封里——实测额度耗尽码 14018 位于
+    ``{"error":{"data":{"code":14018,...}}}``，只读顶层 `code` 必然漏判。
+    遍历按节点预算裁剪，超出即停（Fail-Closed 返回未命中）。
+
+    ⚠️ 调用方必须先用 `_authoritative_code` 判断顶层是否已有权威业务码；
+    顶层有码时**不得**调用本函数（嵌套同名字段是元数据，不是判据）。
+    """
+    if _budget is None:
+        _budget = [_CODE_SEARCH_BUDGET]
+    if _budget[0] <= 0:
+        return False
+    if isinstance(obj, dict):
+        _budget[0] -= 1
+        code = obj.get("code")
+        if code is not None and str(code) in wanted:
+            return True
+        for v in obj.values():
+            if isinstance(v, (dict, list)) and _find_code_anywhere(v, wanted, _budget):
+                return True
+    elif isinstance(obj, list):
+        for v in obj[:50]:
+            if isinstance(v, (dict, list)) and _find_code_anywhere(v, wanted, _budget):
+                return True
+    return False
+
+
+def _semantic_text(data: dict) -> str:
+    """从结构化错误体里取出可用于语义判定的文案字段（绝不返回整串 JSON）。"""
+    if not isinstance(data, dict):
+        return ""
+    parts = []
+    for key in ("msg", "message", "displayMsg"):
+        v = data.get(key)
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, dict):
+            for sub in ("zh", "zh-hant", "en"):
+                if isinstance(v.get(sub), str):
+                    parts.append(v[sub])
+    err = data.get("error")
+    if isinstance(err, dict):
+        for key in ("msg", "message"):
+            if isinstance(err.get(key), str) and not parts:
+                parts.append(err[key])
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 额度耗尽（credit exhausted）：与限流同族但语义不同，必须独立判定
+#
+# 实测依据（本机 converter.log，105 次命中，2026-09-17 起至 2026-09-21 仍在发生）：
+#   ✗ HTTP 429 | deepseek-v4.1-flash |
+#     {"error":{"data":{"code":14018,"msg":"额度已用尽，请访问以下链接，购买加量包…"}}}
+#
+# ⚠️ 只按 HTTP 429 归类会把它当成软限流 → 写 5 分钟冷却 → 冷却一过立刻重选同一
+#   空号 → 成串烧请求（日志里连续数十条「无其他可用就绪账号」）。正确语义是
+#   「该账号在该模型上当日额度已尽」，必须做长冷却（次日边界）。
+# 借鉴 ardeyouxipianyi/workbuddy2api-hub 的 per-model 429 冷却与 Sliverkiss 的
+# 14018 硬额度分类；本仓独立实现（本仓冷却键本就是 (uid, model) 粒度）。
+# ---------------------------------------------------------------------------
+
+_CREDIT_EXHAUSTED_CODES = {"14018", "14017"}
+
+# 额度耗尽冷却上界（秒）：跨日最坏情况 24h，留 1h 余量给时区边界与时钟抖动。
+_CREDIT_EXHAUSTED_MAX_SEC = 90000
+
+_CREDIT_EXHAUSTED_PHRASES = (
+    "额度已用尽", "额度不足", "余额不足", "积分不足", "加量包",
+    "credits exhausted", "credit exhausted", "insufficient credit",
+    "insufficient credits", "quota exceeded", "usage limit exceeded",
+)
+
+
+def _is_credit_exhausted_signal(status_code: int | None, err_text: str) -> bool:
+    """判定「额度/配额耗尽」。
+
+    口径（与 `_is_rate_limit_signal` 同源的纪律）：
+      - 结构化报文：只看业务码（含嵌套 `error.data.code`）+ 语义字段文案，
+        **绝不整串裸扫**；有 code 但不在码表内即判否（防误判）；
+      - 非 JSON 文本：要求整词短语；HTML 错误页直接判否；
+      - 一律要求 status >= 400（正常回答正文里出现「额度」不得触发）。
+    """
+    if status_code is not None and status_code < 400:
+        return False
+    text = (err_text or "").strip()
+    if not text:
+        return False
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        auth_code = _authoritative_code(data)
+        if auth_code is not None:
+            # 顶层业务码权威：命中额度码族即判是，否则判否（顶层已是别的确定性问题）
+            return auth_code in _CREDIT_EXHAUSTED_CODES
+        if _find_code_anywhere(data, _CREDIT_EXHAUSTED_CODES):
+            return True
+        msg = _semantic_text(data)
+        if not msg:
+            return False
+        low = msg.lower()
+        return any(p in msg or p in low for p in _CREDIT_EXHAUSTED_PHRASES)
+    if data is not None:
+        return False
+    if text.lstrip().startswith("<"):
+        return False  # HTML 错误页（网关/代理）不是业务报文
+    low = text.lower()
+    return any(p in text or p in low for p in _CREDIT_EXHAUSTED_PHRASES)
+
+
+def _credit_exhausted_reset() -> tuple[int, str]:
+    """额度耗尽的长冷却终点 = 次日 00:00（UTC+8）。
+
+    与「当日额度、次日恢复」语义一致；取 UTC+8 零点与本仓签到/滚动日用量切分口径
+    对齐（本仓没有上游 04:00 这个时刻的现实依据，不臆造）。
+    """
+    tz8 = datetime.timezone(datetime.timedelta(hours=8))
+    now = datetime.datetime.now(tz8)
+    nxt = (now + datetime.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return int(nxt.timestamp() * 1000), nxt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _rate_limit_phrase_hit(text: str, allow_numeric: bool = True) -> bool:
     """限流语义短语命中判定（仅用于 msg/正文，不含请求元数据）。
 
     「频率过高」是上游真实下发过的措辞（实测 `{"code": 6004, "msg": "请求频率过高，请稍后再试"}`），
     与「频率限制 / 使用量超出」同属无歧义整词。
+
+    ⚠️ `allow_numeric=False` 用于**非结构化的自由文本回退**：此时 `429` / `6004`
+      裸子串会命中网关 HTML 错误页正文（实测 `<html>…502 Bad Gateway…upstream 429…`
+      会被判成限流，把好账号打进 300s 假冷却）。结构化 JSON 路径不受影响。
     """
-    return (
+    if (
         ("频率限制" in text)
         or ("频率过高" in text)
         or ("使用量超出" in text)
-        or ("429" in text)
         or ("Too Many Requests" in text)
-        or ("6004" in text)
-    )
+    ):
+        return True
+    if allow_numeric:
+        return ("429" in text) or ("6004" in text)
+    return False
+
+
+# 上游限流码族（来自官方 bundle 逆向：6000 Craft / 6001 TPS / 6002 TPM / 6003 TPH /
+# 6004 TPD / 6005 RPS / 6006 RPM / 6007 RPH / 6008 RPD）。本仓现网实测到 6004，
+# 扩族是为了「限流了却不换号」的同族缺陷：400/200 信封里的限流码不能按普通 4xx 透传。
+_RATE_LIMIT_CODES = {str(c) for c in range(6000, 6009)}
 
 
 def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
-    """判定上游错误是否属于限流（6004 / 429）。
+    """判定上游错误是否属于限流（6000-6008 码族 / 429）。
 
     **结构化报文只看语义字段**：裸子串匹配（`"429" in text`、`"6004" in text`）会命中
     requestId 这类 hex 片段（实测 `...4290-6004-abcd...`），把确定性错误误判成限流 →
     触发无谓切号与假冷却。规则：
-      - JSON 报文有 `code` → 只认 `code == 6004`（整数与字符串皆可）；
+      - JSON 报文有 `code` → 只认限流码族（整数与字符串皆可，含嵌套信封）；
       - JSON 报文无 `code` → 只看 `msg` / `message` 语义字段（保留历史格式兼容），
         **绝不扫描整个序列化 JSON**；
-      - 非 JSON 文本才回退宽松子串判据。
+      - 非 JSON 文本才回退宽松子串判据（且不再吃裸 `429`/`6004` 数字）。
     中文短语「频率限制 / 使用量超出」是无歧义整词，两种情形都保留。
     """
     text = err_text or ""
@@ -2648,29 +2813,44 @@ def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
     except Exception:
         data = None
     if isinstance(data, dict):
-        code = _upstream_error_code(text)
-        if code is not None:
-            return str(code) == "6004"
+        auth_code = _authoritative_code(data)
+        if auth_code is not None:
+            # 顶层业务码权威：命中码族即限流，否则判否（不再看嵌套同名字段）
+            if auth_code in _RATE_LIMIT_CODES:
+                return True
+            return False
+        if _find_code_anywhere(data, _RATE_LIMIT_CODES):
+            return True
         msg = data.get("msg") or data.get("message") or ""
         msg = msg if isinstance(msg, str) else str(msg)
         return _rate_limit_phrase_hit(msg)
-    return _rate_limit_phrase_hit(text)
+    return _rate_limit_phrase_hit(text, allow_numeric=False)
 
 
 def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status_code: int | None = None) -> None:
-    """从上游错误体里识别 6004/429 并记录重置时刻（幂等，同一 reset 只更新 last_seen）。
+    """从上游错误体里识别限流码族/额度耗尽并记录重置时刻（幂等，同一 reset 只更新 last_seen）。
 
     ⚠️ 判定顺序：**先过 `_is_rate_limit_signal` 门（结构化报文以顶层语义字段为准），
     再让 `_RATE_LIMIT_RE` 只负责提取精确重置时间**。反过来的话，正则会在整串里命中
     嵌套 metadata 的 `code:6004 + 重置时间` 结构（如顶层 code=11102 的错误体携带
     details.code=6004），绕过语义门写入**假冷却**，让调度无端避让正常账号。
+
+    ⚠️ 额度耗尽（14018/14017）走**独立分支**：它不是「等几分钟就好」的频控，而是
+    「该账号该模型当日额度已尽」，必须长冷却到次日边界。若不区分，5 分钟后冷却失效
+    → 立刻重选同一空号 → 成串烧请求（实测 105 次命中，见 `_is_credit_exhausted_signal`）。
     """
-    if not _is_rate_limit_signal(status_code, err_text):
+    credit_exhausted = _is_credit_exhausted_signal(status_code, err_text)
+    if not credit_exhausted and not _is_rate_limit_signal(status_code, err_text):
         return
     m = _RATE_LIMIT_RE.search(err_text or "")
     now_ms = int(time.time() * 1000)
     mono_now = time.monotonic()
-    if m:
+    if credit_exhausted:
+        # 额度耗尽：次日 00:00（UTC+8）为界，不受报文里可能存在的短时重置文案影响
+        reset_ms, reset_local = _credit_exhausted_reset()
+        delta_sec = max(5.0, min(float(_CREDIT_EXHAUSTED_MAX_SEC),
+                                 (reset_ms - now_ms) / 1000.0))
+    elif m:
         try:
             reset_ms = int(
                 datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
@@ -2679,7 +2859,7 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
                 * 1000
             )
             reset_local = m.group(1)[11:]
-            delta_sec = max(5.0, min(3600.0, (reset_ms - now_ms) / 1000.0))
+            delta_sec = max(5.0, min(7200.0, (reset_ms - now_ms) / 1000.0))
         except Exception:
             delta_sec = 300.0 + random.uniform(-45.0, 45.0)
             reset_ms = int((time.time() + delta_sec) * 1000)
@@ -2710,7 +2890,8 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
         lim_nick = _get_account_nickname(curr_uid) if curr_uid else ""
 
         entry = {
-            "code": 6004,
+            "code": 14018 if credit_exhausted else 6004,
+            "kind": "credit_exhausted" if credit_exhausted else "rate_limit",
             "message": (err_text or "")[:300],
             "resetAtMs": reset_ms,
             "resetLocal": reset_local,
@@ -3071,11 +3252,16 @@ class AccountRotator:
             return active_uid, self.cred_mgr.get_headers()
 
     def record_failure_and_failover(self, current_uid: str, model: str, status_code: int, err_text: str) -> tuple[str, dict] | None:
-        """处理 429/6004；若开启 failover/roundrobin 且有备用账号，自动切号并返回 (new_uid, new_headers)。"""
+        """处理限流码族/额度耗尽；若开启 failover/roundrobin 且有备用账号，自动切号并返回 (new_uid, new_headers)。"""
         # 内容审核拦截（11140）为用户请求内容违规，严禁切号重试与冷却
         if _is_content_policy_violation(status_code, err_text):
             return None
-        is_rate_limited = _is_rate_limit_signal(status_code, err_text)
+        # 额度耗尽与限流共用同一换号入口：两者都应「换号继续」（账号级避让），
+        # 但冷却时长由 _record_rate_limit 按语义分流（短冷却 vs 次日边界）。
+        is_rate_limited = (
+            _is_rate_limit_signal(status_code, err_text)
+            or _is_credit_exhausted_signal(status_code, err_text)
+        )
         if not is_rate_limited:
             return None
         if self.mode not in ("failover", "roundrobin"):
