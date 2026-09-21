@@ -2651,7 +2651,7 @@ def _upstream_error_code(err_text: str):
 
 
 def _authoritative_code(data) -> str | None:
-    """取顶层业务码（权威源）。顶层无码、或为非零以外的占位（0/null/非数字）时返回 None。
+    """取顶层业务码（权威源）。返回字符串；无可判定的权威码时返回 None。
 
     ⚠️ 这条区分是本模块的关键：上游有两种信封形态——
       ① 业务码在顶层：``{"code":11102,"msg":...,"details":{"code":6004,...}}``
@@ -2659,7 +2659,11 @@ def _authoritative_code(data) -> str | None:
          （既有契约 `test_rate_limit_regex_must_not_bypass_signal_gate` 锁定）；
       ② 业务码在嵌套：``{"error":{"data":{"code":14018,...}}}``（实测额度耗尽形态）
          → 顶层无码，必须下钻才能识别。
-    因此只在「顶层码缺失或为 0 信封」时才允许递归查找。
+    「权威」的判定口径（协同复核自查补出的洞）：顶层码必须是**非零数字**才算权威。
+    `code:0`（成功信封）、`code:"unknown"`、`code:""`、缺失一律返回 None —— 早期实现把任何
+    非空非零值都当权威，于是 ``429 + {"code":"unknown","msg":"rate limit"}`` 会被未知码
+    一票否决而**漏判限流**（实测复现）。非数字码是「未定义占位」而非确定性业务结论，
+    此时应放行给 msg 语义与状态码兜底。
     """
     if not isinstance(data, dict):
         return None
@@ -2668,6 +2672,9 @@ def _authoritative_code(data) -> str | None:
         return None
     s = str(code).strip()
     if not s or s == "0":
+        return None
+    # 只认数字码为权威；非数字（unknown/占位）视为「无权威码」，放行给语义层
+    if not s.lstrip("-").isdigit():
         return None
     return s
 

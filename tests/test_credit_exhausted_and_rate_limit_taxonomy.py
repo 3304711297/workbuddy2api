@@ -202,6 +202,24 @@ def test_429_without_any_code_still_rate_limited():
     assert converter._is_rate_limit_signal(429, "upstream busy") is True
 
 
+def test_non_numeric_authoritative_code_does_not_veto_semantics():
+    """非数字占位码（"unknown"）不得一票否决语义判据（自查补洞）。
+
+    这是 P1-1 修法的**衍生风险**：把 429 降为兜底后，「有顶层码就只看顶层码」这条变得更强，
+    于是 ``{"code":"unknown","msg":"rate limit"}`` 会被未知码否决而**漏判限流**（实测复现）。
+    口径修正：顶层码必须是**非零数字**才算权威；非数字占位放行给 msg 语义。
+    """
+    assert converter._is_rate_limit_signal(
+        429, '{"code":"unknown","msg":"rate limit"}') is True
+    assert converter._is_rate_limit_signal(
+        429, '{"code":"unknown"}') is True, "占位码 + 429 仍应兜底判限流"
+    assert converter._is_account_fault_signal(
+        429, '{"code":"unknown","error":{"data":{"code":14017}}}') is True, "占位码不得挡住嵌套真码"
+    # 反向：数字非限流码仍是权威否决（不得因放行非数字码而顺带放行数字码）
+    assert converter._is_rate_limit_signal(429, '{"code":11102,"msg":"x"}') is False
+    assert converter._is_credit_exhausted_signal(429, '{"code":11102,"msg":"x"}') is False
+
+
 def test_daily_quota_reset_beyond_two_hours_is_honored():
     """每日额度（6004/6008）的 reset 常远超 2h，必须按上游墙钟而非 2h 封顶（P1-4）。
 
