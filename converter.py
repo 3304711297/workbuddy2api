@@ -5682,7 +5682,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     def _feed_and_coalesce(chunk: bytes):
         """字节 chunk → 行缓冲 → 单趟事件解析/统计/清洗 → reasoning 合并 → (转发事件列表)。"""
-        nonlocal buf, finish_reason, saw_filter, ttft_ms, attempt_saw_progress
+        nonlocal buf, finish_reason, saw_filter, ttft_ms, attempt_saw_progress, saw_done
         for line in line_buf.feed(chunk):
             buf += line + b"\n"
         # buf 现在累积了完整行；按空行切完整 SSE 事件
@@ -5713,6 +5713,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
                 payload = s[5:].strip()
                 if not payload or payload in (b"[DONE]", b"[done]"):
+                    saw_done = True          # 上游终止标记：截断哨兵据此判定
                     cleaned_lines.append(b"data: [DONE]")
                     continue
 
@@ -5788,6 +5789,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     attempt_saw_progress = False       # 本轮是否已出现「实质推进」（见 _progress_reached）
     attempt_content: list[str] = []    # 本轮累积正文，供长度阈值与空拒答判定复用
     total_events = 0                   # 本轮收到的成帧事件总数（空流哨兵用）
+    saw_done = False                   # 本轮是否收到上游 [DONE] 终止标记（截断哨兵用）
 
     def _progress_reached() -> bool:
         """本轮是否已出现可放行客户端的实质推进。
@@ -5829,7 +5831,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     def _reset_attempt_state() -> None:
         """丢弃本轮的缓冲与统计，为新一次尝试腾出干净状态。"""
-        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter, total_events
+        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter, total_events, saw_done
         pending_events.clear()
         attempt_content.clear()
         tool_names.clear()
@@ -5841,6 +5843,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         err_msg = None
         attempt_saw_progress = False
         total_events = 0
+        saw_done = False
         # saw_filter 是「本次尝试」的观测：跨尝试残留会污染最终日志标签
         # （重试成功仍显示「内容审核拦截」），必须一并清除。
         saw_filter = False
@@ -5953,6 +5956,25 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 {"error": {"message": err_msg, "type": "upstream_error"}}).encode(),
                                 502)
                             return
+                        # 截断哨兵：上游流被中途切断（既无 [DONE] 也无 finish_reason）。
+                        # 判据取「两个终止信号都缺」而非单看其一：上游正常收尾一定给 finish_reason，
+                        # 而 finish_reason 之后是否再补 [DONE] 各家实现不一（本机 600 条流式响应实证：
+                        # 587/600 只给 finish_reason 不给 [DONE]）——单看 [DONE] 会大面积假红。
+                        # 与空流哨兵的层次不同：空流是「一个字都没来」，本判据是「正文来了一部分
+                        # 却没有任何收尾标记」，属真正的截断，此时**不得合成正常收尾**，
+                        # 必须让客户端看到不完整（否则它把半句话当完整答案消费）。
+                        if err_msg is None and not saw_done and finish_reason is None:
+                            err_msg = "upstream stream interrupted before completion marker"
+                            _log(f"{prefix}✗ 上游流被截断：未收到 [DONE] 或 finish_reason，"
+                                 f"已产出 {len(attempt_content)} 段正文")
+                            # 先把缓冲里尚未放行的事件交出（保留已产出的诚实内容面），
+                            # 再补一个错误帧，客户端据此判定响应不完整。
+                            while pending_events:
+                                yield pending_events.pop(0)
+                            yield _err_event(json.dumps(
+                                {"error": {"message": err_msg,
+                                           "type": "upstream_error"}}).encode(), 502)
+                            break
                         # 流已正常结束仍停留在观察窗内 ⇒ 判定是否为空拒答（抽样误伤）
                         if pending_events:
                             if (_is_blank_refusal(_pending_refusal_view())

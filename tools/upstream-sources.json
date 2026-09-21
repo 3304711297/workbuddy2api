@@ -70,10 +70,10 @@
       "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
       "repo": "ShouZhuo0413/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "1366be7d",
-      "last_synced_sha": "1366be7dab45797a744a45106eb9dce2cb20984c",
-      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议双向转换与流式语义状态机）",
-      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 984dc46b→94aee8bf（含新增 PR 合并）：合并不改文件（零 file diff），无可摘机制。"
+      "last_synced_commit": "94aee8bf",
+      "last_synced_sha": "94aee8bf22c761a437a100aff57903c1262e6a3a",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议双向转换与流式语义状态机；本轮吸收其「流被截断不得报成功」的 validate_stream_end 思路）",
+      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 984dc46b→94aee8bf（含查检口径的规范 HEAD 与合并提交两类）；**采纳**其 `validate_stream_end` 思路——上游流被中途切断（既无 [DONE] 也无 finish_reason）时不得报成功；本仓按自身实证形态独立实现为两个哨兵：chat 流式路径（未收终止标记即下发错误帧并如实记失败）+ responses 转换器（`_saw_terminal` → `response.failed` 而非 `response.completed`）。判据刻意取「两个终止信号都缺」：本机 1711 条 RESPONSE 日志中 600 条流式响应全部给了 finish_reason、其中 587 条没有再补 [DONE]，单看 [DONE] 会把 587 条正常流误报成截断。其另两条（previous_response_id/conversation 显式拒绝、compaction/item_reference 拒绝）在本仓为**设计差异**不照搬：本机 1.2 万条快照样本中此类字段命中 0 次，且本仓 _convert_input_items 对未知 item 类型本就是跳过而非按空历史继续（不产生静默错误）。`reasoning.effort → reasoning_effort` 映射本仓已等价存在（透传 + 自定义档案覆盖）。"
     },
     "wb2api-upstream-ardeyou": {
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
@@ -88,10 +88,10 @@
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
       "repo": "hawklithm/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "ae726126",
-      "last_synced_sha": "ae7261267785710f020dff69b43d864e4d72587e",
+      "last_synced_commit": "ed7e02e2",
+      "last_synced_sha": "ed7e02e2fa16afd2488ae280c786462e621590e0",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议与多轮消息互转经验）",
-      "note": "轻量协议代理，原生支持 Claude Code CLI、Codex CLI 与 DeepSeek Harness；已借鉴其 Responses 与 Claude 协议边缘流式处理经验；监控整仓新提交。"
+      "note": "轻量协议代理，原生支持 Claude Code CLI、Codex CLI 与 DeepSeek Harness；已借鉴其 Responses 与 Claude 协议边缘流式处理经验；监控整仓新提交。本轮评估 ae726126→ed7e02e2：新增 `--global` 国内/国际后端切换（一套凭据目录按 backend 隔离）与 trusted PyPI 发布流水线。**未采纳**：本仓已有等价能力——出站 UA 与域名按 `workbuddy.ai`/国内分别仿真、国际版凭据目录亦可交互式生成（`auth_dirs` 已含 mac/win/linux + WSL 宿主穿透），且**本机实证无国际版使用痕迹**（converter.log 全文匹配 `workbuddy.ai` / `codebuddy.ai` 各 0 次，2,000+ 次请求全走国内 endpoint），CLI 加显式 realm 开关属其单进程生态的特有形态，与本仓「桌面端管理多账号 + 单内核服务全部客户端」的架构重叠。"
     },
     "wb2api-upstream-icebears": {
       "name": "workbuddy2api 配额感知版（icebears111，借鉴雷达）",
@@ -169,10 +169,10 @@
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
       "repo": "HanHan666666/codebuddy2openai",
       "branch": "main",
-      "last_synced_commit": "7eda3c17",
-      "last_synced_sha": "7eda3c17f1aa0354b2fe7e22f4b6c21796c0d08a",
-      "absorbed": "借鉴雷达（基座代码来源，fork 关系已于 2026-09-13 自助脱离）",
-      "note": "workbuddy2api 脱离 fork 前的上游基座（LICENSE 基座声明）；基座已深度二次开发，上游近 3 个月无更新，仅作上游复活感知，出现可采纳改进时评估摘樱桃。"
+      "last_synced_commit": "94ca4740",
+      "last_synced_sha": "94ca4740b6b44908394091d3b9165a380738e226",
+      "absorbed": "借鉴雷达（基座代码来源，fork 关系已于 2026-09-13 自助脱离；PR #7 的 WSL 宿主凭据穿透已按同语义落地）",
+      "note": "workbuddy2api 脱离 fork 前的上游基座（LICENSE 基座声明）；基座已深度二次开发，仅作上游复活感知，出现可采纳改进时评估摘樱桃。本轮**该基座复活**（近 3 个月无更新后出新提交），评估 7eda3c17→94ca4740「add wsl support to use windows auth」：**未采纳**——本仓已按同语义独立实现（`_is_wsl` + `_wsl_win_local_appdata` 宿主 USERPROFILE 扫描，`auth_dirs()` 在 WSL 或显式 `--wsl` 时追加宿主 Windows 凭据目录，另有 `tests/test_wsl_and_tool_repair.py` 覆盖）；其额外保留的「按 Linux 用户名拼 `/mnt/c/Users/<name>`」回退分支在本仓用户目录名与 Linux 用户名不一致时反而会取错目录，本仓只扫宿主真实目录更稳。"
     }
   }
 }

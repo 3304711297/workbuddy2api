@@ -68,6 +68,7 @@
 | `icebears111/workbuddy2api` | MIT | 上游内容安全审核错误码（11140）拦截与防误判机制 | `converter.py`：引入 `_is_content_policy_violation` 与 `_safe_err_raw` 结构化包装，识别 11140 安全审核拦截并立即返回明确错误，严禁将其误判为限流或故障进行盲目切号重试与账号冷却 |
 | `Sliverkiss/workbuddy2api` | MIT | Go 原版的多账号池 / 加权调度核心架构（横向对比）；**其源码同时被用作错误码语义的上游真源** | 架构层面参考其多账号池与加权选号思路；本轮起另作语义真源使用：据其实现确认 `14017 = ErrAccountFault`（试用未激活，**非**额度耗尽）、`model usage limit exceeded = ErrSoftRate`（软限流）、`quota exceeded = HardCredit`（计费额度），据此纠正了本仓库错误分类的词表方向与冷却分层（14017 走短冷却可自愈、计费额度与频控限流分属不同错码族） |
 | `orangeboyChen/codebuddy2api` | MIT | `#178` —— 剥离 Claude Code 客户端注入的 token 用量提示 | `anthropic_compat.py` → `_strip_client_usage_hints` / `_CLIENT_USAGE_HINT_RES`；`responses_projection.py` → `_strip_harness_blocks`。上游为 TypeScript 实现，本仓库按 Python 复刻其两条设计取舍（带壳形态先匹配；倒计时必须带数字载荷），并额外覆盖本仓库特有的「空壳消息丢弃」与「harness 标记与真实指令同条」边界（见 `tests/test_client_usage_hint_strip.py`、`tests/test_harness_block_strip.py`） |
+| `ShouZhuo0413/codebuddy2api` | MIT | `validate_stream_end` —— 流被截断不得报成功 | `converter.py` → `_stream_upstream` 的 `saw_done` 截断哨兵；`responses_compat.py` → `ResponsesStreamConverter._saw_terminal` 与 `finish()` 的 `response.failed` 分支。判据按本仓库实证调整：上游正常收尾必给 `finish_reason`，而 `[DONE]` 是否补发各家不一（本机 600 条流式响应中 587 条无 `[DONE]`），故取「两个终止信号都缺」为截断判据，避免误报（见 `tests/test_truncated_stream_sentinel.py`） |
 
 ---
 

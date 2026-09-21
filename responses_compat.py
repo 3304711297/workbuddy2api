@@ -329,6 +329,7 @@ class ResponsesStreamConverter:
         self._tool_calls: dict[int, dict] = {}
         self._usage: dict | None = None
         self._failed = False
+        self._saw_terminal = False   # 见 finish() 的截断哨兵
 
     def feed_chunk(self, chunk: dict) -> str:
         """处理已解析的单个 ChatCompletions JSON chunk，输出 Responses SSE 行。"""
@@ -336,6 +337,11 @@ class ResponsesStreamConverter:
 
         if self._failed:
             return ""
+
+        # 终止标记：任一 choice 给出 finish_reason 即视为上游已正常收尾
+        for _choice in chunk.get("choices") or []:
+            if isinstance(_choice, dict) and _choice.get("finish_reason"):
+                self._saw_terminal = True
 
         # 上游错误 chunk 拦截
         if "error" in chunk and isinstance(chunk["error"], dict):
@@ -442,9 +448,31 @@ class ResponsesStreamConverter:
         return "".join(events)
 
     def finish(self) -> str:
-        """流结束时补齐未关闭的 item/part 及发送 response.completed 事件。"""
+        """流结束时补齐未关闭的 item/part 及发送 response.completed 事件。
+
+        ⚠️ 截断哨兵：上游零终止标记（既无 finish_reason）却断流时**不得**报 completed。
+        否则客户端把半句话当完整答案消费，而日志只有一行正常 200 —— 静默失败。
+        此时改为下发 `response.failed`，并保留已产出的部分正文（诚实内容面）。
+        """
         if self._failed:
             return ""
+
+        if not self._saw_terminal and (self._content or self._tool_calls or self._emitted_msg_item):
+            events: list[str] = []
+            if not self._emitted_created:
+                resp = self._build_response_obj("in_progress")
+                events.append(self._fmt("response.created", {"response": resp}))
+                self._emitted_created = True
+            resp_failed = self._build_response_obj("failed")
+            resp_failed["error"] = {
+                "message": "upstream stream interrupted before a completion marker; "
+                           "the answer may be truncated",
+                "code": "upstream_stream_interrupted",
+            }
+            events.append(self._fmt("response.failed", {"response": resp_failed}))
+            self._failed = True
+            return "".join(events)
+
         events: list[str] = []
 
         if self._emitted_content_part:
