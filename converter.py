@@ -2780,6 +2780,11 @@ _RATE_LIMIT_MAX_SEC = 90000
 # 账号态故障（14017 试用未激活）冷却时长：短冷却 + 换号即可，可自愈。
 _ACCOUNT_FAULT_COOLDOWN_SEC = 300.0
 
+# 每日额度（6004/6008）**无上游 reset** 时的兜底墙钟小时（UTC+8）。
+# 与额度耗尽同取 00:00：日级额度不该在 5 分钟后重新入池（本机 94 条样本的 reset
+# 距发生时刻中位 3.67h、89.4% 超过 2h），退化成软限流必然二次撞墙。
+_DAILY_QUOTA_FALLBACK_HOUR = 0
+
 # 额度耗尽兜底墙钟的小时（UTC+8，本仓本地时区口径）。
 #
 # ⚠️ 为什么不是 00:00，也不是上游的 04:00：
@@ -2896,6 +2901,20 @@ def _is_account_fault_signal(status_code: int | None, err_text: str) -> bool:
     return _find_code_anywhere(data, _ACCOUNT_FAULT_CODES)
 
 
+def _next_day_reset_ms(hour: int = 0) -> tuple[int, str]:
+    """下一个「本地日边界」（UTC+8 的 hour:00）。兜底墙钟必须落在未来，否则顺延一天。
+
+    本仓的日边界口径是 00:00（UTC+8，与滚动日用量切分一致），额度耗尽与每日额度共用。
+    """
+    tz8 = datetime.timezone(datetime.timedelta(hours=8))
+    now = datetime.datetime.now(tz8)
+    nxt = (now + datetime.timedelta(days=1)).replace(
+        hour=hour, minute=0, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += datetime.timedelta(days=1)
+    return int(nxt.timestamp() * 1000), nxt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _credit_exhausted_reset(err_text: str = "") -> tuple[int, str]:
     """额度耗尽的长冷却终点：**优先上游 reset 墙钟，否则兜底次日 00:00（UTC+8）**。
 
@@ -2906,14 +2925,7 @@ def _credit_exhausted_reset(err_text: str = "") -> tuple[int, str]:
     hit = _extract_reset_ms(err_text)
     if hit is not None:
         return hit
-    tz8 = datetime.timezone(datetime.timedelta(hours=8))
-    now = datetime.datetime.now(tz8)
-    nxt = (now + datetime.timedelta(days=1)).replace(
-        hour=_CREDIT_EXHAUSTED_FALLBACK_HOUR, minute=0, second=0, microsecond=0)
-    # 兜底墙钟必须落在未来：若已过（跨日边界竞态），推到再下一次
-    if nxt <= now:
-        nxt += datetime.timedelta(days=1)
-    return int(nxt.timestamp() * 1000), nxt.strftime("%Y-%m-%d %H:%M:%S")
+    return _next_day_reset_ms(_CREDIT_EXHAUSTED_FALLBACK_HOUR)
 
 
 def _rate_limit_phrase_hit(text: str, allow_numeric: bool = True) -> bool:
@@ -3036,16 +3048,24 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
         kind = "account_fault"
     else:
         hit = _extract_reset_ms(err_text)
+        is_daily = str(real_code) in _DAILY_QUOTA_CODES if real_code else False
         if hit is not None:
             # 上游下发的精确重置墙钟优先（不限 2h：每日额度 reset 常远超 2h）
             reset_ms, reset_local = hit
             delta_sec = max(5.0, min(float(_RATE_LIMIT_MAX_SEC), (reset_ms - now_ms) / 1000.0))
+        elif is_daily:
+            # 每日额度（6004/6008）**无 reset 时不得退化成 5 分钟软限流**：它是日级额度，
+            # 5 分钟后重新入池必然二次撞墙（本机 94 条样本的 reset 中位 3.67h）。
+            # 按日边界保守兜底，与额度耗尽同口径。
+            reset_ms, reset_local = _next_day_reset_ms(_DAILY_QUOTA_FALLBACK_HOUR)
+            delta_sec = max(5.0, min(float(_RATE_LIMIT_MAX_SEC), (reset_ms - now_ms) / 1000.0))
         else:
-            # 无精确时刻：注入 ±45s 去相关抖动（255s~345s），杜绝多协程同一毫秒二次惊群
+            # 瞬时频控（6000-6003/6005-6007 或无码 429）：无精确时刻时注入 ±45s 去相关
+            # 抖动（255s~345s），杜绝多协程同一毫秒二次惊群
             delta_sec = 300.0 + random.uniform(-45.0, 45.0)
             reset_ms = int((time.time() + delta_sec) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
-        kind = "daily_quota" if str(real_code) in _DAILY_QUOTA_CODES else "rate_limit"
+        kind = "daily_quota" if is_daily else "rate_limit"
     monotonic_until = mono_now + delta_sec
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)

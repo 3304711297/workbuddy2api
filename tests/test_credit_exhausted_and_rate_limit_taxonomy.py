@@ -260,6 +260,45 @@ def test_transient_rate_code_keeps_short_cooldown():
     assert entry["kind"] == "rate_limit"
 
 
+@pytest.mark.parametrize("code", [6004, 6008, "6004", "6008"])
+def test_daily_quota_without_reset_does_not_reenter_pool_in_5min(code):
+    """**关键契约**：每日额度（6004/6008）**无 reset 时间**时不得退化成 5 分钟软限流。
+
+    这是「分类做了、兜底没跟上」的残留缺口：6004/6008 是 TPD/RPD（按日额度），
+    无 reset 时若沿用瞬时频控的 300s±45s，账号 5 分钟后重新入池必然二次撞墙
+    （本机 94 条样本的 reset 距发生时刻中位 3.67h、89.4% 超过 2h）。
+
+    契约：6004/6008 + 有 reset → 用 reset；6004/6008 + 无 reset → 日级保守兜底；
+          普通 600x + 无 reset → 维持 5min±45s。
+
+    ⚠️ 断言不能写死「> 7200s」：夜里跑时离次日 00:00 天然不足 2h（会假红）。
+    正确判据是「冷却终点对齐日边界」，且**不得落在瞬时软窗内**（255s~345s）。
+    """
+    converter._RATE_LIMIT_STATE.clear()
+    raw = '{"code":%s,"msg":"您的使用量已超出频率限制"}' % (
+        '"%s"' % code if isinstance(code, str) else code)
+    converter._record_rate_limit("m-daily-noreset", raw, uid="u1", status_code=400)
+    entry = converter._RATE_LIMIT_STATE["m-daily-noreset"]
+    assert entry["kind"] == "daily_quota", f"code {code} 应归每日额度"
+    effective = entry["monotonic_until"] - time.monotonic()
+    # 1) 明确排除瞬时软窗（含 ±45s 抖动范围）——这才是「二次撞墙」的成因
+    assert effective > 400, f"每日额度无 reset 时退化成软限流窗口（{effective}s），会二次撞墙"
+    # 2) 必须对齐到下一个日边界（而非任意长数字）
+    expect_day_ms, _ = converter._next_day_reset_ms(converter._DAILY_QUOTA_FALLBACK_HOUR)
+    remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
+    expect_remaining = (expect_day_ms - time.time() * 1000) / 1000.0
+    assert abs(remaining - expect_remaining) < 5, \
+        f"应兜底到下一个日边界: 实得 {remaining}s 期望 {expect_remaining}s"
+    assert abs(effective - expect_remaining) < 5, "生效冷却与展示字段须同源"
+
+
+def test_daily_quota_without_reset_and_credit_exhausted_share_day_boundary():
+    """每日额度无 reset 的兜底与额度耗尽同口径（同一日边界函数），避免两套魔数。"""
+    a = converter._next_day_reset_ms(converter._DAILY_QUOTA_FALLBACK_HOUR)
+    b = converter._credit_exhausted_reset("")
+    assert a == b, "两处日边界兜底必须一致"
+
+
 def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
     """端到端：14018 记账后冷却剩余时间必须远超软限流窗口（几十分钟级）。"""
     converter._RATE_LIMIT_STATE.clear()
