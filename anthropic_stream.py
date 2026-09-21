@@ -27,6 +27,29 @@ _NON_TERMINAL_FINISH_REASONS = frozenset({
 })
 
 
+def _tool_index(value: Any) -> int:
+    """把上游 tool_call 的 `index` 归一为 int（字符串/缺失/负数一律容错）。
+
+    ⚠️ 本模块用 index 同时做 `self._known_tools` / `self._tool_blocks` 的键。上游若用
+    字符串下发（`"0"`）或混用类型，就会与 int 键分裂成两个槽位：同一个工具调用被拆成
+    两个 content_block_start、`tool_use` 块重复且 args 各持一半，客户端报「tool_use id
+    重复」。归一后再当键，可消除这一整类分裂。
+    """
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value >= 0 else 0
+    if isinstance(value, float):
+        return int(value) if value >= 0 else 0
+    if isinstance(value, str):
+        try:
+            n = int(value.strip())
+            return n if n >= 0 else 0
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _is_terminal_finish_reason(reason: Any) -> bool:
     """Determine whether a finish_reason indicates actual stream completion.
 
@@ -313,7 +336,7 @@ class AnthropicStreamTranslator:
             self.active_block_type = "tool_use"
 
             for tc in tool_calls:
-                tc_idx = tc.get("index", 0)
+                tc_idx = _tool_index(tc.get("index", 0))
                 fn = tc.get("function", {})
 
                 meta = self._known_tools.setdefault(tc_idx, {})

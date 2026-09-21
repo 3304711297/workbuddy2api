@@ -1,18 +1,23 @@
-"""契约测试：额度耗尽（14018/14017）硬冷却、限流码族扩张、非 JSON 回退收紧。
+"""契约测试：三层错误分类（额度耗尽 / 账号态故障 / 限流每日额度）与冷却语义。
 
-背景（本机 converter.log 实测，105 次命中，2026-09-17 起至 2026-09-21 仍在发生）：
+背景（本机 converter.log 12854 行实测）：
     ✗ HTTP 429 | deepseek-v4.1-flash |
       {"error":{"data":{"code":14018,"msg":"额度已用尽，请访问以下链接，购买加量包…"}}}
+    105 条 14018 全部**不带** reset 时间；94 条 6004 配对样本的 reset 距发生时刻
+    中位 3.67h、最大 18.63h，**89.4% 超过 2h**。
 
 旧行为：`_is_rate_limit_signal` 第一行 `if status_code == 429: return True` 无条件命中，
-14018 被当成普通软限流 → 只冷 5 分钟 → 冷却一过立刻重选同一个已耗尽的账号 → 成串烧请求。
+14018 被当成普通软限流 → 只冷 5 分钟 → 冷却一过立刻重选同一个已耗尽的账号 → 成串烧请求；
+而 6004 的 reset 又被 2h 封顶截断 → 账号解冻后立刻二次撞墙。
 
-本文件锁定三类判据，每条都配了**反向用例**（防判据过宽）：
-  ① 额度耗尽必须识别（含**嵌套** error.data.code 形态）并做长冷却（到次日边界）；
-  ② 无限流码的同文案 429 仍按软限流（不得把两者混为一谈）；
-  ③ 非 JSON 自由文本回退不得吃裸 `429`/`6004` 数字（网关 HTML 错误页会把好账号打进假冷却）。
+本文件锁定四层判据，每条都配**反向用例**（防判据过宽）：
+  ① 额度耗尽（14018）必须识别（含**嵌套** error.data.code）并长冷却，**且优先采用上游 reset**；
+  ② 账号态故障（14017）必须与额度耗尽**分开**：短冷却可自愈，不得停到次日、不得记成 14018；
+  ③ 每日额度（6004/6008）必须对齐上游 reset 墙钟，不受 2h 封顶；瞬时频控码仍走短窗；
+  ④ 软限流措辞（`usage limit exceeded` 等）**不得**被判成额度耗尽（上游 ErrSoftRate 契约）。
 """
 
+import datetime
 import re
 import time
 from pathlib import Path
@@ -53,12 +58,43 @@ def test_credit_exhausted_detects_allocation_phrase_without_code():
 
 
 @pytest.mark.parametrize("code", ["14017", 14017])
-def test_credit_exhausted_trial_code_also_detected(code):
-    """14017（试用未开通）同属额度/授权耗尽族，一并长冷却。"""
+def test_trial_not_activated_is_account_fault_not_credit_exhausted(code):
+    """14017（试用未开通）是**账号态故障**，不是额度耗尽。
+
+    外部证据（Sliverkiss/workbuddy2api internal/upstream/client.go 分类注释 +
+    client_test.go 契约）：
+      14017 → ErrAccountFault（试用未激活/账号态故障）→ 短冷却 + 换号，可自愈
+      14018 → ErrHardCredit （额度耗尽）             → 长冷却等恢复
+    旧实现把两者并进 `_CREDIT_EXHAUSTED_CODES` → 一个新账号被按「额度耗尽」停到次日，
+    白丢一个本可用窗口；且 `entry["code"]` 还会把 14017 记成 14018，污染观测。
+    """
     raw = '{"error":{"data":{"code":%s,"msg":"The trial version is not yet activated"}}}' % (
         '"%s"' % code if isinstance(code, str) else code,
     )
-    assert converter._is_credit_exhausted_signal(429, raw) is True
+    assert converter._is_credit_exhausted_signal(429, raw) is False, "14017 不得判为额度耗尽"
+    assert converter._is_account_fault_signal(429, raw) is True, "14017 必须判为账号态故障"
+
+
+def test_account_fault_uses_short_cooldown_not_next_day():
+    """14017 的冷却必须是短冷却（可自愈），不得落到次日边界。"""
+    converter._RATE_LIMIT_STATE.clear()
+    raw = '{"error":{"data":{"code":14017,"msg":"trial not activated"}}}'
+    converter._record_rate_limit("m-14017", raw, uid="u1", status_code=429)
+    entry = converter._RATE_LIMIT_STATE.get("m-14017")
+    assert entry is not None, "14017 必须被记录（换号入口依赖它）"
+    assert entry["kind"] == "account_fault"
+    assert entry["resetAtMs"] - int(time.time() * 1000) < 3600 * 1000, "14017 不应被停到次日"
+    assert str(entry["code"]) == "14017", "必须记录真实码，不得写成 14018"
+
+
+def test_credit_exhausted_uses_long_cooldown():
+    """14018 必须走长冷却（额度耗尽当日不可恢复）。"""
+    converter._RATE_LIMIT_STATE.clear()
+    converter._record_rate_limit("m-14018", SAMPLE_14018, uid="u1", status_code=429)
+    entry = converter._RATE_LIMIT_STATE.get("m-14018")
+    assert entry is not None
+    assert entry["kind"] == "credit_exhausted"
+    assert entry["resetAtMs"] - int(time.time() * 1000) > 3600 * 1000, "14018 必须是长冷却"
 
 
 def test_credit_exhausted_detects_top_level_code():
@@ -93,11 +129,117 @@ def test_same_text_429_without_credit_code_stays_soft_rate_limit():
 
 
 def test_credit_exhausted_reset_is_next_day_boundary():
-    """额度耗尽的冷却终点必须是次日 00:00（UTC+8），而不是几十分钟。"""
+    """额度耗尽的兜底冷却终点必须是次日 00:00（UTC+8），而不是几十分钟。
+
+    注意：本用例只覆盖**兜底**路径（报文无 reset 时）。一旦上游下发 reset，
+    `_credit_exhausted_reset` 必须优先采用它（见
+    test_credit_exhausted_reset_prefers_upstream_reset）。
+    """
     reset_ms, reset_local = converter._credit_exhausted_reset()
     remaining = (reset_ms - time.time() * 1000) / 1000.0
     assert 0 < remaining <= 24 * 3600 + 60
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} 00:00:00", reset_local)
+
+
+def test_credit_exhausted_reset_prefers_upstream_reset():
+    """上游下发 reset 时必须以它为准（不得被本地兜底墙钟覆盖）。
+
+    本机实测 14018 报文不带 reset（105/105），但一旦上游开始下发，硬编码兜底就会
+    变成"过早/过晚恢复"的错误来源 —— 这条用例锁死"reset 优先"的架构决策。
+    """
+    future = "2031-03-05 17:30:00"
+    raw = '{"error":{"data":{"code":14018,"msg":"quota exhausted; 将在 %s UTC+8 重置"}}}' % future
+    reset_ms, reset_local = converter._credit_exhausted_reset(raw)
+    assert reset_local.endswith("17:30:00"), f"未采用上游 reset: {reset_local}"
+    expect_ms = int(datetime.datetime.strptime(future, "%Y-%m-%d %H:%M:%S")
+                    .replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+                    .timestamp() * 1000)
+    assert reset_ms == expect_ms
+
+
+def test_soft_rate_phrase_is_not_credit_exhausted():
+    """"model usage limit exceeded" 是**模型频控**（上游 ErrSoftRate），不是额度耗尽。
+
+    外部证据（Sliverkiss client_test.go 契约）：{200,code:1,"model usage limit exceeded"}
+    → ErrSoftRate；其测试恰以「误判成硬冷却会把有余量账号停到次日」为反例。
+    旧实现把 "usage limit exceeded" 放进硬额度词表 → 无顶层码时会误停到次日。
+    """
+    assert converter._is_credit_exhausted_signal(
+        400, '{"msg":"model usage limit exceeded"}') is False
+    assert converter._is_credit_exhausted_signal(
+        429, '{"msg":"usage limit exceeded"}') is False
+    assert converter._is_rate_limit_signal(
+        429, '{"msg":"model usage limit exceeded"}') is True
+
+
+def test_quota_exceeded_still_is_credit_exhausted():
+    """反向：`quota exceeded` 上游明确归 ErrHardCredit，必须保留命中（不能连它一起剥掉）。"""
+    assert converter._is_credit_exhausted_signal(400, '{"msg":"quota exceeded"}') is True
+
+
+def test_429_does_not_bypass_authoritative_code():
+    """HTTP 429 不得绕过顶层业务码权威（P1-1）。
+
+    实测形态：429 + 顶层 11102（模型不可用）+ 嵌套 details.code=6004。
+    旧实现的真值表顶部是 `if status_code == 429: return True`，抢在顶层码仲裁之前命中
+    → 这个确定性错误被判成限流 → 触发无谓换号与冷却；而同一报文用 400 下发时判否
+    （既有契约 test_rate_limit_regex_must_not_bypass_signal_gate 锁定）——
+    同一报文两种状态码两种结论，正是这个 bug 的表现。
+    """
+    payload = ('{"code":11102,"msg":"model unavailable",'
+               '"details":{"code":6004,"msg":"将在 2030-01-01 00:00:00 UTC+8 重置"}}')
+    assert converter._is_rate_limit_signal(429, payload) is False, "429 不得绕过顶层码权威"
+    assert converter._is_rate_limit_signal(400, payload) is False, "两种状态码必须同结论"
+    converter._RATE_LIMIT_STATE.clear()
+    converter._record_rate_limit("m-429-bypass", payload, uid="u-good", status_code=429)
+    assert "m-429-bypass" not in converter._RATE_LIMIT_STATE, "顶层 11102 不得写假冷却"
+
+
+def test_429_without_any_code_still_rate_limited():
+    """反向（防修过头）：真·429 且报文没有任何可判码/语义 → 仍须判限流。"""
+    assert converter._is_rate_limit_signal(429, '{"requestId":"abc-123"}') is True
+    assert converter._is_rate_limit_signal(429, "") is True
+    assert converter._is_rate_limit_signal(429, "upstream busy") is True
+
+
+def test_daily_quota_reset_beyond_two_hours_is_honored():
+    """每日额度（6004/6008）的 reset 常远超 2h，必须按上游墙钟而非 2h 封顶（P1-4）。
+
+    本机实测 94 条配对样本：reset 距发生时刻中位 3.67h、最大 18.63h，
+    **89.4%（84/94）超过 2h**。旧实现统一封顶 7200s → 账号在额度未恢复时就重新入池
+    → 立刻二次撞墙（用户侧表现为"换一圈又全撞限流"）。
+
+    ⚠️ 必须断言**生效冷却**（`monotonic_until`），而不是只断言展示字段 `resetAtMs`：
+    `_is_account_cooldown` / `_get_cooldown_reset_ms` 都以 `monotonic_until` 为准，
+    只查 `resetAtMs` 会在 2h 封顶仍然存在时误判为通过（本用例初版即踩此坑）。
+    """
+    converter._RATE_LIMIT_STATE.clear()
+    # 构造一个 5.5h 之后才重置的真实形态
+    reset_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) \
+        + datetime.timedelta(hours=5, minutes=30)
+    raw = '{"code":6004,"msg":"您的使用量已超出频率限制，将在 %s UTC+8 重置，您也可以切换其他模型继续使用。"}' % \
+        reset_dt.strftime("%Y-%m-%d %H:%M:%S")
+    converter._record_rate_limit("m-daily", raw, uid="u1", status_code=400)
+    entry = converter._RATE_LIMIT_STATE["m-daily"]
+    assert entry["kind"] == "daily_quota", f"6004 应归每日额度: {entry['kind']}"
+    # 展示字段：对齐上游墙钟
+    remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
+    assert 5.4 * 3600 < remaining < 5.6 * 3600, f"resetAtMs 未对齐上游: {remaining}s"
+    # 生效字段：真正决定账号何时回到池子的那个
+    effective = entry["monotonic_until"] - time.monotonic()
+    assert effective > 7200, f"生效冷却被 2h 封顶截断了: {effective}s"
+    assert 5.4 * 3600 < effective < 5.6 * 3600, f"生效冷却未对齐上游 reset: {effective}s"
+
+
+def test_transient_rate_code_keeps_short_cooldown():
+    """对照：非每日额度的限流码（6000-6003/6005-6007）无 reset 时仍走短窗。"""
+    converter._RATE_LIMIT_STATE.clear()
+    converter._record_rate_limit("m-transient", '{"code":6006,"msg":"请求频率过高，请稍后再试"}',
+                                 uid="u1", status_code=400)
+    entry = converter._RATE_LIMIT_STATE["m-transient"]
+    effective = entry["monotonic_until"] - time.monotonic()
+    assert 200 < effective < 400, f"瞬时频控不应长冷却: {effective}s"
+    assert entry["kind"] == "rate_limit"
 
 
 def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
@@ -108,7 +250,7 @@ def test_record_rate_limit_credit_exhausted_uses_long_cooldown(monkeypatch):
         converter._record_rate_limit("deepseek-v4.1-flash", SAMPLE_14018,
                                      uid="u-empty", status_code=429)
         entry = converter._RATE_LIMIT_STATE["deepseek-v4.1-flash"]
-        assert entry["code"] == 14018
+        assert str(entry["code"]) == "14018"
         assert entry["kind"] == "credit_exhausted"
         remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
         assert remaining > 3600, f"额度耗尽冷却过短: {remaining}s"
@@ -126,7 +268,6 @@ def test_record_rate_limit_soft_429_keeps_short_cooldown():
         converter._record_rate_limit("glm-5.3", '{"msg":"Too Many Requests"}',
                                      uid="u-ok", status_code=429)
         entry = converter._RATE_LIMIT_STATE["glm-5.3"]
-        assert entry["code"] == 6004
         assert entry["kind"] == "rate_limit"
         remaining = (entry["resetAtMs"] - time.time() * 1000) / 1000.0
         assert 200 < remaining < 400
@@ -200,9 +341,12 @@ def test_plain_text_rate_limit_phrase_still_detected():
     """正向：无结构的明文限流措辞仍须命中（不得因收紧而漏判真实限流）。"""
     assert converter._is_rate_limit_signal(400, "请求频率过高，请稍后再试") is True
     assert converter._is_rate_limit_signal(503, "Too Many Requests") is True
-    # 裸露的 "usage limit exceeded" 措辞不在整词表内，按设计判否（避免过宽）；
-    # 该措辞的真实报文以 6004 码下发，由码族分支覆盖。
-    assert converter._is_rate_limit_signal(400, "Your usage limit exceeded") is False
+    # 英文 ErrSoftRate 契约措辞同样必须命中（上游 client_test.go 逐条锁定）
+    assert converter._is_rate_limit_signal(400, "Your usage limit exceeded") is True
+    assert converter._is_rate_limit_signal(400, "rate-limited upstream") is True
+    assert converter._is_rate_limit_signal(403, "usage limit reached") is True
+    # 反向：不得因此吃裸数字（网关 HTML 页里的 upstream 429）
+    assert converter._is_rate_limit_signal(502, "<html>502 Bad Gateway upstream 429</html>") is False
 
 
 def test_json_rate_limit_code_family_is_recognized():

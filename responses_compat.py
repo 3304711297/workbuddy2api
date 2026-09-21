@@ -166,10 +166,19 @@ def _convert_input_items(items: list) -> list[dict]:
         # 5. function_call_output -> tool 消息
         if item_type == "function_call_output":
             _flush_assistant()
+            output = item.get("output", "")
+            content = _extract_content(output)
+            if isinstance(content, (list, tuple)) and len(content) == 0:
+                content = ""
             messages.append({
                 "role": "tool",
                 "tool_call_id": item.get("call_id", ""),
-                "content": str(item.get("output", "")),
+                # ⚠️ 必须复用 _extract_content（而非 str()）：Agent 会把截图等工具结果
+                # 以 [{"type":"input_image","image_url":...}] 形态回传。用 str() 会把它
+                # 变成 Python repr（单引号、非 JSON），模型收到一段乱码文本——且因为每轮
+                # 都回传完整历史，这张图会**每轮重新丢一次**，完全静默。
+                # 纯文本输出仍走 _extract_content 的字符串直通分支，行为不变。
+                "content": content,
             })
             continue
 
@@ -280,6 +289,28 @@ def _convert_tools_for_chat(tools: list) -> list:
     return result
 
 
+def _tool_index(value: Any) -> int:
+    """把上游 tool_call 的 `index` 归一为 int（字符串/缺失/负数一律容错）。
+
+    ⚠️ 本模块用 index 做 `self._tool_calls` 的键，并据此**分配 output_idx**。上游若用
+    字符串下发（`"10"` vs `"2"`），字典序会把并行工具调用排错位，客户端拿到的
+    `function_call` 顺序与实际执行顺序不一致（>9 个并行工具时必现）。归一后按键排序稳定。
+    """
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value >= 0 else 0
+    if isinstance(value, float):
+        return int(value) if value >= 0 else 0
+    if isinstance(value, str):
+        try:
+            n = int(value.strip())
+            return n if n >= 0 else 0
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 class ResponsesStreamConverter:
     """将 ChatCompletions SSE 流实时转换为 Responses API 语义事件流。"""
 
@@ -371,7 +402,7 @@ class ResponsesStreamConverter:
 
             # 工具调用增量
             for tc in delta.get("tool_calls", []):
-                idx = tc.get("index", 0)
+                idx = _tool_index(tc.get("index", 0))
                 if idx not in self._tool_calls:
                     base = 1 if (self._emitted_msg_item or self._content) else 0
                     oi = base + len(self._tool_calls)

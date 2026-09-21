@@ -54,23 +54,35 @@ def _extract_system_prompt(system_raw: Union[str, List[Any], None]) -> Optional[
     return None
 
 
-def _format_tool_result_content(content: Any) -> str:
-    """Format Anthropic tool_result content into a string for OpenAI tool message."""
+def _format_tool_result_content(content: Any) -> Any:
+    """Format Anthropic tool_result content for an OpenAI tool message.
+
+    ⚠️ 多模态块必须**保留为结构**，不能降级成文本：Agent 的截图类工具会把图片放在
+    tool_result 里（`{"type":"image","source":{...}}`）。旧实现走 `json.dumps(item)`
+    把它变成一段 JSON 文本，模型收到的是字符串而非图片——且 Agent 每轮回传完整历史，
+    这张图会**每轮重新丢一次**，全程无报错、完全静默。
+    纯文本块仍按原语义用 "\\n" 连接（既有契约 test_anthropic_compat 锁定）。
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
+        parts: List[Any] = []
         for item in content:
             if isinstance(item, dict):
                 if item.get("type") == "text":
                     parts.append(item.get("text", ""))
+                elif item.get("type") == "image":
+                    parts.append(_translate_content_part(item))
                 else:
                     parts.append(json.dumps(item, ensure_ascii=False))
             elif isinstance(item, str):
                 parts.append(item)
             else:
                 parts.append(json.dumps(item, ensure_ascii=False))
-        return "\n".join(parts)
+        # 全文本 → 保持历史形态（"\\n" 连接的字符串）；含图片 → 返回结构化部件数组
+        if all(isinstance(p, str) for p in parts):
+            return "\n".join(parts)
+        return parts
     if isinstance(content, (dict, int, float, bool)):
         return json.dumps(content, ensure_ascii=False)
     return str(content or "")
