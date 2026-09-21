@@ -4806,6 +4806,12 @@ async def _collect_stream(response: httpx.Response, t0: float = 0.0) -> tuple[di
     if not saw_sse:
         return _parse_non_sse_body("".join(probe_lines), model), ttft_ms
 
+    # 空流哨兵：见过 SSE 行，但整段没有任何实质内容（只有 [DONE] / 空 delta）→ 抛错。
+    # 不这么做就会返回「200 + content:null」的假成功，把上游故障伪装成「模型回答为空」。
+    if not _has_stream_payload(content_parts, reasoning_parts, tool_calls, usage, finish_reason):
+        raise UpstreamEmptyStreamError(
+            f"upstream returned an empty stream (model={model or 'unknown'})")
+
     message = {"role": "assistant", "content": "".join(content_parts) or None}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
@@ -4834,6 +4840,47 @@ class UpstreamInBandError(httpx.HTTPError):
         self.raw = raw
         self.status_code = status_code
         super().__init__(f"upstream in-band error (HTTP {status_code}): {raw[:400]}")
+
+
+class UpstreamEmptyStreamError(httpx.HTTPError):
+    """HTTP 200 + 合法 SSE，但整段流里**没有任何实质内容**。
+
+    形态：连上后只收到 `[DONE]`（或只有空 delta / 空行），既无 content、无 reasoning、
+    无 tool_calls、无 usage、也无 finish_reason。旧行为把它聚合/透传成「200 + 空回答」，
+    即把上游故障伪装成「模型回答为空」——调用方据此走重试策略会得到错误结论，
+    观测面也看不到任何异常（日志是一行正常 200 成功）。
+
+    ⚠️ 只对「连 finish_reason 都没有」的完全空流触发：若上游明确下发了
+    `finish_reason=stop` 而正文为空，那是模型确实没说话，属诚实结果，不在此列
+    （避免把合法的空回答误报成故障）。
+    """
+
+    def __init__(self, detail: str = "upstream returned an empty stream"):
+        super().__init__(detail)
+
+
+def _has_stream_payload(content_parts, reasoning_parts, tool_calls, usage, finish_reason) -> bool:
+    """聚合器/流式路径共用的「这段流是否有实质内容」判据。
+
+    任何一项成立即视为有内容：
+      · 正文或推理片段；· tool_calls；· usage 里任一非零 token；· 任何 finish_reason。
+    """
+    if content_parts and any(content_parts):
+        return True
+    if reasoning_parts and any(reasoning_parts):
+        return True
+    if tool_calls:
+        return True
+    if isinstance(usage, dict):
+        for v in usage.values():
+            try:
+                if v and int(v) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    if finish_reason is not None and str(finish_reason).strip():
+        return True
+    return False
 
 
 def _parse_non_sse_body(text: str, model: str | None) -> dict:
@@ -5720,6 +5767,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     pending_events: list[bytes] = []   # 首包确认窗口内缓冲的帧（重试时丢弃，防拒答文案泄漏）
     attempt_saw_progress = False       # 本轮是否已出现「实质推进」（见 _progress_reached）
     attempt_content: list[str] = []    # 本轮累积正文，供长度阈值与空拒答判定复用
+    total_events = 0                   # 本轮收到的成帧事件总数（空流哨兵用）
 
     def _progress_reached() -> bool:
         """本轮是否已出现可放行客户端的实质推进。
@@ -5761,7 +5809,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     def _reset_attempt_state() -> None:
         """丢弃本轮的缓冲与统计，为新一次尝试腾出干净状态。"""
-        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter
+        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter, total_events
         pending_events.clear()
         attempt_content.clear()
         tool_names.clear()
@@ -5772,6 +5820,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         ttft_ms = None
         err_msg = None
         attempt_saw_progress = False
+        total_events = 0
         # saw_filter 是「本次尝试」的观测：跨尝试残留会污染最终日志标签
         # （重试成功仍显示「内容审核拦截」），必须一并清除。
         saw_filter = False
@@ -5837,6 +5886,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                             if _capture_raw:
                                 raw_parts.append(chunk)
                             for evt in _feed_and_coalesce(chunk):
+                                total_events += 1
                                 # 观察窗：首个实质推进到达前先缓冲，到达后一次性冲刷并按序直通。
                                 # 全程无推进（= 空拒答）则一直留在缓冲里，等流结束后判定。
                                 if not attempt_saw_progress:
@@ -5846,12 +5896,43 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                     yield pending_events.pop(0)
                                 yield evt
                         for evt in coal.flush():
+                            total_events += 1
                             if not attempt_saw_progress:
                                 pending_events.append(evt)
                                 continue
                             while pending_events:
                                 yield pending_events.pop(0)
                             yield evt
+                        # 空流哨兵：连一个成帧事件都没收到 ⇒ 上游故障，绝不伪装成空回答。
+                        # 判据刻意放在观察窗判定**之前**：完全空流与「空拒答」是两回事
+                        # （后者有 content_filter + 拒答文案），空流连帧都没有。
+                        if total_events == 0:
+                            if attempt + 1 < max_attempts:
+                                if rotator:
+                                    failover = rotator.record_failure_and_failover(
+                                        curr_uid, model_name, 502,
+                                        "upstream returned an empty stream")
+                                    if failover:
+                                        curr_uid, curr_headers = failover
+                                        if on_account_switched:
+                                            on_account_switched(curr_uid)
+                                        _log(f"{prefix}⚠️ 上游返回空流（0 帧），换号重试...")
+                                        _reset_attempt_state()
+                                        await _failover_jitter(rid)
+                                        continue
+                                _log(f"{prefix}⚠️ 上游返回空流（0 帧），同账号重试...")
+                                _reset_attempt_state()
+                                await _failover_jitter(rid)
+                                continue
+                            err_msg = "upstream returned an empty stream"
+                            _log(f"{prefix}✗ 上游返回空流（0 帧），已达重试上限")
+                            _record_usage_once(actual_model, False, t0, error=err_msg,
+                                               requested_model=requested_model or model_name,
+                                               fallback_reason=fallback_reason)
+                            yield _err_event(json.dumps(
+                                {"error": {"message": err_msg, "type": "upstream_error"}}).encode(),
+                                502)
+                            return
                         # 流已正常结束仍停留在观察窗内 ⇒ 判定是否为空拒答（抽样误伤）
                         if pending_events:
                             if (_is_blank_refusal(_pending_refusal_view())
