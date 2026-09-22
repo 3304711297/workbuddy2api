@@ -10,6 +10,14 @@ use super::shared::{local_app_dir, load_accounts_state};
 // 积分与模型数据模型
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBadge {
+    pub text: String,
+    pub color: String,
+    pub kind: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ModelMetaItem {
     pub id: String,
@@ -30,6 +38,8 @@ pub struct ModelMetaItem {
     pub default_effort: String,
     pub description: String,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub badges: Vec<ModelBadge>,
     // 用户自定义覆盖项
     pub custom_context_window: Option<i64>,
     pub custom_reasoning_effort: Option<String>,
@@ -284,6 +294,75 @@ fn load_unavailable_models(active_uid: &str) -> std::collections::HashSet<String
     unavailable
 }
 
+pub fn parse_model_tags_and_badges(raw_tags: Option<&Vec<serde_json::Value>>, source_tag: &str) -> (Vec<String>, Vec<ModelBadge>) {
+    let mut tags = Vec::new();
+    tags.push(source_tag.to_string());
+    let mut badges = Vec::new();
+
+    if let Some(arr) = raw_tags {
+        for t in arr {
+            if let Some(ts) = t.as_str() {
+                let ts_trimmed = ts.trim();
+                if ts_trimmed.is_empty() || ts.to_lowercase() == "craft" {
+                    continue;
+                }
+                if ts.to_lowercase() != "craft" && ts_trimmed.starts_with("badge:") {
+                    let parts: Vec<&str> = ts_trimmed.splitn(3, ':').collect();
+                    if parts.len() >= 2 {
+                        let badge_text = parts[1].trim();
+                        let raw_color = if parts.len() >= 3 { parts[2].trim() } else { "" };
+                        let is_valid_hex = raw_color.starts_with('#')
+                            && raw_color.len() == 7
+                            && raw_color[1..].chars().all(|c| c.is_ascii_hexdigit());
+
+                        let kind = if badge_text.contains("限时免费") {
+                            "limited_free"
+                        } else if badge_text.contains("夜间免费") {
+                            "night_free"
+                        } else if badge_text.contains("夜间折扣") {
+                            "night_discount"
+                        } else if badge_text.contains("优惠") {
+                            "exclusive"
+                        } else {
+                            "general"
+                        };
+
+                        let color = if is_valid_hex {
+                            raw_color.to_uppercase()
+                        } else {
+                            match kind {
+                                "night_free" | "night_discount" => "#1E90FF".to_string(),
+                                "limited_free" | "exclusive" => "#FF0000".to_string(),
+                                _ => "#3B82F6".to_string(),
+                            }
+                        };
+
+                        if !badge_text.is_empty() {
+                            if !tags.contains(&badge_text.to_string()) && badge_text != source_tag {
+                                tags.push(badge_text.to_string());
+                            }
+                            badges.push(ModelBadge {
+                                text: badge_text.to_string(),
+                                color,
+                                kind: kind.to_string(),
+                            });
+                        }
+                    }
+                } else if ts_trimmed == "CodeBuddy" || ts_trimmed == "WorkBuddy" || ts_trimmed == "双端" {
+                    if ts_trimmed != source_tag && !tags.contains(&ts_trimmed.to_string()) {
+                        tags.push(ts_trimmed.to_string());
+                    }
+                } else if ts.to_lowercase() != "craft" {
+                    if !tags.contains(&ts_trimmed.to_string()) && ts_trimmed != source_tag {
+                        tags.push(ts_trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    (tags, badges)
+}
+
 // ---------------------------------------------------------------------------
 // 模型全量获取与配置
 // ---------------------------------------------------------------------------
@@ -434,7 +513,6 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
                 .unwrap_or(""),
         );
 
-        let mut tags = Vec::new();
         let source_tag = if in_cb && in_wb {
             "双端"
         } else if in_wb {
@@ -442,18 +520,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
         } else {
             "CodeBuddy"
         };
-        tags.push(source_tag.to_string());
-
-        if let Some(tag_arr) = m.get("tags").and_then(|v| v.as_array()) {
-            for t in tag_arr {
-                if let Some(ts) = t.as_str() {
-                    // 仅保留 agent 来源端区分，业务标签（如主力/深度推理/craft 等）均不保留
-                    if ts.to_lowercase() != "craft" && (ts == "CodeBuddy" || ts == "WorkBuddy" || ts == "双端") && ts != source_tag {
-                        tags.push(ts.to_string());
-                    }
-                }
-            }
-        }
+        let (tags, badges) = parse_model_tags_and_badges(m.get("tags").and_then(|v| v.as_array()), source_tag);
 
         // 读取用户个性化覆盖设置
         let mut custom_ctx = None;
@@ -476,6 +543,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             default_effort,
             description: desc,
             tags,
+            badges,
             custom_context_window: custom_ctx,
             custom_reasoning_effort: custom_effort,
             efforts_source,
@@ -773,5 +841,46 @@ mod reasoning_matrix_tests {
             assert!(!cat(id).unwrap().can_disable_thinking,
                 "{id} 是 onlyReasoning 模型，不应允许关闭思考");
         }
+    }
+
+    /// 标签与 badge 解析测试
+    #[test]
+    fn test_parse_model_tags_and_badges() {
+        let raw = vec![
+            serde_json::Value::String("craft".to_string()),
+            serde_json::Value::String("badge:限时免费:#FF0000".to_string()),
+            serde_json::Value::String("badge:夜间免费:#1E90FF".to_string()),
+            serde_json::Value::String("badge:夜间折扣:#1E90FF".to_string()),
+            serde_json::Value::String("badge:独家优惠:#FF0000".to_string()),
+            serde_json::Value::String("badge:未知活动:invalid-color".to_string()),
+        ];
+        let (tags, badges) = parse_model_tags_and_badges(Some(&raw), "双端");
+        assert_eq!(tags, vec!["双端", "限时免费", "夜间免费", "夜间折扣", "独家优惠", "未知活动"]);
+        assert_eq!(badges.len(), 5);
+        assert_eq!(badges[0], ModelBadge {
+            text: "限时免费".to_string(),
+            color: "#FF0000".to_string(),
+            kind: "limited_free".to_string(),
+        });
+        assert_eq!(badges[1], ModelBadge {
+            text: "夜间免费".to_string(),
+            color: "#1E90FF".to_string(),
+            kind: "night_free".to_string(),
+        });
+        assert_eq!(badges[2], ModelBadge {
+            text: "夜间折扣".to_string(),
+            color: "#1E90FF".to_string(),
+            kind: "night_discount".to_string(),
+        });
+        assert_eq!(badges[3], ModelBadge {
+            text: "独家优惠".to_string(),
+            color: "#FF0000".to_string(),
+            kind: "exclusive".to_string(),
+        });
+        assert_eq!(badges[4], ModelBadge {
+            text: "未知活动".to_string(),
+            color: "#3B82F6".to_string(),
+            kind: "general".to_string(),
+        });
     }
 }

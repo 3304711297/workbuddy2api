@@ -14,6 +14,19 @@ let sortOrder = null; // 'asc' | 'desc' | null
 let selectedTagFilter = 'ALL';
 
 /**
+ * 判断当前是否处于夜间限免/折扣窗口（Asia/Shanghai 23:00–08:00）。
+ * 支持注入自定义 Date 便于单元测试与时间冻结断言。
+ * @param {Date} [date]
+ * @returns {boolean}
+ */
+export function isNightWindowNow(date = new Date()) {
+  const d = (date instanceof Date && !isNaN(date.getTime())) ? date : new Date();
+  const utcHours = d.getUTCHours();
+  const cstHours = (utcHours + 8) % 24;
+  return cstHours >= 23 || cstHours < 8;
+}
+
+/**
  * 拉取全量模型矩阵并渲染。
  * @returns {Promise<boolean>} true = 云端同步成功；false = 已降级为本地内置数据
  * （调用方据此提示，禁止在 await 之前无条件弹「同步成功」）
@@ -26,8 +39,8 @@ export async function loadModelsMatrix() {
   try {
     const list = await invokeTauri('models_fetch_all');
     rawModelsList = (list || []).map(m => {
-      // 仅保留 agent 来源端标签（CodeBuddy / WorkBuddy / 双端），过滤其余冗余业务标签
-      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft' && ['CodeBuddy', 'WorkBuddy', '双端'].includes(t));
+      // 过滤 craft 冗余技术标签，保留来源端与动态业务徽章（如夜间免费、限时免费、夜间折扣、独家优惠）
+      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft');
       return m;
     });
     updateTagFilterDropdown();
@@ -49,8 +62,14 @@ export async function loadModelsMatrix() {
  * 且两种语义在排序上完全无法区分（用户看到的是「未知倍率混在免费里一起置顶」）。
  * @returns {number|null} 倍率数值；未知返回 null（排序时单独置底）
  */
-function getMultiplierNum(m) {
-  if (!m.credits || m.credits === '—') return null;
+export function getMultiplierNum(m, now = new Date()) {
+  if (!m || !m.credits || m.credits === '—') return null;
+  const tags = m.tags || [];
+  const isNight = isNightWindowNow(now);
+  // 若该模型带「夜间免费」标签且当前处于夜间窗口，实际生效倍率为 0.00
+  if (isNight && tags.includes('夜间免费')) {
+    return 0.0;
+  }
   const match = String(m.credits).match(/(\d+(?:\.\d+)?)/);
   return match ? parseFloat(match[1]) : null;
 }
@@ -222,14 +241,39 @@ export function toggleCreditsSort() {
   applyAndRender();
 }
 
-function formatMultiplier(raw) {
+export function formatMultiplier(rawOrModel, now = new Date()) {
+  const isObj = rawOrModel && typeof rawOrModel === 'object';
+  const raw = isObj ? rawOrModel.credits : rawOrModel;
+  const tags = isObj ? (rawOrModel.tags || []) : [];
+  const hasNightFree = tags.includes('夜间免费');
+  const hasNightDiscount = tags.includes('夜间折扣');
+  const isNight = isNightWindowNow(now);
+
   if (!raw || raw === '—') return '<span class="muted">—</span>';
   const match = String(raw).match(/(\d+(?:\.\d+)?)/);
   if (!match) return `<span class="badge badge-info mono">${esc(raw)}</span>`;
   const num = parseFloat(match[1]);
+
   if (num === 0) {
     return `<span class="badge badge-valid" style="background: var(--success-subtle); color: var(--success-bright); font-weight: 700;">免费 (0.00x)</span>`;
   }
+
+  if (hasNightFree) {
+    if (isNight) {
+      return `<span class="badge badge-valid" style="background: var(--success-subtle); color: var(--success-bright); font-weight: 700;">免费 (0.00x)</span> <span class="muted" style="font-size:10px; margin-left:3px;" title="夜间限免时段 (23:00–08:00) 调用不扣积分">(🌙 限免中, 原 ${match[1]}x)</span>`;
+    } else {
+      return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span> <span class="muted" style="font-size:10px; margin-left:3px;" title="夜间 23:00–08:00 期间免积分">(🌙 夜间 0.00x)</span>`;
+    }
+  }
+
+  if (hasNightDiscount) {
+    if (isNight) {
+      return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span> <span class="badge badge-warn" style="font-size:10px; margin-left:3px; font-weight: 600;" title="当前处于夜间时段，该模型享受专属折扣">🌙 折扣生效中</span>`;
+    } else {
+      return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span> <span class="muted" style="font-size:10px; margin-left:3px;" title="夜间 23:00–08:00 享受夜间折扣">(🌙 夜间享折扣)</span>`;
+    }
+  }
+
   return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span>`;
 }
 
@@ -243,9 +287,11 @@ function renderModelsTable(list) {
     return;
   }
 
+  const isNight = isNightWindowNow();
+
   tbody.innerHTML = list.map(m => {
-    // 纯粹干净的倍率展示（去除无意义的 credits 单词）
-    const creditsBadge = formatMultiplier(m.credits);
+    // 纯粹干净的倍率展示（去除无意义的 credits 单词，动态感知时段限免与折扣）
+    const creditsBadge = formatMultiplier(m);
 
     // 思考强度：行内只读展示，点击弹出编辑弹窗
     // 「默认」= 不覆盖，原样透传客户端（Hermes agent.reasoning_effort）下发的值
@@ -269,14 +315,30 @@ function renderModelsTable(list) {
       </button>
     `;
 
-    // 标签：支持点击快速按标签筛选；不可用模型附「需授权」徽章
+    // 标签：支持点击快速按标签筛选；不可用模型附「需授权」徽章；精细化渲染彩色徽章
     const tagsHtml = [
       ...(m.availability === 'unavailable'
         ? ['<span class="badge badge-warn clickable-tag" data-filter-tag="需授权" role="button" tabindex="0" aria-label="筛选全部需授权套餐模型" title="点击筛选全部需授权模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">🔒 需授权套餐</span>']
         : []),
-      ...(m.tags || []).map(t =>
-        `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`
-      ),
+      ...(m.tags || []).map(t => {
+        if (t === '限时免费') {
+          return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="全天限时免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">🔥 ${esc(t)}</span>`;
+        }
+        if (t === '夜间免费') {
+          return isNight
+            ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段 (23:00–08:00) 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(16,185,129,0.18); color: #10b981; border: 1px solid rgba(16,185,129,0.4); font-weight: 600;">🌙 夜间免费中</span>`
+            : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间免费</span>`;
+        }
+        if (t === '夜间折扣') {
+          return isNight
+            ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段享受折扣倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(245,158,11,0.18); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); font-weight: 600;">🌙 夜间折扣中</span>`
+            : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 享受折扣倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间折扣</span>`;
+        }
+        if (t === '独家优惠') {
+          return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="专属特惠超低倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">✨ ${esc(t)}</span>`;
+        }
+        return `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`;
+      }),
     ].join('');
 
     return `
@@ -327,26 +389,28 @@ function renderFallbackModels() {
   `).join('');
 }
 
-window.saveModelConfig = async (modelId) => {
-  const ctxInput = document.getElementById(`ctx-${modelId}`);
-  const effortSelect = document.getElementById(`effort-${modelId}`);
-  
-  const ctxVal = ctxInput ? parseInt(ctxInput.value, 10) : null;
-  const effortVal = effortSelect ? effortSelect.value : null;
+if (typeof window !== 'undefined') {
+  window.saveModelConfig = async (modelId) => {
+    const ctxInput = document.getElementById(`ctx-${modelId}`);
+    const effortSelect = document.getElementById(`effort-${modelId}`);
+    
+    const ctxVal = ctxInput ? parseInt(ctxInput.value, 10) : null;
+    const effortVal = effortSelect ? effortSelect.value : null;
 
-  try {
-    const res = await invokeTauri('model_save_config', {
-      modelId,
-      contextWindow: ctxVal && !isNaN(ctxVal) ? ctxVal : null,
-      reasoningEffort: effortVal && effortVal !== 'default' ? effortVal : null
-    });
-    showToast(res, 'success');
-    updateModelCells(modelId);
-    closeModelEdit();
-  } catch (e) {
-    showToast(`保存失败: ${e.message || e}`, 'error');
-  }
-};
+    try {
+      const res = await invokeTauri('model_save_config', {
+        modelId,
+        contextWindow: ctxVal && !isNaN(ctxVal) ? ctxVal : null,
+        reasoningEffort: effortVal && effortVal !== 'default' ? effortVal : null
+      });
+      showToast(res, 'success');
+      updateModelCells(modelId);
+      closeModelEdit();
+    } catch (e) {
+      showToast(`保存失败: ${e.message || e}`, 'error');
+    }
+  };
+}
 
 function updateModelCells(modelId) {
   const ctxInput = document.getElementById(`ctx-${modelId}`);
@@ -367,49 +431,51 @@ function updateModelCells(modelId) {
   }
 }
 
-window.openModelEdit = (modelId) => {
-  const m = currentModelsList.find((x) => x.id === modelId);
-  if (!m) return;
-  const defaultCtx = m.max_input_tokens;
-  // 硬上限（上游 maxInputTokens）与「客户端默认窗口」是两个量：默认窗口是建议值，
-  // 输入框的 max 必须用**硬上限**，否则用户无法把窗口调到默认值以上（模型本可支持）。
-  // 老版内核无该字段时退化为默认窗口（= 既有行为）。
-  const hardCtx = m.upstream_max_input_tokens || defaultCtx;
-  const currentCtx = m.custom_context_window || defaultCtx;
-  let html = `
-    <div class="zguide-field">
-      <span class="zguide-label">上下文窗口上限 (Tokens) · 默认 ${Math.round(defaultCtx / 1000)}k · 硬上限 ${Math.round(hardCtx / 1000)}k</span>
-      <input type="number" class="input mono" style="width: 100%;" id="ctx-${esc(modelId)}"
-        value="${esc(currentCtx)}" min="1024" max="${esc(hardCtx)}" step="1024" />
-    </div>`;
-  if (m.supports_reasoning) {
-    const currentEffort = m.custom_reasoning_effort || 'default';
-    const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认（跟随客户端下发值）</option>`];
-    for (const ef of m.supported_efforts) {
-      options.push(`<option value="${esc(ef)}" ${currentEffort === ef ? 'selected' : ''}>强度: ${esc(ef)}</option>`);
-    }
-    if (m.can_disable_thinking) {
-      options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
-    }
-    const sourceHint = m.efforts_source === 'catalog'
-      ? '（档位矩阵来自内置覆盖表，上游此接口未下发完整档位）'
-      : m.efforts_source === 'merged'
-        ? '（上游只下发部分档位，已按内置覆盖表补全）'
-        : '';
-    html += `
-      <div class="zguide-field" style="margin-top: 12px;">
-        <span class="zguide-label">思考强度 (Reasoning) ${esc(sourceHint)}</span>
-        <select class="input mono" style="width: 100%;" id="effort-${esc(modelId)}">${options.join('')}</select>
-        <p class="muted" style="font-size: 11px; margin-top: 6px;">默认档位 = 不覆盖，原样透传客户端（如 Hermes 的 reasoning_effort）下发的值；模型默认档为 <code>${esc(m.default_effort)}</code>。</p>
+if (typeof window !== 'undefined') {
+  window.openModelEdit = (modelId) => {
+    const m = currentModelsList.find((x) => x.id === modelId);
+    if (!m) return;
+    const defaultCtx = m.max_input_tokens;
+    // 硬上限（上游 maxInputTokens）与「客户端默认窗口」是两个量：默认窗口是建议值，
+    // 输入框的 max 必须用**硬上限**，否则用户无法把窗口调到默认值以上（模型本可支持）。
+    // 老版内核无该字段时退化为默认窗口（= 既有行为）。
+    const hardCtx = m.upstream_max_input_tokens || defaultCtx;
+    const currentCtx = m.custom_context_window || defaultCtx;
+    let html = `
+      <div class="zguide-field">
+        <span class="zguide-label">上下文窗口上限 (Tokens) · 默认 ${Math.round(defaultCtx / 1000)}k · 硬上限 ${Math.round(hardCtx / 1000)}k</span>
+        <input type="number" class="input mono" style="width: 100%;" id="ctx-${esc(modelId)}"
+          value="${esc(currentCtx)}" min="1024" max="${esc(hardCtx)}" step="1024" />
       </div>`;
-  } else {
-    html += '<p class="muted" style="font-size: 12px; margin-top: 12px;">该模型不支持思考强度调节</p>';
-  }
-  document.getElementById('model-edit-title').textContent = `编辑 ${m.id}（${m.name}）`;
-  document.getElementById('model-edit-body').innerHTML = html;
-  document.getElementById('model-edit-save').dataset.model = modelId;
-  document.getElementById('model-edit-overlay').hidden = false;
-};
+    if (m.supports_reasoning) {
+      const currentEffort = m.custom_reasoning_effort || 'default';
+      const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认（跟随客户端下发值）</option>`];
+      for (const ef of m.supported_efforts) {
+        options.push(`<option value="${esc(ef)}" ${currentEffort === ef ? 'selected' : ''}>强度: ${esc(ef)}</option>`);
+      }
+      if (m.can_disable_thinking) {
+        options.push(`<option value="disable" ${currentEffort === 'disable' ? 'selected' : ''}>🚫 关闭思考</option>`);
+      }
+      const sourceHint = m.efforts_source === 'catalog'
+        ? '（档位矩阵来自内置覆盖表，上游此接口未下发完整档位）'
+        : m.efforts_source === 'merged'
+          ? '（上游只下发部分档位，已按内置覆盖表补全）'
+          : '';
+      html += `
+        <div class="zguide-field" style="margin-top: 12px;">
+          <span class="zguide-label">思考强度 (Reasoning) ${esc(sourceHint)}</span>
+          <select class="input mono" style="width: 100%;" id="effort-${esc(modelId)}">${options.join('')}</select>
+          <p class="muted" style="font-size: 11px; margin-top: 6px;">默认档位 = 不覆盖，原样透传客户端（如 Hermes 的 reasoning_effort）下发的值；模型默认档为 <code>${esc(m.default_effort)}</code>。</p>
+        </div>`;
+    } else {
+      html += '<p class="muted" style="font-size: 12px; margin-top: 12px;">该模型不支持思考强度调节</p>';
+    }
+    document.getElementById('model-edit-title').textContent = `编辑 ${m.id}（${m.name}）`;
+    document.getElementById('model-edit-body').innerHTML = html;
+    document.getElementById('model-edit-save').dataset.model = modelId;
+    document.getElementById('model-edit-overlay').hidden = false;
+  };
+}
 
 function closeModelEdit() {
   const overlay = document.getElementById('model-edit-overlay');

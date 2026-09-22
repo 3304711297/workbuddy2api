@@ -83,8 +83,8 @@ function renderRateLimitCard(rl, activeModel, currentUid = null) {
   }).join('');
 
   const nightBadge = rl.nightFree
-    ? '<span class="badge badge-success" style="font-size:10px;margin-left:6px;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">🌙 夜间限免中 (23:00–08:00)</span>'
-    : '<span class="muted mono" style="font-size:10px;">夜间 23:00–08:00 免积分</span>';
+    ? '<span class="badge badge-success" style="font-size:10px;margin-left:6px;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);" title="仅限带「夜间免费」标签的模型（如 Hy4 preview 等）免积分，其它模型按原倍率或夜间折扣计费">🌙 指定模型夜间限免中 (23:00–08:00)</span>'
+    : '<span class="muted mono" style="font-size:10px;" title="带「夜间免费」标签的模型在夜间 23:00–08:00 免积分">🌙 指定模型 23:00–08:00 免积分</span>';
 
   // 临期优先：内核按积分到期日分层调度（先烧快过期额度），到期日应对用户可见
   const soonest = rl.rotation?.soonest_expire_day;
