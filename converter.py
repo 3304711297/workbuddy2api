@@ -3873,7 +3873,7 @@ async def api_rate_limit(
             "scope": "specific_models",
         },
         "nickname": nickname,
-        "serverTime": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "serverTime": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "rotation": rotation_info,
         "fallbacks": fallback_snapshot,
         "server": {

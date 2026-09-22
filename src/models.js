@@ -39,8 +39,8 @@ export async function loadModelsMatrix() {
   try {
     const list = await invokeTauri('models_fetch_all');
     rawModelsList = (list || []).map(m => {
-      // 过滤 craft 冗余技术标签，保留来源端与动态业务徽章（如夜间免费、限时免费、夜间折扣、独家优惠）
-      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft');
+      // 过滤 craft 冗余技术标签（含首尾空格），保留来源端与动态业务徽章（如夜间免费、限时免费、夜间折扣、独家优惠）
+      m.tags = (m.tags || []).filter(t => t && t.toLowerCase() !== 'craft' && t.trim().toLowerCase() !== 'craft');
       return m;
     });
     updateTagFilterDropdown();
@@ -54,6 +54,108 @@ export async function loadModelsMatrix() {
 }
 
 /**
+ * 结构化倍率与时段信息解析（区分 base 与 effective）
+ * @param {Object} m 模型对象
+ * @param {Date} now 当前时间快照
+ * @returns {{base: number|null, effective: number|null, isNightFree: boolean, isNightDiscount: boolean, effectiveRateStatus: 'normal'|'night_free'|'night_discount'|'unknown'}}
+ */
+export function getModelMultiplierInfo(m, now = new Date()) {
+  if (!m || !m.credits || m.credits === '—') {
+    return {
+      base: null,
+      effective: null,
+      isNightFree: false,
+      isNightDiscount: false,
+      effectiveRateStatus: 'unknown',
+    };
+  }
+  const tags = m.tags || [];
+  const isNight = isNightWindowNow(now);
+  const hasNightFree = tags.includes('夜间免费');
+  const hasNightDiscount = tags.includes('夜间折扣');
+  const match = String(m.credits).match(/(\d+(?:\.\d+)?)/);
+  const base = match ? parseFloat(match[1]) : null;
+
+  if (base === null) {
+    return {
+      base: null,
+      effective: null,
+      isNightFree: hasNightFree,
+      isNightDiscount: hasNightDiscount,
+      effectiveRateStatus: 'unknown',
+    };
+  }
+
+  if (hasNightFree && isNight) {
+    return {
+      base,
+      effective: 0.0,
+      isNightFree: true,
+      isNightDiscount: false,
+      effectiveRateStatus: 'night_free',
+    };
+  }
+
+  if (hasNightDiscount && isNight) {
+    return {
+      base,
+      effective: base, // 上游未下发夜间折后数值，排序沿用 baseMultiplier，但在 UI/业务中标注折扣生效
+      isNightFree: false,
+      isNightDiscount: true,
+      effectiveRateStatus: 'night_discount',
+    };
+  }
+
+  return {
+    base,
+    effective: base,
+    isNightFree: hasNightFree,
+    isNightDiscount: hasNightDiscount,
+    effectiveRateStatus: 'normal',
+  };
+}
+
+/**
+ * 计算距离下一个 23:00 或 08:00 (Asia/Shanghai, CST, UTC+8) 的毫秒延迟
+ * 附带 1000ms 缓冲，确保定时器触发时已严格越过临界点
+ * @param {Date} now 当前时间快照
+ * @returns {number} 毫秒数
+ */
+export function getNextWindowBoundaryDelayMs(now = new Date()) {
+  const utcMs = now.getTime();
+  const curUtcDate = new Date(utcMs);
+  const y = curUtcDate.getUTCFullYear();
+  const m = curUtcDate.getUTCMonth();
+  const d = curUtcDate.getUTCDate();
+
+  const candidateTargets = [];
+  for (let offset = -1; offset <= 2; offset++) {
+    // 00:00 UTC (08:00 CST)
+    candidateTargets.push(Date.UTC(y, m, d + offset, 0, 0, 0, 0));
+    // 15:00 UTC (23:00 CST)
+    candidateTargets.push(Date.UTC(y, m, d + offset, 15, 0, 0, 0));
+  }
+
+  const futureTargets = candidateTargets.filter(t => t > utcMs).sort((a, b) => a - b);
+  const nextTarget = futureTargets[0] || (utcMs + 3600 * 1000);
+  return Math.max(1000, (nextTarget - utcMs) + 1000);
+}
+
+let windowRefreshTimer = null;
+export function scheduleNextWindowRefresh() {
+  if (typeof setTimeout === 'undefined') return;
+  if (windowRefreshTimer) {
+    clearTimeout(windowRefreshTimer);
+    windowRefreshTimer = null;
+  }
+  const delay = getNextWindowBoundaryDelayMs();
+  windowRefreshTimer = setTimeout(() => {
+    applyAndRender();
+    scheduleNextWindowRefresh();
+  }, delay);
+}
+
+/**
  * 倍率数值化（三态语义）：
  *   - 正数：真实倍率
  *   - `0`：免费（`免费 (0.00x)` / `x0.00`）
@@ -64,17 +166,14 @@ export async function loadModelsMatrix() {
  */
 export function getMultiplierNum(m, now = new Date()) {
   if (!m || !m.credits || m.credits === '—') return null;
-  const tags = m.tags || [];
-  const isNight = isNightWindowNow(now);
-  // 若该模型带「夜间免费」标签且当前处于夜间窗口，实际生效倍率为 0.00
-  if (isNight && tags.includes('夜间免费')) {
-    return 0.0;
-  }
   const match = String(m.credits).match(/(\d+(?:\.\d+)?)/);
-  return match ? parseFloat(match[1]) : null;
+  const fallback = match ? parseFloat(match[1]) : null;
+  const info = getModelMultiplierInfo(m, now);
+  return info.effective !== null ? info.effective : fallback;
 }
 
 function applyAndRender() {
+  const now = new Date();
   let list = [...rawModelsList];
 
   // 1. 标签筛选（「需授权」虚拟标签 = availability === 'unavailable'）
@@ -93,8 +192,8 @@ function applyAndRender() {
     });
   } else if (sortField === 'credits') {
     list.sort((a, b) => {
-      const va = getMultiplierNum(a);
-      const vb = getMultiplierNum(b);
+      const va = getMultiplierNum(a, now);
+      const vb = getMultiplierNum(b, now);
       // 「倍率未知」在升序与降序下**一律置底**：未知不等于 0，也不该被当成最小值。
       // 旧实现把未知当 -1，升序时会排在免费的 0 之上（未知混进免费一组，语义错乱）。
       if (va === null && vb === null) return (a.id || '').localeCompare(b.id || '');
@@ -110,7 +209,7 @@ function applyAndRender() {
 
   updateSortHeadersUI();
   updateTagFilterHeaderUI();
-  renderModelsTable(list);
+  renderModelsTable(list, now);
 }
 
 function updateSortHeadersUI() {
@@ -277,7 +376,34 @@ export function formatMultiplier(rawOrModel, now = new Date()) {
   return `<span class="badge badge-info mono" style="font-weight: 600;">${match[1]}x</span>`;
 }
 
-function renderModelsTable(list) {
+export function renderBadgeHtml(t, m, isNight = isNightWindowNow()) {
+  const badgeObj = (m?.badges || []).find(b => b.text === t);
+  const color = badgeObj ? badgeObj.color : null;
+  const isHex = color && /^#[0-9a-fA-F]{3,8}$/.test(color);
+
+  if (t === '夜间免费' || (badgeObj && badgeObj.kind === 'night_free')) {
+    return isNight
+      ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段 (23:00–08:00) 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(16,185,129,0.18); color: #10b981; border: 1px solid rgba(16,185,129,0.4); font-weight: 600;">🌙 夜间免费中</span>`
+      : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间免费</span>`;
+  }
+  if (t === '夜间折扣' || (badgeObj && badgeObj.kind === 'night_discount')) {
+    return isNight
+      ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段享受折扣倍率（实际以扣费为准）" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(245,158,11,0.18); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); font-weight: 600;">🌙 夜间折扣中</span>`
+      : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 享受夜间折扣" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间折扣</span>`;
+  }
+  if (t === '限时免费' || (badgeObj && badgeObj.kind === 'limited_free')) {
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="全天限时免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">🔥 ${esc(t)}</span>`;
+  }
+  if (t === '独家优惠' || (badgeObj && badgeObj.kind === 'exclusive')) {
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="专属特惠超低倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">✨ ${esc(t)}</span>`;
+  }
+  if (isHex) {
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: ${color}26; color: ${color}; border: 1px solid ${color}66; font-weight: 600;">${esc(t)}</span>`;
+  }
+  return `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`;
+}
+
+function renderModelsTable(list, now = new Date()) {
   const tbody = document.getElementById('models-table-body');
   if (!tbody) return;
   currentModelsList = list || [];
@@ -287,11 +413,11 @@ function renderModelsTable(list) {
     return;
   }
 
-  const isNight = isNightWindowNow();
+  const isNight = isNightWindowNow(now);
 
   tbody.innerHTML = list.map(m => {
     // 纯粹干净的倍率展示（去除无意义的 credits 单词，动态感知时段限免与折扣）
-    const creditsBadge = formatMultiplier(m);
+    const creditsBadge = formatMultiplier(m, now);
 
     // 思考强度：行内只读展示，点击弹出编辑弹窗
     // 「默认」= 不覆盖，原样透传客户端（Hermes agent.reasoning_effort）下发的值
@@ -320,25 +446,7 @@ function renderModelsTable(list) {
       ...(m.availability === 'unavailable'
         ? ['<span class="badge badge-warn clickable-tag" data-filter-tag="需授权" role="button" tabindex="0" aria-label="筛选全部需授权套餐模型" title="点击筛选全部需授权模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">🔒 需授权套餐</span>']
         : []),
-      ...(m.tags || []).map(t => {
-        if (t === '限时免费') {
-          return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="全天限时免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">🔥 ${esc(t)}</span>`;
-        }
-        if (t === '夜间免费') {
-          return isNight
-            ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段 (23:00–08:00) 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(16,185,129,0.18); color: #10b981; border: 1px solid rgba(16,185,129,0.4); font-weight: 600;">🌙 夜间免费中</span>`
-            : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间免费</span>`;
-        }
-        if (t === '夜间折扣') {
-          return isNight
-            ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段享受折扣倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(245,158,11,0.18); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); font-weight: 600;">🌙 夜间折扣中</span>`
-            : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 享受折扣倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间折扣</span>`;
-        }
-        if (t === '独家优惠') {
-          return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="专属特惠超低倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">✨ ${esc(t)}</span>`;
-        }
-        return `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`;
-      }),
+      ...(m.tags || []).map(t => renderBadgeHtml(t, m, isNight)),
     ].join('');
 
     return `
@@ -639,4 +747,17 @@ export function initModelsAndCopy() {
       showToast(ok ? '已复制到剪贴板' : '复制失败，请手动选择文本复制', ok ? 'success' : 'error');
     });
   });
+
+  // P1-2：对齐下一个 23:00 或 08:00 边界时刻自动重渲染；并监听可见性与焦点唤醒重排
+  scheduleNextWindowRefresh();
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) applyAndRender();
+    });
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', () => {
+      applyAndRender();
+    });
+  }
 }

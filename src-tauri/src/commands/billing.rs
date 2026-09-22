@@ -297,16 +297,16 @@ fn load_unavailable_models(active_uid: &str) -> std::collections::HashSet<String
 pub fn parse_model_tags_and_badges(raw_tags: Option<&Vec<serde_json::Value>>, source_tag: &str) -> (Vec<String>, Vec<ModelBadge>) {
     let mut tags = Vec::new();
     tags.push(source_tag.to_string());
-    let mut badges = Vec::new();
+    let mut badges: Vec<ModelBadge> = Vec::new();
 
     if let Some(arr) = raw_tags {
         for t in arr {
             if let Some(ts) = t.as_str() {
                 let ts_trimmed = ts.trim();
-                if ts_trimmed.is_empty() || ts.to_lowercase() == "craft" {
+                if ts_trimmed.is_empty() || ts_trimmed.to_lowercase() == "craft" {
                     continue;
                 }
-                if ts.to_lowercase() != "craft" && ts_trimmed.starts_with("badge:") {
+                if ts_trimmed.starts_with("badge:") {
                     let parts: Vec<&str> = ts_trimmed.splitn(3, ':').collect();
                     if parts.len() >= 2 {
                         let badge_text = parts[1].trim();
@@ -341,18 +341,20 @@ pub fn parse_model_tags_and_badges(raw_tags: Option<&Vec<serde_json::Value>>, so
                             if !tags.contains(&badge_text.to_string()) && badge_text != source_tag {
                                 tags.push(badge_text.to_string());
                             }
-                            badges.push(ModelBadge {
-                                text: badge_text.to_string(),
-                                color,
-                                kind: kind.to_string(),
-                            });
+                            if !badges.iter().any(|b| b.text == badge_text) {
+                                badges.push(ModelBadge {
+                                    text: badge_text.to_string(),
+                                    color,
+                                    kind: kind.to_string(),
+                                });
+                            }
                         }
                     }
                 } else if ts_trimmed == "CodeBuddy" || ts_trimmed == "WorkBuddy" || ts_trimmed == "双端" {
                     if ts_trimmed != source_tag && !tags.contains(&ts_trimmed.to_string()) {
                         tags.push(ts_trimmed.to_string());
                     }
-                } else if ts.to_lowercase() != "craft" {
+                } else if ts.to_lowercase() != "craft" && ts_trimmed.to_lowercase() != "craft" {
                     if !tags.contains(&ts_trimmed.to_string()) && ts_trimmed != source_tag {
                         tags.push(ts_trimmed.to_string());
                     }
@@ -426,7 +428,6 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
     // 可用性：活跃账号运行时证据 + GPT_FALLBACK_MAP 预标记
     let unavailable = load_unavailable_models(&st.active_uid);
     let mut list = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
 
     let cb_id_set: std::collections::HashSet<String> = cb_models
         .iter()
@@ -437,7 +438,11 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
         .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
 
-    // 合并列表：先遍历 cb_models，再遍历 wb_models 补充独有模型
+    // 合并列表（P1-4）：保持顺序（CB 优先，WB 补充独有），同 ID 模型并集融合 tags 与 badges
+    let mut ordered_ids = Vec::new();
+    let mut primary_map = std::collections::HashMap::new();
+    let mut raw_tags_map: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+
     let mut all_models = Vec::new();
     for m in cb_models {
         all_models.push(m);
@@ -447,16 +452,27 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
     }
 
     for m in all_models {
-        // 剔除口径：无 id / disabled === true / 历史黑名单（hunyuan-image-v3.0）。
-        // 旧实现只过滤一个名字，上游新标记 disabled 的条目会照原样进控制台。
         if is_model_entry_dropped(&m) {
             continue;
         }
         let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        if seen_ids.contains(&id) {
+        if id.is_empty() {
             continue;
         }
-        seen_ids.insert(id.clone());
+        if !primary_map.contains_key(&id) {
+            ordered_ids.push(id.clone());
+            primary_map.insert(id.clone(), m.clone());
+        }
+        if let Some(arr) = m.get("tags").and_then(|v| v.as_array()) {
+            raw_tags_map.entry(id).or_default().extend(arr.iter().cloned());
+        }
+    }
+
+    for id in ordered_ids {
+        let m = match primary_map.get(&id) {
+            Some(v) => v,
+            None => continue,
+        };
 
         let in_cb = cb_id_set.contains(&id);
         let in_wb = wb_id_set.contains(&id);
@@ -520,7 +536,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
         } else {
             "CodeBuddy"
         };
-        let (tags, badges) = parse_model_tags_and_badges(m.get("tags").and_then(|v| v.as_array()), source_tag);
+        let (tags, badges) = parse_model_tags_and_badges(raw_tags_map.get(&id), source_tag);
 
         // 读取用户个性化覆盖设置
         let mut custom_ctx = None;
@@ -847,9 +863,10 @@ mod reasoning_matrix_tests {
     #[test]
     fn test_parse_model_tags_and_badges() {
         let raw = vec![
-            serde_json::Value::String("craft".to_string()),
+            serde_json::Value::String("  craft  ".to_string()),
             serde_json::Value::String("badge:限时免费:#FF0000".to_string()),
             serde_json::Value::String("badge:夜间免费:#1E90FF".to_string()),
+            serde_json::Value::String("badge:夜间免费:#1E90FF".to_string()), // 重复项应被自动去重
             serde_json::Value::String("badge:夜间折扣:#1E90FF".to_string()),
             serde_json::Value::String("badge:独家优惠:#FF0000".to_string()),
             serde_json::Value::String("badge:未知活动:invalid-color".to_string()),
@@ -882,5 +899,19 @@ mod reasoning_matrix_tests {
             color: "#3B82F6".to_string(),
             kind: "general".to_string(),
         });
+    }
+
+    #[test]
+    fn test_merge_models_union_tags_and_badges() {
+        // 模拟 CodeBuddy 有 tags A，WorkBuddy 有 tags B，双端融合必须保留两端 badge 与 tag
+        let cb_tags = vec![serde_json::Value::String("badge:夜间免费:#1E90FF".to_string())];
+        let wb_tags = vec![serde_json::Value::String("badge:夜间折扣:#1E90FF".to_string())];
+        let mut combined = cb_tags;
+        combined.extend(wb_tags);
+        let (tags, badges) = parse_model_tags_and_badges(Some(&combined), "双端");
+        assert_eq!(tags, vec!["双端", "夜间免费", "夜间折扣"]);
+        assert_eq!(badges.len(), 2);
+        assert_eq!(badges[0].kind, "night_free");
+        assert_eq!(badges[1].kind, "night_discount");
     }
 }

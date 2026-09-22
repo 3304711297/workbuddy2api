@@ -16,8 +16,8 @@ test('models.js does NOT filter out promo badge tags (preserves 夜间免费, �
     false,
     'models.js 不得将 tags 硬编码限制在 3 个来源端标签内，必须放行动态业务徽章'
   );
-  // 但仍须过滤 craft
-  assert.equal(modelsJs.includes("t.toLowerCase() !== 'craft'"), true, 'models.js 必须过滤 craft 标签');
+  // 但仍须过滤 craft（含 trim 保护）
+  assert.equal(modelsJs.includes("toLowerCase() !== 'craft'"), true, 'models.js 必须过滤 craft 标签');
 });
 
 test('models.js contains isNightWindowNow function and supports injected date for testing', () => {
@@ -112,3 +112,42 @@ test('Pure unit test: formatMultiplier and getMultiplierNum dynamic behavior', a
   assert.match(formatMultiplier(hy3, dNight), /免费 \(0\.00x\)/);
   assert.match(formatMultiplier(hy3, dDay), /免费 \(0\.00x\)/);
 });
+
+test('Pure unit test: getModelMultiplierInfo distinguishes base vs effective multiplier', async () => {
+  const { getModelMultiplierInfo } = await import('../src/models.js');
+  const dNight = new Date('2026-09-22T16:00:00Z'); // 24:00 CST
+  const dDay = new Date('2026-09-22T04:00:00Z');   // 12:00 CST
+
+  const glm = { id: 'glm-5.2', credits: 'x0.79 credits', tags: ['双端', '夜间折扣'] };
+  const infoNight = getModelMultiplierInfo(glm, dNight);
+  assert.equal(infoNight.base, 0.79);
+  assert.equal(infoNight.effective, 0.79);
+  assert.equal(infoNight.effectiveRateStatus, 'night_discount');
+
+  const hy4 = { id: 'hy4-preview', credits: 'x0.29', tags: ['双端', '夜间免费'] };
+  const infoHy4Night = getModelMultiplierInfo(hy4, dNight);
+  assert.equal(infoHy4Night.base, 0.29);
+  assert.equal(infoHy4Night.effective, 0.0);
+  assert.equal(infoHy4Night.effectiveRateStatus, 'night_free');
+});
+
+test('Pure unit test: getNextWindowBoundaryDelayMs calculates delay to next 23:00 or 08:00', async () => {
+  const { getNextWindowBoundaryDelayMs } = await import('../src/models.js');
+  // CST 22:59:00 -> exactly 60s + buffer to 23:00
+  const d2259 = new Date('2026-09-22T14:59:00Z');
+  const delay = getNextWindowBoundaryDelayMs(d2259);
+  assert.ok(delay >= 60000 && delay <= 62000, `delay 应该约为 60s，实得 ${delay}`);
+});
+
+test('Pure unit test: renderBadgeHtml consumes structured ModelBadge color', async () => {
+  const { renderBadgeHtml } = await import('../src/models.js');
+  const m = {
+    id: 'test-m',
+    tags: ['双端', '专属活动'],
+    badges: [{ text: '专属活动', color: '#10B981', kind: 'promo' }]
+  };
+  const html = renderBadgeHtml('专属活动', m, false);
+  assert.match(html, /#10B981/);
+  assert.match(html, /专属活动/);
+});
+
