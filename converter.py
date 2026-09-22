@@ -5926,6 +5926,17 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
         nonlocal usage_recorded
         if not usage_recorded:
             usage_recorded = True
+            # 缓存读数一律在此**单一漏斗**提取，调用点无需各自接线。
+            # 本函数有 9 个出口（成功 / 取消 / 内部异常 / 兜底 …），逐点接线必然漏：
+            # 上一轮就是这么漏掉整条 _stream_upstream 的（生产台账里同一模型
+            # 走流式无 cache 键、走非流式有，而计数式断言给了假安全感）。
+            # 在此统一注入，从结构上消除「某条路径静默丢字段」的可能。
+            if "cache_read_tokens" not in kwargs:
+                _cr, _cw = _usage_cache_counts(usage)
+                if _cr is not None:
+                    kwargs["cache_read_tokens"] = _cr
+                if _cw is not None:
+                    kwargs["cache_write_tokens"] = _cw
             _record_usage(*args, **kwargs)
 
     try:

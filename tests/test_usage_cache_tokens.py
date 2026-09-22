@@ -167,17 +167,17 @@ def _source() -> str:
                    encoding="utf-8").read()
 
 
-def test_all_four_success_paths_wire_cache_counts():
-    """chat / messages / responses / 流式 四个成功落盘点都必须提取 cache 读数。
+def test_all_five_success_paths_wire_cache_counts():
+    """chat / messages / responses / safe_stream / 裸流式 五个落盘点都必须提取 cache 读数。
 
-    本仓库的四个落盘点各自独立调用 `_record_usage`；只改一处会留下路径相关的
-    静默丢字段（同类历史缺陷：某条路径漏传 ttft_ms）。故在此按调用次数锁死。
+    本仓库各落盘点独立调用 `_record_usage`（或经由 `_record_usage_once` 漏斗）；
+    只改一处会留下路径相关的静默丢字段（同类历史缺陷：某条路径漏传 ttft_ms）。
+    故在此按提取调用次数锁死为 5。
     """
     src = _source()
-    assert src.count("_cr, _cw = _usage_cache_counts(") == 4, (
-        "四个成功落盘点的 cache 提取接线数量不对（应为 4）"
+    assert src.count("_cr, _cw = _usage_cache_counts(") == 5, (
+        "五个成功落盘点的 cache 提取接线数量不对（应为 5）"
     )
-    assert src.count("cache_read_tokens=_cr") == 4
 
 
 def _helper_slice(src: str) -> str:
