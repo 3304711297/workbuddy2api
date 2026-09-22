@@ -151,3 +151,23 @@ test('Pure unit test: renderBadgeHtml consumes structured ModelBadge color', asy
   assert.match(html, /专属活动/);
 });
 
+test('Pure unit test: renderBadgeHtml prioritizes ModelBadge color for known kinds (night_free, limited_free, etc.)', async () => {
+  const { renderBadgeHtml } = await import('../src/models.js');
+  const mNight = {
+    id: 'test-night',
+    tags: ['双端', '夜间免费'],
+    badges: [{ text: '夜间免费', color: '#1E90FF', kind: 'night_free' }]
+  };
+  const htmlNight = renderBadgeHtml('夜间免费', mNight, true);
+  assert.match(htmlNight, /#1E90FF/, 'night_free 必须优先消费 ModelBadge 下发的自定义合法颜色');
+
+  const mLimited = {
+    id: 'test-ltd',
+    tags: ['双端', '限时免费'],
+    badges: [{ text: '限时免费', color: '#8B5CF6', kind: 'limited_free' }]
+  };
+  const htmlLtd = renderBadgeHtml('限时免费', mLimited, false);
+  assert.match(htmlLtd, /#8B5CF6/, 'limited_free 必须优先消费 ModelBadge 下发的自定义合法颜色');
+});
+
+

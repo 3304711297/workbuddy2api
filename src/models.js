@@ -381,25 +381,52 @@ export function renderBadgeHtml(t, m, isNight = isNightWindowNow()) {
   const color = badgeObj ? badgeObj.color : null;
   const isHex = color && /^#[0-9a-fA-F]{3,8}$/.test(color);
 
+  // 1. 夜间免费
   if (t === '夜间免费' || (badgeObj && badgeObj.kind === 'night_free')) {
-    return isNight
-      ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段 (23:00–08:00) 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(16,185,129,0.18); color: #10b981; border: 1px solid rgba(16,185,129,0.4); font-weight: 600;">🌙 夜间免费中</span>`
-      : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间免费</span>`;
+    const text = isNight ? '🌙 夜间免费中' : '🌙 夜间免费';
+    const title = isNight ? '当前夜间时段 (23:00–08:00) 免积分调用' : '夜间 23:00–08:00 免积分调用';
+    const style = isHex
+      ? `background: ${color}26; color: ${color}; border: 1px solid ${color}66; font-weight: 600;`
+      : isNight
+        ? 'background: rgba(16,185,129,0.18); color: #10b981; border: 1px solid rgba(16,185,129,0.4); font-weight: 600;'
+        : 'background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);';
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="${title}" style="font-size: 10px; margin-right: 3px; cursor: pointer; ${style}">${text}</span>`;
   }
+
+  // 2. 夜间折扣
   if (t === '夜间折扣' || (badgeObj && badgeObj.kind === 'night_discount')) {
-    return isNight
-      ? `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="当前夜间时段享受折扣倍率（实际以扣费为准）" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(245,158,11,0.18); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); font-weight: 600;">🌙 夜间折扣中</span>`
-      : `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="夜间 23:00–08:00 享受夜间折扣" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);">🌙 夜间折扣</span>`;
+    const text = isNight ? '🌙 夜间折扣中' : '🌙 夜间折扣';
+    const title = isNight ? '当前夜间时段享受折扣倍率（实际以扣费为准）' : '夜间 23:00–08:00 享受夜间折扣';
+    const style = isHex
+      ? `background: ${color}26; color: ${color}; border: 1px solid ${color}66; font-weight: 600;`
+      : isNight
+        ? 'background: rgba(245,158,11,0.18); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); font-weight: 600;'
+        : 'background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);';
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="${title}" style="font-size: 10px; margin-right: 3px; cursor: pointer; ${style}">${text}</span>`;
   }
+
+  // 3. 限时免费
   if (t === '限时免费' || (badgeObj && badgeObj.kind === 'limited_free')) {
-    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="全天限时免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">🔥 ${esc(t)}</span>`;
+    const style = isHex
+      ? `background: ${color}26; color: ${color}; border: 1px solid ${color}66; font-weight: 600;`
+      : 'background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;';
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="全天限时免积分调用" style="font-size: 10px; margin-right: 3px; cursor: pointer; ${style}">🔥 ${esc(t)}</span>`;
   }
+
+  // 4. 独家优惠
   if (t === '独家优惠' || (badgeObj && badgeObj.kind === 'exclusive')) {
-    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="专属特惠超低倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;">✨ ${esc(t)}</span>`;
+    const style = isHex
+      ? `background: ${color}26; color: ${color}; border: 1px solid ${color}66; font-weight: 600;`
+      : 'background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); font-weight: 600;';
+    return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="专属特惠超低倍率" style="font-size: 10px; margin-right: 3px; cursor: pointer; ${style}">✨ ${esc(t)}</span>`;
   }
+
+  // 5. 上游下发的其他自定义合法色徽章
   if (isHex) {
     return `<span class="badge clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer; background: ${color}26; color: ${color}; border: 1px solid ${color}66; font-weight: 600;">${esc(t)}</span>`;
   }
+
+  // 6. 普通标签
   return `<span class="badge badge-info clickable-tag" data-filter-tag="${esc(t)}" role="button" tabindex="0" aria-label="按标签筛选：${esc(t)}" title="点击仅筛选 ${esc(t)} 标签模型" style="font-size: 10px; margin-right: 3px; cursor: pointer;">${esc(t)}</span>`;
 }
 
