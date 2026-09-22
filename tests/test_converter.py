@@ -514,6 +514,22 @@ def test_list_models_reports_upstream_context_length(tmp_path, monkeypatch):
     assert "context_length" not in by_id["auto"]
 
 
+def test_dual_source_merge_preserves_higher_priority_default_length():
+    """双源合并回归测试（对抗 ChatGPT 反例）：
+    CodeBuddy 返回包含 defaultLength 的精细窗口，而 WorkBuddy 随后返回仅含 maxInputTokens 的粗粒度窗口。
+    合并时必须保留高优先级的 defaultLength，不得被后者的低优先级回退值覆盖！
+    """
+    # 模拟两源返回值：(m_list, w_map)
+    # 源 1 (CodeBuddy): 采集到 (300000, 3) 优先级 3 = defaultLength
+    # 源 2 (WorkBuddy): 采集到 (1000000, 2) 优先级 2 = maxInputTokens
+    w1 = {"deepseek-v4-flash": (300000, 3)}
+    w2 = {"deepseek-v4-flash": (1000000, 2), "gpt-4o": (128000, 2)}
+    
+    merged = converter._merge_windows_by_priority([w1, w2])
+    assert merged["deepseek-v4-flash"] == 300000, "高优先级 defaultLength 不得被后续低优先级覆盖"
+    assert merged["gpt-4o"] == 128000
+
+
 def test_list_models_manual_window_overrides_upstream(tmp_path, monkeypatch):
     """控制台手动设置的 context_window 优先于上游默认值。"""
     import asyncio

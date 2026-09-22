@@ -36,14 +36,26 @@ def test_find_auth_file_ignores_hidden_and_temp_files(tmp_path, monkeypatch):
     d.mkdir(parents=True)
     hidden = d / ".hidden.info"
     hidden.write_text(json.dumps({"auth": {}}), encoding="utf-8")
-    tmp = d / "workbuddy.info.tmp"
-    tmp.write_text(json.dumps({"auth": {}}), encoding="utf-8")
-    bak = d / "backup.info.bak"
-    bak.write_text(json.dumps({"auth": {}}), encoding="utf-8")
+    underscore = d / "_internal.info"
+    underscore.write_text(json.dumps({"auth": {}}), encoding="utf-8")
+    bak_globbed = d / "backup.info.bak"
+    bak_globbed.write_text(json.dumps({"auth": {}}), encoding="utf-8")
 
     monkeypatch.setattr(converter, "auth_dirs", lambda: [d])
     res = converter.find_auth_file()
     assert res is None, f"不应匹配隐藏或临时文件: {res}"
+
+
+def test_find_auth_file_corrupted_desktop_info_falls_back_or_none(tmp_path, monkeypatch):
+    """当 workbuddy-desktop.info 内容损坏（非有效 JSON 或无 token 键）时，不得被直接采用。"""
+    d = tmp_path / "auth"
+    d.mkdir(parents=True)
+    corrupted_wb = d / "workbuddy-desktop.info"
+    corrupted_wb.write_text("CORRUPTED_NON_JSON_CONTENT", encoding="utf-8")
+
+    monkeypatch.setattr(converter, "auth_dirs", lambda: [d])
+    res = converter.find_auth_file()
+    assert res is None, f"损坏的 desktop.info 不得被返回: {res}"
 
 
 def test_find_auth_file_ignores_non_json_or_invalid_info(tmp_path, monkeypatch):

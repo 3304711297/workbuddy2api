@@ -43,17 +43,20 @@ def responses_request_to_chat(body: dict) -> dict:
 
     关键映射：
     - input -> messages（支持字符串或多类型结构化列表：user, developer, function_call, function_call_output）
-    - instructions -> 置顶 system message
+    - instructions -> 置顶 system message（必须处于 context 第一项，防历史挤占）
     - developer 角色归一为 system
     - max_output_tokens -> max_tokens
     - tools 扁平格式转为 Chat 嵌套格式
+    - previous_response_id -> 拼接历史缓存
     """
     messages: list[dict] = []
 
-    # instructions 置顶为 system 消息
-    instructions = body.get("instructions")
-    if instructions:
-        messages.append({"role": "system", "content": str(instructions)})
+    # previous_response_id 支持：从响应缓存中复原前序轮次的历史上下文（若存在）
+    prev_id = body.get("previous_response_id")
+    if prev_id and isinstance(prev_id, str):
+        cached_history = get_cached_response_messages(prev_id)
+        if cached_history:
+            messages.extend(cached_history)
 
     # input -> messages
     inp = body.get("input", [])
@@ -63,13 +66,10 @@ def responses_request_to_chat(body: dict) -> dict:
     elif isinstance(inp, list):
         messages.extend(_convert_input_items(inp))
 
-    # previous_response_id 支持：从响应缓存中复原历史对话上下文（若存在）
-    prev_id = body.get("previous_response_id")
-    if prev_id and isinstance(prev_id, str):
-        cached_history = get_cached_response_messages(prev_id)
-        if cached_history:
-            # 将此前轮次的完整消息历史置于当前 input 之前
-            messages = list(cached_history) + messages
+    # instructions: 置顶为第一项 system 消息（若已存在历史，当前 instructions 仍必须置于最前）
+    instructions = body.get("instructions")
+    if instructions:
+        messages.insert(0, {"role": "system", "content": str(instructions)})
 
     chat: dict[str, Any] = {"messages": messages, "stream": True}
 
@@ -354,6 +354,7 @@ class ResponsesStreamConverter:
         self._emitted_content_part = False
 
         self._content = ""
+        self._reasoning_content = ""
         self._tool_calls: dict[int, dict] = {}
         self._usage: dict | None = None
         self._failed = False
@@ -403,6 +404,11 @@ class ResponsesStreamConverter:
 
         for choice in chunk.get("choices", []):
             delta = choice.get("delta", {})
+
+            # 思考/推理链增量累积（支持多轮思维链延续）
+            rc = delta.get("reasoning_content") or delta.get("reasoning")
+            if rc and isinstance(rc, str):
+                self._reasoning_content += rc
 
             # 文本内容增量
             content = delta.get("content")
@@ -547,6 +553,30 @@ class ResponsesStreamConverter:
             "response": self._build_response_obj("completed"),
         }))
         return "".join(events)
+
+    def build_assistant_message(self) -> dict:
+        """从流式累积状态还原同构的 assistant message，保留完整的 content、tool_calls 与 reasoning_content。"""
+        msg: dict[str, Any] = {"role": "assistant"}
+        if self._content:
+            msg["content"] = self._content
+        else:
+            msg["content"] = ""
+        if self._reasoning_content:
+            msg["reasoning_content"] = self._reasoning_content
+        if self._tool_calls:
+            tcs = []
+            for idx in sorted(self._tool_calls):
+                tc = self._tool_calls[idx]
+                tcs.append({
+                    "id": tc.get("id") or tc.get("fc_id") or _rand_id("call_"),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name") or "",
+                        "arguments": tc.get("args") or "",
+                    },
+                })
+            msg["tool_calls"] = tcs
+        return msg
 
     def _fmt(self, event_type: str, data: dict) -> str:
         payload = {"type": event_type, "sequence_number": self.sequence_number, **data}

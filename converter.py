@@ -416,32 +416,39 @@ def _set_active_account(target_uid: str) -> bool:
         return False
 
 
+def _is_valid_auth_json(path: Path) -> bool:
+    """校验文件为合法 JSON 且包含凭据特征键（auth 或 accessToken 或 token）。"""
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore").strip()
+        if content.startswith("{") and content.endswith("}"):
+            data = json.loads(content)
+            if isinstance(data, dict) and ("auth" in data or "accessToken" in data or "token" in data):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def find_auth_file() -> Path | None:
     """定位可用凭据 .info 文件。
 
     安全收紧策略（防误读/覆写官方或无关 .info 文件）：
-    1. 优先使用桌面客户端同步维护的 `workbuddy-desktop.info`；
-    2. 严格跳过以 `.` 开头的隐藏文件、临时/备份文件；
+    1. 优先使用桌面客户端同步维护的 `workbuddy-desktop.info`（需校验有效性）；
+    2. 严格跳过以 `.` 或 `_` 开头的隐藏文件，以及结尾为 `.tmp` / `.bak` 的文件；
     3. 校验文件为有效 JSON 且包含凭据特征键（auth 或 accessToken），
        避免将非凭据 dump 或官方内部状态文件当作凭据加载。
     """
     for d in auth_dirs():
         if d.is_dir():
             desktop_info = d / "workbuddy-desktop.info"
-            if desktop_info.is_file():
+            if desktop_info.is_file() and _is_valid_auth_json(desktop_info):
                 return desktop_info
             for f in sorted(d.glob("*.info")):
                 name = f.name
                 if name.startswith((".", "_")) or name.endswith((".tmp", ".bak")):
                     continue
-                try:
-                    content = f.read_text(encoding="utf-8", errors="ignore").strip()
-                    if content.startswith("{") and content.endswith("}"):
-                        data = json.loads(content)
-                        if isinstance(data, dict) and ("auth" in data or "accessToken" in data or "token" in data):
-                            return f
-                except Exception:
-                    continue
+                if _is_valid_auth_json(f):
+                    return f
     return None
 
 
@@ -1202,21 +1209,25 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                                     # 规避将 1M 硬上限误当作默认窗口上报（如 12 个模型误报）；
                                     # 缺失时依次回退 maxInputTokens / maxAllowedSize。
                                     w = None
+                                    prio = 0
                                     cw = m.get("contextWindow")
                                     if isinstance(cw, dict):
                                         dl = cw.get("defaultLength")
                                         if isinstance(dl, int) and not isinstance(dl, bool) and dl > 0:
                                             w = dl
+                                            prio = 3  # contextWindow.defaultLength 优先级最高
                                     if w is None:
                                         mit = m.get("maxInputTokens")
                                         if isinstance(mit, int) and not isinstance(mit, bool) and mit > 0:
                                             w = mit
+                                            prio = 2  # maxInputTokens 优先级次之
                                         else:
                                             mas = m.get("maxAllowedSize")
                                             if isinstance(mas, int) and not isinstance(mas, bool) and mas > 0:
                                                 w = mas
+                                                prio = 1  # maxAllowedSize 兜底优先级
                                     if isinstance(w, int) and w > 0:
-                                        w_map[str(mid)] = w
+                                        w_map[str(mid)] = (w, prio)
                         return m_list, w_map
                     else:
                         _log(f"动态模型拉取降级 [{label}]: models字段缺失或非列表 (type={type(raw_models).__name__})", level="debug")
@@ -1246,7 +1257,7 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
             )
 
         combined_models: list[str] = []
-        combined_windows: dict[str, int] = {}
+        source_window_maps: list[dict] = []
         seen = set()
 
         for res in results:
@@ -1256,7 +1267,9 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                     if mid not in seen:
                         seen.add(mid)
                         combined_models.append(mid)
-                combined_windows.update(w_map)
+                source_window_maps.append(w_map)
+
+        combined_windows = _merge_windows_by_priority(source_window_maps)
 
         if combined_models:
             if combined_windows:
@@ -1271,7 +1284,34 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
     return list((_MODELS_CACHE.get(cache_key) or {}).get("models") or [])
 
 
-# 远程图片下载：DNS 解析结果必须全部落在公网单播地址，否则拒绝（防 SSRF）
+def _merge_windows_by_priority(maps: list[dict]) -> dict[str, int]:
+    """按字段优先级合并多个上游源的模型窗口映射。
+
+    优先级规则：
+    - 3: contextWindow.defaultLength（最精细客户端默认窗口）
+    - 2: maxInputTokens（硬上限）
+    - 1: maxAllowedSize（兜底上限）
+    高优先级源的值绝不允许被后续低优先级的回退值覆盖（防 ChatGPT 反例：双源合并覆盖）。
+    """
+    merged_val: dict[str, int] = {}
+    merged_prio: dict[str, int] = {}
+
+    for w_map in maps:
+        if not isinstance(w_map, dict):
+            continue
+        for mid, item in w_map.items():
+            if isinstance(item, tuple) and len(item) == 2:
+                val, prio = item
+            elif isinstance(item, int):
+                val, prio = item, 1
+            else:
+                continue
+            if isinstance(val, int) and val > 0:
+                cur_prio = merged_prio.get(mid, -1)
+                if prio >= cur_prio:
+                    merged_val[mid] = val
+                    merged_prio[mid] = prio
+    return merged_val
 _BLOCKED_IMAGE_HOSTS = {
     "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
     "metadata", "metadata.google.internal", "metadata.azure.internal",
@@ -4678,11 +4718,15 @@ async def openai_responses(
                 finish_sse = converter_inst.finish()
                 if finish_sse:
                     yield finish_sse.encode("utf-8")
-                if cache_response_messages and hasattr(converter_inst, "resp_id"):
+                # 只有在流正常成功（非 failed、非截断）时，才允许写入 previous_response_id 历史缓存
+                if (
+                    cache_response_messages
+                    and hasattr(converter_inst, "resp_id")
+                    and not getattr(converter_inst, "_failed", False)
+                ):
                     cached_msgs = list(body.get("messages") or [])
-                    final_content = getattr(converter_inst, "_content", "")
-                    if final_content:
-                        cached_msgs.append({"role": "assistant", "content": final_content})
+                    asst_msg = converter_inst.build_assistant_message()
+                    cached_msgs.append(asst_msg)
                     cache_response_messages(converter_inst.resp_id, cached_msgs)
             finally:
                 if hasattr(upstream_gen, "aclose"):
