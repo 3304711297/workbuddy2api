@@ -14,6 +14,26 @@ import time
 from typing import Any
 
 
+_RESPONSE_HISTORY_CACHE: dict[str, list[dict]] = {}
+_MAX_CACHED_RESPONSES = 256
+
+
+def cache_response_messages(resp_id: str, messages: list[dict]) -> None:
+    """缓存某个 response_id 对应的完整消息流历史，用于后续 previous_response_id 延续。"""
+    if not resp_id or not isinstance(resp_id, str) or not messages:
+        return
+    if len(_RESPONSE_HISTORY_CACHE) >= _MAX_CACHED_RESPONSES:
+        # 简单 FIFO 驱逐最旧的 32 条
+        for k in list(_RESPONSE_HISTORY_CACHE.keys())[:32]:
+            _RESPONSE_HISTORY_CACHE.pop(k, None)
+    _RESPONSE_HISTORY_CACHE[resp_id] = [dict(m) for m in messages]
+
+
+def get_cached_response_messages(resp_id: str) -> list[dict] | None:
+    """获取缓存的历史消息列表。"""
+    return _RESPONSE_HISTORY_CACHE.get(resp_id)
+
+
 def _rand_id(prefix: str = "resp_") -> str:
     return prefix + os.urandom(12).hex()
 
@@ -42,6 +62,14 @@ def responses_request_to_chat(body: dict) -> dict:
             messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
         messages.extend(_convert_input_items(inp))
+
+    # previous_response_id 支持：从响应缓存中复原历史对话上下文（若存在）
+    prev_id = body.get("previous_response_id")
+    if prev_id and isinstance(prev_id, str):
+        cached_history = get_cached_response_messages(prev_id)
+        if cached_history:
+            # 将此前轮次的完整消息历史置于当前 input 之前
+            messages = list(cached_history) + messages
 
     chat: dict[str, Any] = {"messages": messages, "stream": True}
 

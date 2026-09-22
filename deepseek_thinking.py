@@ -62,13 +62,43 @@ def inject_thinking(body: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
+def is_thinking_enabled(body: Dict[str, Any]) -> bool:
+    """Check if thinking mode is effectively enabled for a DeepSeek model."""
+    if not isinstance(body, dict):
+        return False
+    model = body.get("model")
+    if not is_deepseek_model(model):
+        return False
+
+    thinking = body.get("thinking")
+    thinking_type = str((thinking.get("type") if isinstance(thinking, dict) else "") or "").strip().lower()
+    if thinking_type in ("disabled", "none", "off"):
+        return False
+
+    effort = str(body.get("reasoning_effort") or "").strip().lower()
+    if effort in ("disable", "disabled", "none", "off"):
+        return False
+
+    chat_kwargs = body.get("chat_template_kwargs") or {}
+    if isinstance(chat_kwargs, dict) and chat_kwargs.get("enable_thinking") is False:
+        return False
+
+    if thinking_type in ("enabled", "true") or bool(effort):
+        return True
+    return False
+
+
 def backfill_reasoning_content(body: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure multi-turn consistency of reasoning_content across all assistant messages.
 
-    If any assistant message in the conversation history contains a non-empty
-    'reasoning' or an existing 'reasoning_content', all assistant messages in
-    the context must carry 'reasoning_content' (defaulting to empty string ""
-    if absent), preventing upstream 11133 model_param_invalid errors.
+    Addresses upstream 11155 & 11133 errors:
+    1. If thinking mode is enabled for DeepSeek (even with zero trace in history),
+       every assistant message must carry reasoning_content (preventing upstream
+       11155: 'the reasoning content from the previous turn must be passed back in thinking mode').
+    2. If any assistant message carries a reasoning trace, all assistant messages
+       must be backfilled regardless of thinking mode.
+    3. Upstream validates len(reasoning) > 0, so reasoning is mirrored with a
+       non-empty placeholder (" ") if absent/empty.
     """
     if not isinstance(body, dict):
         return body
@@ -77,19 +107,33 @@ def backfill_reasoning_content(body: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(messages, list):
         return body
 
-    has_reasoning = any(
-        isinstance(msg, dict)
-        and msg.get("role") == "assistant"
-        and (bool(msg.get("reasoning")) or "reasoning_content" in msg)
-        for msg in messages
-    )
+    has_reasoning = False
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            r = msg.get("reasoning")
+            if isinstance(r, str) and r:
+                has_reasoning = True
+                break
+            if "reasoning_content" in msg:
+                has_reasoning = True
+                break
 
-    if not has_reasoning:
+    thinking_on = is_thinking_enabled(body)
+
+    if not thinking_on and not has_reasoning:
         return body
 
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "assistant":
-            if msg.get("reasoning_content") is None:
-                msg["reasoning_content"] = msg.get("reasoning") or ""
+            rc = msg.get("reasoning_content")
+            if not isinstance(rc, str):
+                legacy = msg.get("reasoning")
+                rc = legacy if isinstance(legacy, str) else ""
+                msg["reasoning_content"] = rc
+
+            # 镜像到 reasoning 且保证非空（通过上游 len(reasoning) > 0 门禁）
+            existing_reasoning = msg.get("reasoning")
+            if not (isinstance(existing_reasoning, str) and existing_reasoning):
+                msg["reasoning"] = rc if rc else " "
 
     return body

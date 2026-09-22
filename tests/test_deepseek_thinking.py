@@ -155,9 +155,11 @@ class TestBackfillReasoningContent:
         assert "reasoning_content" not in res["messages"][0]
         assert "reasoning_content" not in res["messages"][1]
 
-    def test_all_assistant_messages_without_reasoning_unmodified(self):
+    def test_all_assistant_messages_without_reasoning_unmodified_when_thinking_disabled(self):
+        """显式关闭思考且历史无 trace 时，保持原样不回填。"""
         body = {
             "model": "deepseek-v4.1-flash",
+            "thinking": {"type": "disabled"},
             "messages": [
                 {"role": "user", "content": "Hi"},
                 {"role": "assistant", "content": "Hello!"},
@@ -168,6 +170,50 @@ class TestBackfillReasoningContent:
         res = backfill_reasoning_content(body)
         assert "reasoning_content" not in res["messages"][1]
         assert "reasoning_content" not in res["messages"][3]
+
+    def test_backfill_when_thinking_enabled_even_with_zero_trace_history(self):
+        """核心契约（防上游 11155 错误）：
+
+        第三方客户端在多轮对话中未下发 reasoning 字段时（zero-trace history），
+        只要当前开启了 thinking（DeepSeek 思考模式），上游即硬性要求每一个
+        历史 assistant 消息都必须携带 reasoning_content，否则直接报 11155：
+        'the reasoning content from the previous turn must be passed back in thinking mode'。
+        旧实现因 has_reasoning==False 提前退出导致该场景必然报 11155。
+        """
+        body = {
+            "model": "deepseek-v4.1-flash",
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello!"},
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        }
+        res = backfill_reasoning_content(body)
+        # 两个历史 assistant 消息均被补齐 reasoning_content 与非空 reasoning 占位符
+        assert res["messages"][1]["reasoning_content"] == ""
+        assert res["messages"][1]["reasoning"] == " ", "上游校验 len(reasoning)>0，占位符需为非空格"
+        assert res["messages"][3]["reasoning_content"] == ""
+        assert res["messages"][3]["reasoning"] == " "
+
+    def test_backfill_mirrors_non_empty_reasoning_when_trace_exists(self):
+        """当存在真实 reasoning_content 时，reasoning 字段镜像真实内容，无内容时用空格占位。"""
+        body = {
+            "model": "deepseek-v4.1-flash",
+            "messages": [
+                {"role": "user", "content": "Q1"},
+                {"role": "assistant", "content": "A1", "reasoning_content": "real thought"},
+                {"role": "user", "content": "Q2"},
+                {"role": "assistant", "content": "A2"},
+            ],
+        }
+        res = backfill_reasoning_content(body)
+        assert res["messages"][1]["reasoning_content"] == "real thought"
+        assert res["messages"][1]["reasoning"] == "real thought"
+        assert res["messages"][3]["reasoning_content"] == ""
+        assert res["messages"][3]["reasoning"] == " "
 
     def test_backfill_when_one_assistant_has_reasoning_content(self):
         body = {

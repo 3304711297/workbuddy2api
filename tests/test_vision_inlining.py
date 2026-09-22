@@ -117,6 +117,31 @@ async def test_remote_http_image_inlined(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_string_style_image_url_inlined_and_normalized(monkeypatch):
+    """字符串形态的 image_url（非 dict）规整为 dict 并转为 data URI，防上游 11101。
+
+    某些客户端在 Chat Completions 中发送：
+    {"type": "image_url", "image_url": "https://example.com/test.png"}
+    而非标准的 {"type": "image_url", "image_url": {"url": "..."}}。
+    本仓应同时兼容两种形态，将其归一为 {"url": data_uri}。
+    """
+    _install_stream_stub(monkeypatch, FakeStreamResponse())
+
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "describe string url"},
+            {"type": "image_url", "image_url": "https://example.com/test.png"},
+            {"type": "image_url", "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="},
+        ]}
+    ]
+    processed = await _inline_remote_images(messages)
+    p1 = processed[0]["content"][1]["image_url"]
+    p2 = processed[0]["content"][2]["image_url"]
+    assert isinstance(p1, dict) and p1["url"].startswith("data:image/png;base64,")
+    assert isinstance(p2, dict) and p2["url"] == "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+
+
+@pytest.mark.anyio
 async def test_responses_endpoint_e2e_inlines_input_image(monkeypatch):
     """端到端验证 /v1/responses 接收 input_image 能够自动转换为 data URI。"""
     _install_stream_stub(monkeypatch, FakeStreamResponse())

@@ -16,7 +16,45 @@ from responses_compat import (
 )
 
 
-def test_responses_request_to_chat_simple_str_input():
+def test_responses_previous_response_id_continuation():
+    """测试 previous_response_id 能够成功拼接此前轮次的历史消息。"""
+    from responses_compat import cache_response_messages, responses_request_to_chat
+
+    # 1. 模拟轮次 1 产生并缓存的消息历史
+    round1_msgs = [
+        {"role": "user", "content": "hello round 1"},
+        {"role": "assistant", "content": "hi, I am assistant"},
+    ]
+    cache_response_messages("resp_round1_abc", round1_msgs)
+
+    # 2. 轮次 2 请求携带 previous_response_id="resp_round1_abc"
+    req_round2 = {
+        "model": "deepseek-chat",
+        "previous_response_id": "resp_round1_abc",
+        "input": "continue round 2",
+    }
+    chat = responses_request_to_chat(req_round2)
+    msgs = chat["messages"]
+
+    # 验证拼接：前两条为 round 1 历史，第三条为当前 input
+    assert len(msgs) == 3
+    assert msgs[0] == {"role": "user", "content": "hello round 1"}
+    assert msgs[1] == {"role": "assistant", "content": "hi, I am assistant"}
+    assert msgs[2] == {"role": "user", "content": "continue round 2"}
+
+
+def test_responses_unknown_previous_response_id_graceful():
+    """当 previous_response_id 不存在或过期时，优雅跳过并不破坏当前请求。"""
+    from responses_compat import responses_request_to_chat
+
+    req = {
+        "model": "deepseek-chat",
+        "previous_response_id": "resp_non_existent",
+        "input": "just my message",
+    }
+    chat = responses_request_to_chat(req)
+    assert len(chat["messages"]) == 1
+    assert chat["messages"][0] == {"role": "user", "content": "just my message"}
     """测试简单字符串 input 转换。"""
     body = {
         "model": "glm-5.2",

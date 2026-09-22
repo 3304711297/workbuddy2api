@@ -70,11 +70,13 @@ try:
         responses_request_to_chat,
         ResponsesStreamConverter,
         chat_response_to_responses,
+        cache_response_messages,
     )
 except ImportError:
     responses_request_to_chat = None
     ResponsesStreamConverter = None
     chat_response_to_responses = None
+    cache_response_messages = None
 
 try:
     from deepseek_thinking import inject_thinking, backfill_reasoning_content
@@ -415,14 +417,31 @@ def _set_active_account(target_uid: str) -> bool:
 
 
 def find_auth_file() -> Path | None:
-    # 优先使用桌面客户端同步维护的 workbuddy-desktop.info
+    """定位可用凭据 .info 文件。
+
+    安全收紧策略（防误读/覆写官方或无关 .info 文件）：
+    1. 优先使用桌面客户端同步维护的 `workbuddy-desktop.info`；
+    2. 严格跳过以 `.` 开头的隐藏文件、临时/备份文件；
+    3. 校验文件为有效 JSON 且包含凭据特征键（auth 或 accessToken），
+       避免将非凭据 dump 或官方内部状态文件当作凭据加载。
+    """
     for d in auth_dirs():
         if d.is_dir():
             desktop_info = d / "workbuddy-desktop.info"
             if desktop_info.is_file():
                 return desktop_info
             for f in sorted(d.glob("*.info")):
-                return f
+                name = f.name
+                if name.startswith((".", "_")) or name.endswith((".tmp", ".bak")):
+                    continue
+                try:
+                    content = f.read_text(encoding="utf-8", errors="ignore").strip()
+                    if content.startswith("{") and content.endswith("}"):
+                        data = json.loads(content)
+                        if isinstance(data, dict) and ("auth" in data or "accessToken" in data or "token" in data):
+                            return f
+                except Exception:
+                    continue
     return None
 
 
@@ -1179,9 +1198,23 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                                 mid = m.get("id")
                                 if mid and mid != "hunyuan-image-v3.0":
                                     m_list.append(str(mid))
-                                    w = m.get("maxInputTokens")
-                                    if not isinstance(w, int):
-                                        w = m.get("maxAllowedSize")
+                                    # 默认窗口提取：优先 contextWindow.defaultLength（客户端默认窗口），
+                                    # 规避将 1M 硬上限误当作默认窗口上报（如 12 个模型误报）；
+                                    # 缺失时依次回退 maxInputTokens / maxAllowedSize。
+                                    w = None
+                                    cw = m.get("contextWindow")
+                                    if isinstance(cw, dict):
+                                        dl = cw.get("defaultLength")
+                                        if isinstance(dl, int) and not isinstance(dl, bool) and dl > 0:
+                                            w = dl
+                                    if w is None:
+                                        mit = m.get("maxInputTokens")
+                                        if isinstance(mit, int) and not isinstance(mit, bool) and mit > 0:
+                                            w = mit
+                                        else:
+                                            mas = m.get("maxAllowedSize")
+                                            if isinstance(mas, int) and not isinstance(mas, bool) and mas > 0:
+                                                w = mas
                                     if isinstance(w, int) and w > 0:
                                         w_map[str(mid)] = w
                         return m_list, w_map
@@ -1461,8 +1494,11 @@ async def _inline_remote_images(messages: list) -> list:
                         u = iu["url"]
                         if u.startswith(("http://", "https://")):
                             iu["url"] = await _url_to_data_uri(u)
-                    elif isinstance(iu, str) and iu.startswith(("http://", "https://")):
-                        part["image_url"] = {"url": await _url_to_data_uri(iu)}
+                    elif isinstance(iu, str):
+                        if iu.startswith(("http://", "https://")):
+                            part["image_url"] = {"url": await _url_to_data_uri(iu)}
+                        else:
+                            part["image_url"] = {"url": iu}
     return messages
 
 
@@ -4642,6 +4678,12 @@ async def openai_responses(
                 finish_sse = converter_inst.finish()
                 if finish_sse:
                     yield finish_sse.encode("utf-8")
+                if cache_response_messages and hasattr(converter_inst, "resp_id"):
+                    cached_msgs = list(body.get("messages") or [])
+                    final_content = getattr(converter_inst, "_content", "")
+                    if final_content:
+                        cached_msgs.append({"role": "assistant", "content": final_content})
+                    cache_response_messages(converter_inst.resp_id, cached_msgs)
             finally:
                 if hasattr(upstream_gen, "aclose"):
                     try:
@@ -4738,6 +4780,13 @@ async def openai_responses(
     _record_usage(actual_model, True, t0, input_tokens=_u.get("prompt_tokens"), output_tokens=_u.get("completion_tokens"), ttft_ms=ttft_ms, requested_model=model_name, fallback_reason=fallback_reason, cache_read_tokens=_cr, cache_write_tokens=_cw, snapshot_resp=_snapshot_excerpt(collected))
 
     responses_obj = chat_response_to_responses(collected, model=model_name)
+    if cache_response_messages and isinstance(responses_obj, dict):
+        resp_id = responses_obj.get("id")
+        out_msg = (collected.get("choices") or [{}])[0].get("message") or {}
+        curr_history = list(body.get("messages") or [])
+        if out_msg:
+            curr_history.append(out_msg)
+        cache_response_messages(resp_id, curr_history)
     final_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else None
     return JSONResponse(content=responses_obj, headers=final_hdr)
 

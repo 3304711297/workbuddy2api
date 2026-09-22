@@ -495,17 +495,20 @@ def _setup_models_env(tmp_path, monkeypatch, *, settings=None, upstream=None, to
 
 
 def test_list_models_reports_upstream_context_length(tmp_path, monkeypatch):
-    """上游窗口字段（maxInputTokens / maxAllowedSize）应作为顶层 context_length 上报；
-    未知窗口的模型不携带该字段（缺失时客户端自行回退）。"""
+    """上游窗口字段（contextWindow.defaultLength 优先，回退 maxInputTokens / maxAllowedSize）
+    应作为顶层 context_length 上报；未知窗口的模型不携带该字段（缺失时客户端自行回退）。"""
     import asyncio
     _setup_models_env(tmp_path, monkeypatch, upstream=[
-        {"id": "deepseek-v4.1-flash", "maxInputTokens": 1000000},
+        {"id": "deepseek-v4.1-flash", "maxInputTokens": 1000000, "contextWindow": {"defaultLength": 300000, "maxLength": 1000000}},
+        {"id": "legacy-fallback-model", "maxInputTokens": 1000000},
         {"id": "legacy-alias-model", "maxAllowedSize": 200000},
         {"id": "no-window-model"},
     ])
     res = asyncio.run(converter.list_models())
     by_id = {item["id"]: item for item in res["data"]}
-    assert by_id["deepseek-v4.1-flash"]["context_length"] == 1000000
+    # contextWindow.defaultLength 优先：规避将 1M 硬上限误当作默认窗口上报
+    assert by_id["deepseek-v4.1-flash"]["context_length"] == 300000
+    assert by_id["legacy-fallback-model"]["context_length"] == 1000000
     assert by_id["legacy-alias-model"]["context_length"] == 200000
     assert "context_length" not in by_id["no-window-model"]
     assert "context_length" not in by_id["auto"]
