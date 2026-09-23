@@ -43,10 +43,10 @@
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "a0b50880",
-      "last_synced_sha": "a0b5088053596994a1ff92533912b2c7071802c6",
+      "last_synced_commit": "dbd7c680",
+      "last_synced_sha": "dbd7c680db45d27b9c9fec7b3e0c0d1e57c6ba69",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 ab9a162b→25254417：改动涉及 14018 嵌套业务码解析、image_url 字符串兼容、ModelTrialBanner 试用模型以及 Sequential_Tasks 小程序成长任务。本仓此前已独立落地 14018 与 image_url 归一化；静态清单本就已内置试用模型，任务自动化属外部脚本层，未采纳。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 a0b50880→dbd7c680：2b0eedda 为模型倍率列显示优惠生效价（牌价+折扣+标签+时段说明，对应本仓库 5958e72 已完全覆盖并经 6990cfa 加固），dbd7c680 为版本发布 chore，无未吸收机制。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",

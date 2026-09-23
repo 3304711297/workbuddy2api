@@ -83,3 +83,8 @@ jobs:
           else
             echo "无待跟进项，也无未关闭 Issue，跳过。"
           fi
+
+      - name: Update radar baseline commit
+        if: steps.check.outputs.has_updates == 'false' && steps.check.outputs.has_query_failures == 'false'
+        run: echo "Radar baseline is clean."
+
