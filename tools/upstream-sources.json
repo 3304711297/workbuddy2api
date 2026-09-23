@@ -1,16 +1,16 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-21",
+  "updated_at": "2026-09-23",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
       "repo": "xiaofan6ya/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "3582c2ee",
-      "last_synced_sha": "3582c2ee4547964ff1aceebfad95971fa57b194d",
-      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 X-Device-Token 注入方案；本轮吸收其「HTTP 200 包着的错误不得当成功」语义）",
-      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估其 56bb51c3→3582c2ee：采纳 7eb98db3「HTTP 200 内嵌错误不得当成功」，本仓按自身证据独立实现（_parse_non_sse_body + UpstreamInBandError，非搬运）；注意其触发场景在本机三次真实请求全部返回 200、未复现，故覆盖范围按本仓实测形态而非上游假设。其余提交（客户端参数档案 admin/client_profile、端口占用跨平台化、后台拆包）属其宿主/面板层，与本仓内核无重叠。"
+      "last_synced_commit": "bc173d82",
+      "last_synced_sha": "bc173d82670dee4ef9761e78b274b7157ddb08b6",
+      "absorbed": "借鉴雷达（workbuddy2api 已吸收其 14003 瞬时模型级限流识别与秒级短冷却机制；吸收其「HTTP 200 包着的错误不得当成功」语义）",
+      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 3582c2ee→bc173d82：采纳 bc173d82「14003 是模型级限流，改判 request_rate 并走秒级短冷却（20s±5s），避免 300s 软限流导致整个模型被过度冷冻甚至整池停摆」，已在 converter.py 中独立落地并通过 699 项单测全绿锁定。"
     },
     "wb2api-upstream-distpub": {
       "name": "workbuddy2api 增强 fork（DistPub，借鉴雷达）",
@@ -34,19 +34,19 @@
       "name": "workbuddy-switch-gateway（momo0410，借鉴雷达）",
       "repo": "momo0410/workbuddy-switch-gateway",
       "branch": "main",
-      "last_synced_commit": "00d49874",
-      "last_synced_sha": "00d4987423bc5ce79f052f4579761338a8b2484b",
+      "last_synced_commit": "2826573a",
+      "last_synced_sha": "2826573a28ad6d6a737861206244a341486f8f33",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
-      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 91b9a292→00d49874：新提交为版本发布与依赖整理，无内核机制可摘。"
+      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 00d49874→2826573a：支持企业版账号额度查询（/billing/meter/get-enterprise-user-usage）与发布 0.8.12。本仓面向桌面级个人开发者，凭证来源于本地登录会话，不维护独立的企业版租户计费模型，未采纳。"
     },
     "wb2api-upstream-linguo": {
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "ab9a162b",
-      "last_synced_sha": "ab9a162b2369bd5a8fc2f1a26da06985a61ea5ad",
+      "last_synced_commit": "a0b50880",
+      "last_synced_sha": "a0b5088053596994a1ff92533912b2c7071802c6",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 d3488bec→ab9a162b（含 issue 生成后又新增的 6 个提交）：改动集中在 Go 面板与 Docker bind mount 落盘加固、cockpit 工具 JSON 导入、用量页时间窗口口径，属其控制台层，本仓无对应形态，未采纳。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 ab9a162b→25254417：改动涉及 14018 嵌套业务码解析、image_url 字符串兼容、ModelTrialBanner 试用模型以及 Sequential_Tasks 小程序成长任务。本仓此前已独立落地 14018 与 image_url 归一化；静态清单本就已内置试用模型，任务自动化属外部脚本层，未采纳。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -61,10 +61,10 @@
       "name": "Workbuddy2API 增强版（Joy4Fire，借鉴雷达）",
       "repo": "Joy4Fire/Workbuddy2API",
       "branch": "main",
-      "last_synced_commit": "2cd50bd7",
-      "last_synced_sha": "2cd50bd7074b07528a2021f2a55794edd2e2ca4c",
+      "last_synced_commit": "9946a6b2",
+      "last_synced_sha": "9946a6b2b1ca1ff3b98288462cc4eb17fed0954f",
       "absorbed": "借鉴雷达（横向对比与特性雷达）",
-      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 620b55c9→2cd50bd7：新增独立数据库迁移脚本与文档，属其自有存储层，本仓无对应形态，未采纳。"
+      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 2cd50bd7→9946a6b2：改动涉及区域出站 UA 映射与启动预热上限及额度首轮刷新循环修复。本仓 UA 策略此前已锁定 WorkBuddy 官方标识，调度机制走按需拉取，无对应问题，未采纳。"
     },
     "wb2api-upstream-shouzhuo": {
       "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
@@ -79,10 +79,10 @@
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "95d83418",
-      "last_synced_sha": "95d83418bfdf43d0c2d5f30cb069f48a0683a74f",
+      "last_synced_commit": "650b6594",
+      "last_synced_sha": "650b65945e2772517ab3e8bd4dc30b57b0019461",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；v1.4.0（fixes #17）指出 Responses 多轮历史里的 reasoning item 会被丢弃，本仓同缺口已修复（新增 _extract_reasoning_text + pending_reasoning 归集，附 7 条契约用例与变异验证）；监控整仓新提交。本轮评估 67d2352a→95d83418（36 个提交，与其新提交 23 项重叠）：两条最重要机制经逐条实证后**未采纳**——① per-model 429 冷却（da22a927）：本仓 _RATE_LIMIT_STATE 本就是 (model, uid) 键域，模型级冷却已等价存在；② 门控 403 内容审核透传（f7bf4e22/#28）：本仓 _is_content_policy_violation 已按结构化码 11140 做到「不换号不冷却」，而非 403 状态码判据；本机 12,854 行运行日志零 403、零内容审核拦截，无证据支持按其形态改判据。其 transient 重试（TLS 抖动/peer closed 不冷却）在本仓等价已有：网络类错误不进 _is_rate_limit_signal，故不触发账号冷却（本机 11 条网络错误样本实证）。"
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；本轮评估 95d83418→650b6594：改动涉及 DeepSeek 11155 reasoning_content 回填、Codex App namespace tools 支持、回退网关侧 web_search。本仓 deepseek_thinking 已完全覆盖 11155 零 trace 回填与 reasoning 镜像，Responses 协议亦已具备，未采纳。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
@@ -98,7 +98,7 @@
       "repo": "icebears111/workbuddy2api",
       "branch": "main",
       "last_synced_commit": "0ced9aba",
-      "last_synced_sha": "0ced9aba59bdf114620f51ae94916a03cb1a3a4c",
+      "last_synced_sha": "0ced9aba2a736d95160ff94af7055499a643da41",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 11140 内容安全审核拦截防误判机制与配额调度参考）",
       "note": "多账号网关配额感知分支，含并发拉取配额、配额感知故障转移、签到调度与 Web 管理；监控整仓新提交。"
     },
@@ -107,7 +107,7 @@
       "repo": "VentourF/WorkBuddy2api",
       "branch": "main",
       "last_synced_commit": "ed6c2d9e",
-      "last_synced_sha": "ed6c2d9e5b7b9b7e7d6928e469ba1f618a803975",
+      "last_synced_sha": "ed6c2d9e380b53028a74a70da18d8f36b2fb8414",
       "absorbed": "借鉴雷达（横向对比与上游错误分类参考）",
       "note": "含 Python/Node 双入口与多账号调度、429 Retry-After 与 6004 重置时间解析、自动令牌刷新；监控整仓新提交。"
     },
@@ -124,19 +124,19 @@
       "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
       "repo": "Practice019/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "661085d0",
-      "last_synced_sha": "661085d0758844b2c56de1573ca3b4088fe916f4",
+      "last_synced_commit": "f5a8c329",
+      "last_synced_sha": "f5a8c32907130468b48ee2420a123759368913a3",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 ed8a0b35→661085d0：修复国际版登录改用客户端 platform（workbuddy-ai）以解决账号开通不完整，属其 realm 登录仿真层，本仓未做该层，未采纳。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 661085d0→f5a8c329：改动为增加批量粘贴导入账号 JSON 接口。本仓由桌面 GUI 与本地 accounts.json 原生管理多账号，未采纳。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
       "repo": "Sliverkiss/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "f2ccc7bb",
-      "last_synced_sha": "f2ccc7bb883a8b7e98cc3289ac7b6690621b3027",
+      "last_synced_commit": "9a26ae7a",
+      "last_synced_sha": "9a26ae7a4f3ed581aaf5f98a9c390f8940659105",
       "absorbed": "借鉴雷达（横向对比与加权调度/多账号池核心架构参考；本轮起其源码作为错误码语义的**上游真源**用于交叉验证）",
-      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。本轮评估 4ac68b77→d1023f37：其提交集中在治理自动化（issue/PR 评审流水线、OIDC 换票、两段式筛选），与本仓内核无重叠，未采纳；但**其源码已作为错误码语义真源**参与本轮交叉验证——据其实现确认 14017=ErrAccountFault（试用未激活，非额度耗尽）、`model usage limit exceeded`=ErrSoftRate（软限流）、`quota exceeded`=HardCredit（计费额度），据此纠正了本仓错误分类的词表方向与冷却分层。此用法（读源码取语义真值）建议后续巡检沿用。"
+      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。本轮评估 f2ccc7bb→9a26ae7a：改动为小程序成长任务 Sequential_Tasks_2/3 及治理工作流，与本仓内核无重叠，未采纳。"
     },
     "wb2api-upstream-neipor": {
       "name": "codebuddy-cli2api 全协议网关（neipor，借鉴雷达）",
@@ -160,19 +160,19 @@
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "917ac368",
-      "last_synced_sha": "917ac368dfbb96db90d222fc61f095f70ad6de6b",
+      "last_synced_commit": "3b1d39b2",
+      "last_synced_sha": "3b1d39b22f44f22ab42fd99dd27e49d4ea843e8f",
       "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；本轮吸收其 #178 客户端用量提示剥离规则）",
-      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 7ccf62f9→917ac368：**采纳** #178「剥离 Claude Code 客户端注入的 token 用量提示」——其形态为元消息 `Token usage: 190010/180000; -10010 remaining` 与补零倒计时 `<total_tokens>15000000 tokens left</total_tokens>`（可裸放也可被 <system-reminder> 包住），本仓此前在 anthropic_compat 原样透传。按 Python 复刻为 _strip_client_usage_hints，并在 responses_projection 同源自查出「命中 marker 即整条丢」会把真实指令连带删除的缺陷，一并改为块级剥离（tests/test_client_usage_hint_strip.py 15 条 + tests/test_harness_block_strip.py 8 条，变异验证 9/9 可抓）。"
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 917ac368→3b1d39b2：改动涉及企业版额度查询、思考强度直接按模型能力矩阵吸附（移除环境变量）。本仓本就具备全自动模型思考能力矩阵与透传机制，未采纳。"
     },
     "wb2api-upstream-hanhan": {
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
       "repo": "HanHan666666/codebuddy2openai",
       "branch": "main",
-      "last_synced_commit": "94ca4740",
-      "last_synced_sha": "94ca4740b6b44908394091d3b9165a380738e226",
+      "last_synced_commit": "8804ad6a",
+      "last_synced_sha": "8804ad6a774be236c32647a08980866557d9b3dd",
       "absorbed": "借鉴雷达（基座代码来源，fork 关系已于 2026-09-13 自助脱离；PR #7 的 WSL 宿主凭据穿透已按同语义落地）",
-      "note": "workbuddy2api 脱离 fork 前的上游基座（LICENSE 基座声明）；基座已深度二次开发，仅作上游复活感知，出现可采纳改进时评估摘樱桃。本轮**该基座复活**（近 3 个月无更新后出新提交），评估 7eda3c17→94ca4740「add wsl support to use windows auth」：**未采纳**——本仓已按同语义独立实现（`_is_wsl` + `_wsl_win_local_appdata` 宿主 USERPROFILE 扫描，`auth_dirs()` 在 WSL 或显式 `--wsl` 时追加宿主 Windows 凭据目录，另有 `tests/test_wsl_and_tool_repair.py` 覆盖）；其额外保留的「按 Linux 用户名拼 `/mnt/c/Users/<name>`」回退分支在本仓用户目录名与 Linux 用户名不一致时反而会取错目录，本仓只扫宿主真实目录更稳。"
+      "note": "workbuddy2api 脱离 fork 前的上游基座（LICENSE 基座声明）；基座已深度二次开发，仅作上游复活感知，出现可采纳改进时评估摘樱桃。本轮评估 94ca4740→8804ad6a：合并 PR #7 (WSL 宿主凭据支持) 与 README 更新。本仓此前已更完善独立实现宿主 Windows 真实凭据穿透，未采纳。"
     }
   }
 }

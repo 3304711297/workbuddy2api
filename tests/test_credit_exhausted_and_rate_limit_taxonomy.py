@@ -550,3 +550,133 @@ def test_request_id_hex_fragment_does_not_trigger_cooldown():
     """历史踩坑回归：requestId 里的 `4290-6004` 片段不得被当成限流。"""
     raw = '{"code":50001,"msg":"internal","requestId":"4290-6004-abcd"}'
     assert converter._is_rate_limit_signal(500, raw) is False
+
+
+def test_14003_is_recognized_as_rate_limit_with_seconds_cooldown():
+    """14003（RateLimitError / quota_request_limit）必须识别为限流并走秒级短冷却。
+
+    借鉴 xiaofan6ya/workbuddy2api 事故复盘（commit bc173d82）：
+    - 官方 UI：'当前模型请求繁忙，请切换模型或稍后重试'，属模型级瞬时繁忙而非账号额度耗尽；
+    - 必须被 _is_rate_limit_signal 正确识别（进入限流码族）；
+    - 冷却时间走秒级（15s~25s，默认 20s±5s），避免落入 300s 软限流或 90000s 日级额度导致整池停摆；
+    - kind 必须为 request_rate，code 必须为 14003。
+    """
+    raw = '{"code":14003,"msg":"too many requests","displayMsg":{"zh":"请求过于频繁，请稍后重试。"}}'
+    assert converter._is_rate_limit_signal(429, raw) is True
+    assert converter._is_rate_limit_signal(400, raw) is True
+    assert converter._is_credit_exhausted_signal(429, raw) is False
+    assert converter._is_account_fault_signal(429, raw) is False
+
+    converter._RATE_LIMIT_STATE.clear()
+    converter._ACCOUNT_COOLDOWNS.clear()
+    converter._record_rate_limit("deepseek-v4.1-flash", raw, uid="u-test", status_code=429)
+    entry = converter._RATE_LIMIT_STATE.get("deepseek-v4.1-flash")
+    assert entry is not None
+    assert entry["code"] == 14003
+    assert entry["kind"] == "request_rate"
+    remaining_s = (entry["resetAtMs"] - int(time.time() * 1000)) / 1000.0
+    assert 10.0 <= remaining_s <= 35.0, f"14003 冷却应为秒级短窗，实际为 {remaining_s}s"
+
+
+def test_cooldown_monotonic_deadline_prevents_concurrent_shortening():
+    """ChatGPT 对拍 P1-2 契约：冷却截止时间单调递增，并发观测绝不能把冷却写短。
+    并发下请求 A 生成 25s 冷却，若后到的请求 B 生成 15s 冷却，
+    不得将 A 已经建立的更长冷却覆盖为更短时间。
+    """
+    converter._RATE_LIMIT_STATE.clear()
+    converter._ACCOUNT_COOLDOWNS.clear()
+
+    # 1. 第一次记录：设定一个较长的重置时刻（UTC+8 时间字符串）
+    t_long_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + 60))
+    raw_long = f'{{"code":14003,"msg":"将在 {t_long_str} UTC+8 重置"}}'
+    converter._record_rate_limit("deepseek-v4.1-flash", raw_long, uid="u-test", status_code=429)
+    first_entry = converter._ACCOUNT_COOLDOWNS.get(("u-test", "deepseek-v4.1-flash"))
+    assert first_entry is not None
+    first_reset = first_entry["resetAtMs"]
+    first_mono = first_entry["monotonic_until"]
+
+    # 2. 第二次记录：并发迟到的观察带了更短的重置时间
+    t_short_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + 10))
+    raw_short = f'{{"code":14003,"msg":"将在 {t_short_str} UTC+8 重置"}}'
+    converter._record_rate_limit("deepseek-v4.1-flash", raw_short, uid="u-test", status_code=429)
+    second_entry = converter._ACCOUNT_COOLDOWNS.get(("u-test", "deepseek-v4.1-flash"))
+    assert second_entry is not None
+
+    # 断言：必须单调保留更长截止时间，不得被写短
+    assert second_entry["resetAtMs"] == first_reset, "resetAtMs 不得被后到更短的观测覆盖"
+    assert second_entry["monotonic_until"] >= first_mono, "monotonic_until 不得被缩短"
+
+    converter._RATE_LIMIT_STATE.clear()
+    converter._ACCOUNT_COOLDOWNS.clear()
+
+
+
+
+
+def test_14003_has_independent_lightweight_retry_budget():
+    """ChatGPT 对拍 P1-4 契约：14003 模型繁忙具有独立轻量重试预算（上限 1 次），
+    即使账号池有 5 个账号，遇到 14003 也绝不进行 5 次重试放大风暴。
+    """
+    rotator = converter.AccountRotator()
+    rotator.mode = "failover"
+    # mock 5 个账号
+    rotator.get_all_accounts = lambda: [(f"u{i}", {}) for i in range(5)]
+    rotator.get_candidate_uids_tiered = lambda m: [f"u{i}" for i in range(5)]
+    rotator.cred_mgr = type("CM", (), {
+        "switch_active_account": lambda s, u: None,
+        "get_headers_for_uid": lambda s, u: {},
+        "get_headers": lambda s: {}
+    })()
+
+    # 普通账号故障或无错误码：允许最多 5 次换号重试
+    assert rotator.get_retry_budget("deepseek-v4.1-flash") == 5
+
+    # 14003 / _REQUEST_RATE_CODES：严格限制为 1 次重试预算
+    assert rotator.get_retry_budget("deepseek-v4.1-flash", error_code=14003) == 1
+    assert rotator.get_retry_budget("deepseek-v4.1-flash", error_code="14003") == 1
+
+    # request-local 动态阻断验证：
+    # 第一次 14003 失败（attempt=0），允许切号 1 次
+    res1 = rotator.record_failure_and_failover("u0", "deepseek-v4.1-flash", 429, '{"code":14003}', attempt=0)
+    assert res1 is not None, "第 1 次 14003 允许尝试切号"
+
+    # 第二次 14003 失败（attempt=1），严格拒绝切号（达到上限 1 次），切断重试放大
+    res2 = rotator.record_failure_and_failover("u1", "deepseek-v4.1-flash", 429, '{"code":14003}', attempt=1)
+    assert res2 is None, "第 2 次 14003 必须拒绝切号，严格限制最多重试 1 次"
+
+
+
+def test_14003_display_msg_zh_and_http_200_recognized():
+    """ChatGPT 对拍 P1-5 契约：displayMsg.zh 语义识别与 HTTP 200/信封识别。
+    即使 msg 为空或 code 不在顶层，displayMsg.zh 包含'模型请求繁忙'必须被精准识别为限流。
+    """
+    raw_display = '{"code":14003,"msg":"","displayMsg":{"zh":"当前模型请求繁忙，请切换模型或稍后重试。"}}'
+    assert converter._is_rate_limit_signal(200, raw_display) is True, "HTTP 200 信封下的 14003 必须识别"
+    assert converter._is_rate_limit_signal(None, raw_display) is True
+
+    # msg 缺省仅有 displayMsg 文本
+    raw_only_display = '{"msg":"","displayMsg":{"zh":"当前模型请求繁忙，请切换模型或稍后重试。"}}'
+    assert converter._is_rate_limit_signal(200, raw_only_display) is True
+
+
+def test_upstream_in_band_error_raw_payload_preserved():
+    """ChatGPT 对拍 P1-5 闭环验证：UpstreamInBandError 抛出时保留原始 raw body，
+    在 HTTPError 异常捕获中优先提取 e.raw，确保 code: 14003 强类型结构化判定不失真。
+    """
+    raw_200 = '{"code":14003,"msg":"too many requests"}'
+    err = converter.UpstreamInBandError(raw_200, 200)
+
+    # 验证 e.raw 完好保存
+    assert getattr(err, "raw", None) == raw_200
+
+    # 验证提取层消费
+    extracted = getattr(err, "raw", None) or str(err)
+    assert extracted == raw_200
+    assert converter._is_rate_limit_signal(200, extracted) is True
+    import json
+    assert converter._authoritative_code(json.loads(extracted)) == "14003"
+
+
+
+
+

@@ -459,13 +459,15 @@ function renderModelsTable(list, now = new Date()) {
       ? `<button class="cell-edit" id="effort-cell-${esc(m.id)}" data-edit-model="${esc(m.id)}" title="点击修改思考强度">${esc(effortText)}</button>`
       : '<span class="muted" style="font-size: 11px;">不支持思考</span>';
 
-    // 上下文限制：行内只读展示，点击弹出编辑弹窗
-    const defaultCtx = m.max_input_tokens;
-    const currentCtx = m.custom_context_window || defaultCtx;
+    // 上下文限制：只读展示最高可用上下文，移除点击编辑修改入口
+    const defaultCtx = m.max_input_tokens || 0;
+    const ctxText = defaultCtx > 0
+      ? `${esc(defaultCtx.toLocaleString())} <small class="muted">(${Math.round(defaultCtx / 1000)}k)</small>`
+      : '<span class="muted">—</span>';
     const ctxCell = `
-      <button class="cell-edit" id="ctx-cell-${esc(m.id)}" data-edit-model="${esc(m.id)}" title="点击修改上下文窗口">
-        ${esc(currentCtx)} <small class="muted">/ ${Math.round(defaultCtx/1000)}k</small>
-      </button>
+      <span class="mono" id="ctx-cell-${esc(m.id)}" style="font-size: 12px;" title="最高可用上下文窗口: ${defaultCtx ? esc(defaultCtx.toLocaleString()) + ' tokens' : '未知'}">
+        ${ctxText}
+      </span>
     `;
 
     // 标签：支持点击快速按标签筛选；不可用模型附「需授权」徽章；精细化渲染彩色徽章
@@ -526,16 +528,12 @@ function renderFallbackModels() {
 
 if (typeof window !== 'undefined') {
   window.saveModelConfig = async (modelId) => {
-    const ctxInput = document.getElementById(`ctx-${modelId}`);
     const effortSelect = document.getElementById(`effort-${modelId}`);
-    
-    const ctxVal = ctxInput ? parseInt(ctxInput.value, 10) : null;
     const effortVal = effortSelect ? effortSelect.value : null;
 
     try {
       const res = await invokeTauri('model_save_config', {
         modelId,
-        contextWindow: ctxVal && !isNaN(ctxVal) ? ctxVal : null,
         reasoningEffort: effortVal && effortVal !== 'default' ? effortVal : null
       });
       showToast(res, 'success');
@@ -548,14 +546,8 @@ if (typeof window !== 'undefined') {
 }
 
 function updateModelCells(modelId) {
-  const ctxInput = document.getElementById(`ctx-${modelId}`);
   const effortSelect = document.getElementById(`effort-${modelId}`);
   const m = currentModelsList.find((x) => x.id === modelId);
-  const ctxCell = document.getElementById(`ctx-cell-${modelId}`);
-  if (ctxCell && ctxInput && m) {
-    ctxCell.innerHTML = `${esc(ctxInput.value)} <small class="muted">/ ${Math.round(m.max_input_tokens / 1000)}k</small>`;
-    m.custom_context_window = parseInt(ctxInput.value, 10);
-  }
   const eCell = document.getElementById(`effort-cell-${modelId}`);
   if (eCell && effortSelect && m) {
     const v = effortSelect.value;
@@ -570,18 +562,7 @@ if (typeof window !== 'undefined') {
   window.openModelEdit = (modelId) => {
     const m = currentModelsList.find((x) => x.id === modelId);
     if (!m) return;
-    const defaultCtx = m.max_input_tokens;
-    // 硬上限（上游 maxInputTokens）与「客户端默认窗口」是两个量：默认窗口是建议值，
-    // 输入框的 max 必须用**硬上限**，否则用户无法把窗口调到默认值以上（模型本可支持）。
-    // 老版内核无该字段时退化为默认窗口（= 既有行为）。
-    const hardCtx = m.upstream_max_input_tokens || defaultCtx;
-    const currentCtx = m.custom_context_window || defaultCtx;
-    let html = `
-      <div class="zguide-field">
-        <span class="zguide-label">上下文窗口上限 (Tokens) · 默认 ${Math.round(defaultCtx / 1000)}k · 硬上限 ${Math.round(hardCtx / 1000)}k</span>
-        <input type="number" class="input mono" style="width: 100%;" id="ctx-${esc(modelId)}"
-          value="${esc(currentCtx)}" min="1024" max="${esc(hardCtx)}" step="1024" />
-      </div>`;
+    let html = '';
     if (m.supports_reasoning) {
       const currentEffort = m.custom_reasoning_effort || 'default';
       const options = [`<option value="default" ${currentEffort === 'default' ? 'selected' : ''}>默认（跟随客户端下发值）</option>`];
@@ -597,7 +578,7 @@ if (typeof window !== 'undefined') {
           ? '（上游只下发部分档位，已按内置覆盖表补全）'
           : '';
       html += `
-        <div class="zguide-field" style="margin-top: 12px;">
+        <div class="zguide-field">
           <span class="zguide-label">思考强度 (Reasoning) ${esc(sourceHint)}</span>
           <select class="input mono" style="width: 100%;" id="effort-${esc(modelId)}">${options.join('')}</select>
           <p class="muted" style="font-size: 11px; margin-top: 6px;">默认档位 = 不覆盖，原样透传客户端（如 Hermes 的 reasoning_effort）下发的值；模型默认档为 <code>${esc(m.default_effort)}</code>。</p>

@@ -1,14 +1,11 @@
 /**
- * 模型清单「上下文窗口」字段口径契约（2026-09 修复）
+ * 模型清单「上下文窗口」字段口径契约（2026-09 升级：最高可用）
  *
- * 缺陷：`billing.rs` 把上游 `maxInputTokens`（硬上限）当作 `max_input_tokens` 上报，
- * 而该字段同时是控制台「默认窗口」语义 → 12 个模型把客户端默认窗口 300000 谎报成 1000000。
- * 上游 payload 里两个字段同时存在：
- *   `contextWindow.defaultLength` = 客户端默认窗口（应作为 max_input_tokens）
- *   `maxInputTokens`             = 模型硬上限（应另存 upstream_max_input_tokens）
- *
- * 前端连带约束：编辑弹窗的 `<input max>` 必须用**硬上限**，否则用户无法把窗口调到
- * 默认值以上（模型本可支持），等于把默认值当成不可逾越的天花板。
+ * 规范：
+ * 1. 默认窗口统一取「最高可用」（supportedLengths / maxLength / maxInputTokens / maxAllowedSize 最大值），
+ *    规避客户端（如 Hermes）因 300k 默认值导致 70% 真实可用上下文闲置早早压缩。
+ * 2. 移除控制台上下文窗口手改功能：表格只读展示最高可用上下文，编辑弹窗移除上下文修改输入框，
+ *    只保留思考强度等必要参数配置。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,34 +20,19 @@ const read = (rel) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf-8');
 const MODELS_JS = read('src/models.js');
 const BILLING_RS = read('src-tauri/src/commands/billing.rs');
 
-test('Rust 侧同时保留「默认窗口」与「硬上限」两个字段', () => {
+test('Rust 侧默认窗口取最高可用（supportedLengths / maxLength / maxInputTokens / maxAllowedSize 最大值）', () => {
+  const fn = BILLING_RS.match(/fn upstream_highest_available_window[\s\S]*?\n}/)?.[0] || '';
+  assert.ok(fn, '未找到 upstream_highest_available_window');
   assert.ok(
-    BILLING_RS.includes('pub upstream_max_input_tokens: Option<i64>'),
-    'ModelMetaItem 缺少 upstream_max_input_tokens —— 硬上限会被丢弃，控制台无法再展示/放开上限'
-  );
-  assert.ok(
-    BILLING_RS.includes('upstream_max_input_tokens: upstream_max_input'),
-    '构造 ModelMetaItem 时未填 upstream_max_input_tokens'
-  );
-});
-
-test('Rust 侧默认窗口优先取 contextWindow.defaultLength（缺失才回退硬上限）', () => {
-  const fn = BILLING_RS.match(/fn upstream_default_window[\s\S]*?\n}/)?.[0] || '';
-  assert.ok(fn, '未找到 upstream_default_window');
-  assert.ok(
-    fn.includes('/contextWindow/defaultLength'),
-    '默认窗口必须优先读 contextWindow.defaultLength，否则又会把硬上限当默认窗口虚报'
-  );
-  assert.ok(
-    /or_else\(\|\| upstream_hard_limit\(m\)\)/.test(fn),
-    'defaultLength 缺失时必须回退硬上限（兼容未下发 contextWindow 的上游/老条目）'
+    fn.includes('supportedLengths') || fn.includes('/contextWindow/supportedLengths'),
+    '最高可用计算必须解析 supportedLengths 列表'
   );
 
   const resolve = BILLING_RS.match(/fn resolve_context_windows[\s\S]*?\n}/)?.[0] || '';
   assert.ok(resolve, '未找到 resolve_context_windows');
   assert.ok(
-    resolve.includes('upstream_default_window(m).unwrap_or(FALLBACK_CONTEXT_WINDOW)'),
-    '两个字段都缺失时仍应回退内置默认窗口 200000（既有行为）'
+    resolve.includes('upstream_highest_available_window(m)'),
+    'resolve_context_windows 必须接入 upstream_highest_available_window'
   );
 });
 
@@ -88,21 +70,34 @@ test('Rust 侧描述截断到 512 字符且按字符边界切', () => {
   );
 });
 
-test('前端编辑弹窗的 max 用硬上限，不再把默认窗口当天花板', () => {
+test('前端模型表格仅只读展示最高可用上下文，编辑弹窗移除上下文修改输入框', () => {
   const start = MODELS_JS.indexOf('window.openModelEdit = (modelId) => {');
   assert.ok(start > -1, '未找到 openModelEdit');
   const block = MODELS_JS.slice(start, MODELS_JS.indexOf('\n};', start));
   assert.ok(block, '未找到 openModelEdit 实现');
+
   assert.ok(
-    block.includes('m.upstream_max_input_tokens || defaultCtx'),
-    '硬上限缺省时必须回退默认窗口（老版内核无该字段时保持既有行为）'
+    !block.includes('id="ctx-'),
+    '编辑弹窗已移除上下文窗口修改输入框，不得再包含 ctx- 输入框'
   );
   assert.ok(
-    block.includes('max="${esc(hardCtx)}"'),
-    '输入框 max 必须绑定硬上限：绑定默认窗口会让用户无法把窗口调大'
+    !block.includes('上下文窗口上限'),
+    '编辑弹窗已移除上下文窗口修改标签与说明'
   );
+
+  const saveStart = MODELS_JS.indexOf('window.saveModelConfig = async (modelId) => {');
+  assert.ok(saveStart > -1, '未找到 saveModelConfig');
+  const saveBlock = MODELS_JS.slice(saveStart, MODELS_JS.indexOf('\n  };', saveStart));
   assert.ok(
-    !block.includes('max="${esc(defaultCtx)}"'),
-    '输入框 max 仍绑定默认窗口（defaultCtx）'
+    !saveBlock.includes('contextWindow:'),
+    'saveModelConfig 不再传递 contextWindow 参数'
+  );
+
+  const renderStart = MODELS_JS.indexOf('function renderModelsTable(');
+  assert.ok(renderStart > -1, '未找到 renderModelsTable');
+  const renderBlock = MODELS_JS.slice(renderStart, MODELS_JS.indexOf('\nfunction renderFallbackModels', renderStart));
+  assert.ok(
+    !renderBlock.includes('title="点击修改上下文窗口"'),
+    '表格中上下文窗口应为只读展示，不得再提供点击修改入口'
   );
 });

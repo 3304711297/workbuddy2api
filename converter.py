@@ -1118,19 +1118,26 @@ def _merge_model_ids(static_models: list[str], dynamic_models: list[str] | None 
 def _reported_context_length(model_id: str, settings: dict, windows: dict):
     """解析上报给客户端的上下文窗口（/v1/models 条目顶层 context_length）。
 
-    优先级：控制台手改值（model_settings.json 的 context_window）> 上游默认值
-    （maxInputTokens / maxAllowedSize，由 _fetch_remote_models 采集）。
+    统一取最高可用上下文（由 _fetch_remote_models 采集）。
+    上下文修改功能已移除，始终只保留最高可用上下文（不受手改配置覆盖）。
     无有效值时返回 None，响应不携带该字段（客户端自行回退）。
     """
-    cfg = settings.get(model_id)
-    if isinstance(cfg, dict):
-        ctx = cfg.get("context_window")
-        if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
-            return ctx
     w = windows.get(model_id)
     if isinstance(w, int) and not isinstance(w, bool) and w > 0:
         return w
     return None
+
+
+def _call_failover(rotator, uid, model_name, status_code, err_payload, attempt=None):
+    """安全调用 rotator.record_failure_and_failover，兼容历史未接收 attempt 关键字参数的 mock 对象。"""
+    if not rotator:
+        return None
+    try:
+        return rotator.record_failure_and_failover(uid, model_name, status_code, err_payload, attempt=attempt)
+    except TypeError:
+        return rotator.record_failure_and_failover(uid, model_name, status_code, err_payload)
+
+
 
 
 async def _fetch_remote_models(*, transport=None) -> list[str]:
@@ -1205,29 +1212,28 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
                                 mid = m.get("id")
                                 if mid and mid != "hunyuan-image-v3.0":
                                     m_list.append(str(mid))
-                                    # 默认窗口提取：优先 contextWindow.defaultLength（客户端默认窗口），
-                                    # 规避将 1M 硬上限误当作默认窗口上报（如 12 个模型误报）；
-                                    # 缺失时依次回退 maxInputTokens / maxAllowedSize。
-                                    w = None
-                                    prio = 0
+                                    # 提取最高可用上下文窗口：
+                                    # 收集 contextWindow.supportedLengths、maxLength、defaultLength、
+                                    # maxInputTokens、maxAllowedSize 中的所有候选值取最大值，
+                                    # 确保客户端能完整使用模型实际支持的最高可用上下文（如 1M），规避 300k 截断过早触发压缩。
+                                    candidates = []
                                     cw = m.get("contextWindow")
                                     if isinstance(cw, dict):
-                                        dl = cw.get("defaultLength")
-                                        if isinstance(dl, int) and not isinstance(dl, bool) and dl > 0:
-                                            w = dl
-                                            prio = 3  # contextWindow.defaultLength 优先级最高
-                                    if w is None:
-                                        mit = m.get("maxInputTokens")
-                                        if isinstance(mit, int) and not isinstance(mit, bool) and mit > 0:
-                                            w = mit
-                                            prio = 2  # maxInputTokens 优先级次之
-                                        else:
-                                            mas = m.get("maxAllowedSize")
-                                            if isinstance(mas, int) and not isinstance(mas, bool) and mas > 0:
-                                                w = mas
-                                                prio = 1  # maxAllowedSize 兜底优先级
-                                    if isinstance(w, int) and w > 0:
-                                        w_map[str(mid)] = (w, prio)
+                                        sl = cw.get("supportedLengths")
+                                        if isinstance(sl, list):
+                                            for l_item in sl:
+                                                if isinstance(l_item, int) and not isinstance(l_item, bool) and l_item > 0:
+                                                    candidates.append(l_item)
+                                        for k in ("maxLength", "defaultLength"):
+                                            v = cw.get(k)
+                                            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                                                candidates.append(v)
+                                    for k in ("maxInputTokens", "maxAllowedSize"):
+                                        v = m.get(k)
+                                        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                                            candidates.append(v)
+                                    if candidates:
+                                        w_map[str(mid)] = max(candidates)
                         return m_list, w_map
                     else:
                         _log(f"动态模型拉取降级 [{label}]: models字段缺失或非列表 (type={type(raw_models).__name__})", level="debug")
@@ -1285,33 +1291,42 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
 
 
 def _merge_windows_by_priority(maps: list[dict]) -> dict[str, int]:
-    """按字段优先级合并多个上游源的模型窗口映射。
-
-    优先级规则：
-    - 3: contextWindow.defaultLength（最精细客户端默认窗口）
-    - 2: maxInputTokens（硬上限）
-    - 1: maxAllowedSize（兜底上限）
-    高优先级源的值绝不允许被后续低优先级的回退值覆盖（防 ChatGPT 反例：双源合并覆盖）。
-    """
+    """合并多个上游源的模型窗口映射，取两源中的最高可用窗口。"""
     merged_val: dict[str, int] = {}
-    merged_prio: dict[str, int] = {}
-
     for w_map in maps:
         if not isinstance(w_map, dict):
             continue
         for mid, item in w_map.items():
             if isinstance(item, tuple) and len(item) == 2:
-                val, prio = item
-            elif isinstance(item, int):
-                val, prio = item, 1
+                val = item[0]
+            elif isinstance(item, int) and not isinstance(item, bool):
+                val = item
             else:
                 continue
             if isinstance(val, int) and val > 0:
-                cur_prio = merged_prio.get(mid, -1)
-                if prio >= cur_prio:
-                    merged_val[mid] = val
-                    merged_prio[mid] = prio
+                merged_val[mid] = max(merged_val.get(mid, 0), val)
     return merged_val
+
+
+def _resolve_windows_with_fallback(remote_map: dict[str, int], static_map: dict[str, int]) -> dict[str, int]:
+    """远程权威优先与静态目录安全回退（ChatGPT 对拍 P1-1 落地）。
+
+    - 远程有效时以远程为权威（authoritative），禁止静态历史旧数据通过无脑 max() 抬高真实降级；
+    - 远程缺失/异常时，安全回退到静态 catalog 兜底。
+    """
+    result: dict[str, int] = {}
+    # 先填入静态 fallback
+    if isinstance(static_map, dict):
+        for k, v in static_map.items():
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                result[k] = v
+    # 远程权威覆盖（若远程存在有效值，直接作为权威结果）
+    if isinstance(remote_map, dict):
+        for k, v in remote_map.items():
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                result[k] = v
+    return result
+
 _BLOCKED_IMAGE_HOSTS = {
     "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
     "metadata", "metadata.google.internal", "metadata.azure.internal",
@@ -2884,6 +2899,11 @@ _ACCOUNT_FAULT_CODES = {"14017"}
 #    无 reset 时才退化为保守按日；不得与瞬时频控共用 2h 封顶。
 _DAILY_QUOTA_CODES = {"6004", "6008"}
 
+# ④ 瞬时模型请求速率限流（14003 RateLimitError / quota_request_limit）：
+#    上游官方文案「当前模型请求繁忙，请切换模型或稍后重试」，属瞬时模型级抖动，
+#    非日级额度亦非账号级故障，秒级短冷却（默认 20s±5s，上限 120s）。
+_REQUEST_RATE_CODES = {"14003"}
+
 _CREDIT_EXHAUSTED_MAX_SEC = 90000
 
 # 限流冷却上界（秒）。不再是 2h：本机实测 6004/6008（每日额度 TPD/RPD）下发的 reset
@@ -3063,6 +3083,9 @@ def _rate_limit_phrase_hit(text: str, allow_numeric: bool = True) -> bool:
         ("频率限制" in text)
         or ("频率过高" in text)
         or ("使用量超出" in text)
+        or ("请求过于频繁" in text)
+        or ("请求频繁" in text)
+        or ("模型请求繁忙" in text)
         or ("too many requests" in low)
         or ("rate limit" in low)
         or ("rate-limited" in low)
@@ -3076,9 +3099,10 @@ def _rate_limit_phrase_hit(text: str, allow_numeric: bool = True) -> bool:
 
 
 # 上游限流码族（来自官方 bundle 逆向：6000 Craft / 6001 TPS / 6002 TPM / 6003 TPH /
-# 6004 TPD / 6005 RPS / 6006 RPM / 6007 RPH / 6008 RPD）。本仓现网实测到 6004，
-# 扩族是为了「限流了却不换号」的同族缺陷：400/200 信封里的限流码不能按普通 4xx 透传。
-_RATE_LIMIT_CODES = {str(c) for c in range(6000, 6009)}
+# 6004 TPD / 6005 RPS / 6006 RPM / 6007 RPH / 6008 RPD，以及 14003 模型级瞬时频控）。
+# 本仓现网实测到 6004 与 14003，扩族是为了「限流了却不换号」的同族缺陷：
+# 400/200 信封里的限流码不能按普通 4xx 透传。
+_RATE_LIMIT_CODES = {str(c) for c in range(6000, 6009)} | _REQUEST_RATE_CODES
 
 
 def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
@@ -3115,6 +3139,13 @@ def _is_rate_limit_signal(status_code: int | None, err_text: str) -> bool:
             return True
         msg = data.get("msg") or data.get("message") or ""
         msg = msg if isinstance(msg, str) else str(msg)
+        disp = data.get("displayMsg")
+        if isinstance(disp, dict):
+            disp_zh = disp.get("zh") or ""
+            disp_en = disp.get("en") or ""
+            msg = f"{msg} {disp_zh} {disp_en}".strip()
+        elif isinstance(disp, str):
+            msg = f"{msg} {disp}".strip()
         # 结构里既无业务码也无语义 → 才让状态码兜底
         return _rate_limit_phrase_hit(msg) or (status_code == 429 and not msg.strip())
     if status_code == 429:
@@ -3164,23 +3195,30 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
     else:
         hit = _extract_reset_ms(err_text)
         is_daily = str(real_code) in _DAILY_QUOTA_CODES if real_code else False
+        is_req_rate = str(real_code) in _REQUEST_RATE_CODES if real_code else False
         if hit is not None:
-            # 上游下发的精确重置墙钟优先（不限 2h：每日额度 reset 常远超 2h）
+            # 上游下发的精确重置墙钟优先（每日额度 reset 常远超 2h；瞬时频控封顶 120s）
             reset_ms, reset_local = hit
-            delta_sec = max(5.0, min(float(_RATE_LIMIT_MAX_SEC), (reset_ms - now_ms) / 1000.0))
+            max_sec = 120.0 if is_req_rate else float(_RATE_LIMIT_MAX_SEC)
+            delta_sec = max(5.0, min(max_sec, (reset_ms - now_ms) / 1000.0))
         elif is_daily:
             # 每日额度（6004/6008）**无 reset 时不得退化成 5 分钟软限流**：它是日级额度，
             # 5 分钟后重新入池必然二次撞墙（本机 94 条样本的 reset 中位 3.67h）。
             # 按日边界保守兜底，与额度耗尽同口径。
             reset_ms, reset_local = _next_day_reset_ms(_DAILY_QUOTA_FALLBACK_HOUR)
             delta_sec = max(5.0, min(float(_RATE_LIMIT_MAX_SEC), (reset_ms - now_ms) / 1000.0))
+        elif is_req_rate:
+            # 瞬时模型请求速率限流（14003）：秒级短冷却（20s±5s），避免 300s 软限流导致整个模型被过度冷冻
+            delta_sec = 20.0 + random.uniform(-5.0, 5.0)
+            reset_ms = int((time.time() + delta_sec) * 1000)
+            reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
         else:
             # 瞬时频控（6000-6003/6005-6007 或无码 429）：无精确时刻时注入 ±45s 去相关
             # 抖动（255s~345s），杜绝多协程同一毫秒二次惊群
             delta_sec = 300.0 + random.uniform(-45.0, 45.0)
             reset_ms = int((time.time() + delta_sec) * 1000)
             reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
-        kind = "daily_quota" if is_daily else "rate_limit"
+        kind = "daily_quota" if is_daily else ("request_rate" if is_req_rate else "rate_limit")
     monotonic_until = mono_now + delta_sec
     with _RATE_LIMIT_LOCK:
         prev = _RATE_LIMIT_STATE.get(model)
@@ -3200,6 +3238,19 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
             except Exception:
                 pass
         lim_nick = _get_account_nickname(curr_uid) if curr_uid else ""
+
+        # ChatGPT 对拍 P1-2 落地：冷却单调最大化（effective_until = max(old, new)），
+        # 针对同一 uid+model 的并发迟到观测，绝不能把已建立的更长冷却覆盖为更短时间。
+        # 注意：多账号隔离，每个账号各自独立记录，不跨账号继承单调截止时间。
+        old_state = _RATE_LIMIT_STATE.get(model)
+        if old_state and isinstance(old_state, dict) and old_state.get("uid") == (curr_uid or ""):
+            old_reset_ms = old_state.get("resetAtMs")
+            if isinstance(old_reset_ms, (int, float)) and old_reset_ms > reset_ms:
+                reset_ms = int(old_reset_ms)
+                reset_local = old_state.get("resetLocal", reset_local)
+            old_mono = old_state.get("monotonic_until")
+            if isinstance(old_mono, (int, float)) and old_mono > monotonic_until:
+                monotonic_until = float(old_mono)
 
         entry = {
             "code": real_code or (14018 if credit_exhausted else 6004),
@@ -3221,7 +3272,19 @@ def _record_rate_limit(model: str, err_text: str, uid: str | None = None, status
                 oldest = min(_ACCOUNT_COOLDOWNS,
                              key=lambda k: _ACCOUNT_COOLDOWNS[k].get("lastSeenMs", 0))
                 _ACCOUNT_COOLDOWNS.pop(oldest, None)
-            _ACCOUNT_COOLDOWNS[(curr_uid, model)] = dict(entry)
+            
+            # 单账号级冷却单调最大化
+            old_acc_state = _ACCOUNT_COOLDOWNS.get((curr_uid, model))
+            acc_entry = dict(entry)
+            if old_acc_state and isinstance(old_acc_state, dict):
+                old_acc_reset = old_acc_state.get("resetAtMs")
+                if isinstance(old_acc_reset, (int, float)) and old_acc_reset > acc_entry["resetAtMs"]:
+                    acc_entry["resetAtMs"] = int(old_acc_reset)
+                    acc_entry["resetLocal"] = old_acc_state.get("resetLocal", acc_entry["resetLocal"])
+                old_acc_mono = old_acc_state.get("monotonic_until")
+                if isinstance(old_acc_mono, (int, float)) and old_acc_mono > acc_entry["monotonic_until"]:
+                    acc_entry["monotonic_until"] = float(old_acc_mono)
+            _ACCOUNT_COOLDOWNS[(curr_uid, model)] = acc_entry
 
 
 def _parse_expiry_timestamp(v: Any) -> int:
@@ -3418,8 +3481,14 @@ class AccountRotator:
                 break
         return top_tier
 
-    def get_retry_budget(self, model: str) -> int:
+    def get_retry_budget(self, model: str, error_code: int | None = None) -> int:
+        """获取重试预算。
+        ChatGPT 对拍 P1-4 落地：14003（模型级瞬时繁忙）实施独立轻量重试预算（上限 1 次），
+        杜绝 N 个请求并发遭遇模型繁忙时，由于继承普通账号故障的 5 次重试预算而引发 5x~6x 上游重试放大雪崩。
+        """
         if self.mode not in ("failover", "roundrobin"):
+            return 1
+        if error_code == 14003 or str(error_code) in _REQUEST_RATE_CODES:
             return 1
         all_accs = self.get_all_accounts()
         return max(1, min(len(all_accs), 5))
@@ -3563,15 +3632,25 @@ class AccountRotator:
 
             return active_uid, self.cred_mgr.get_headers()
 
-    def record_failure_and_failover(self, current_uid: str, model: str, status_code: int, err_text: str) -> tuple[str, dict] | None:
-        """处理限流码族/额度耗尽；若开启 failover/roundrobin 且有备用账号，自动切号并返回 (new_uid, new_headers)。"""
-        # 内容审核拦截（11140）为用户请求内容违规，严禁切号重试与冷却
+    def record_failure_and_failover(
+        self,
+        current_uid: str,
+        model: str,
+        status_code: int,
+        err_text: str,
+        attempt: int | None = None,
+    ) -> tuple[str, dict] | None:
+        """记录失败并触发故障转移。
+
+        遵循 Fail-Open 铁律与 ChatGPT 对拍 P1-4/P1-5 契约：
+        - 内容审核违规（11140）不触发换号；
+        - 限流/额度耗尽/14003 模型繁忙：写入冷却隔离；
+        - 14003 模型繁忙受 request-local 独立轻量重试预算门禁（上限 1 次），杜绝重试风暴；
+          使用当前请求自身的 attempt 次数判断，禁止复用进程全局计数器导致多请求互相消耗；
+        - 从候选账号池中选出下一个可用账号。
+        """
         if _is_content_policy_violation(status_code, err_text):
             return None
-        # 三类都共用同一换号入口（账号级避让），冷却时长由 _record_rate_limit 按语义分流：
-        #   额度耗尽 → 长冷却；账号态故障（14017）→ 短冷却可自愈；限流 → 对齐 reset。
-        # 14017 必须走这条入口：它是「换号继续」而非「账号永久不可用」（上游把
-        # {200,code:14017} 归 ErrAccountFault，动作是冷却轮换、不无限重试）。
         is_rate_limited = (
             _is_rate_limit_signal(status_code, err_text)
             or _is_credit_exhausted_signal(status_code, err_text)
@@ -3583,6 +3662,23 @@ class AccountRotator:
             return None
 
         with self._lock:
+            # ChatGPT 对拍 P1-4 落地：14003 模型繁忙受独立轻量重试预算门禁（上限 1 次）。
+            # 优先使用 request-local 的 attempt 次数（若传入），杜绝全局计数器互相干扰；
+            err_code = None
+            try:
+                d = json.loads(err_text)
+                if isinstance(d, dict):
+                    err_code = _authoritative_code(d) or d.get("code")
+            except Exception:
+                pass
+
+            budget = self.get_retry_budget(model, error_code=err_code)
+            current_attempt = attempt if attempt is not None else self._failover_counter
+            if current_attempt >= budget:
+                _log(f"⚠️ [{model}] 已达重试预算上限 ({budget}次, err_code={err_code})，停止换号重试", level="debug")
+                _record_rate_limit(model, err_text, uid=current_uid, status_code=status_code)
+                return None
+
             _record_rate_limit(model, err_text, uid=current_uid, status_code=status_code)
             if not self.cred_mgr:
                 return None
@@ -3601,12 +3697,14 @@ class AccountRotator:
                 self._failover_counter += 1
                 next_uid = top_tier[self._failover_counter % len(top_tier)]
             else:
+                self._failover_counter += 1
                 next_uid = candidates[0]
             if hasattr(self.cred_mgr, "switch_active_account"):
                 self.cred_mgr.switch_active_account(next_uid)
             new_headers = self.cred_mgr.get_headers_for_uid(next_uid) if hasattr(self.cred_mgr, "get_headers_for_uid") else self.cred_mgr.get_headers()
-            _log(f"🔄 [故障自动切换] 账号 {current_uid[:8] if current_uid else ''}... 触发 6004/429 限流，切换至备用账号 {next_uid[:8]}... 并重试")
+            _log(f"🔄 [故障自动切换] 账号 {current_uid[:8] if current_uid else ''}... 触发限流，切换至备用账号 {next_uid[:8]}... 并重试")
             return next_uid, new_headers
+
 
 
 async def _failover_jitter(rid: str = "") -> None:
@@ -4190,7 +4288,7 @@ async def chat_completions(request: Request,
                                 # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
                                 _mark_model_unavailable(body.get("model") or model_name, uid=uid)
                             if attempt < max_attempts - 1:
-                                failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
+                                failover = _call_failover(rotator, uid, model_name, r.status_code, err_str, attempt=attempt)
                                 if failover:
                                     uid, headers = failover
                                     await _failover_jitter(rid)
@@ -4221,8 +4319,9 @@ async def chat_completions(request: Request,
                 pass
             raise
         except httpx.HTTPError as e:
+            err_payload = getattr(e, "raw", None) or str(e)
             if attempt < max_attempts - 1:
-                failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
+                failover = _call_failover(rotator, uid, model_name, 502, err_payload, attempt=attempt)
                 if failover:
                     uid, headers = failover
                     await _failover_jitter(rid)
@@ -4499,7 +4598,7 @@ async def anthropic_messages(
                                 # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
                                 _mark_model_unavailable(body.get("model") or model_name, uid=uid)
                             if attempt < max_attempts - 1:
-                                failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
+                                failover = _call_failover(rotator, uid, model_name, r.status_code, err_str, attempt=attempt)
                                 if failover:
                                     uid, headers = failover
                                     await _failover_jitter(rid)
@@ -4522,8 +4621,9 @@ async def anthropic_messages(
         except HTTPException:
             raise
         except httpx.HTTPError as e:
+            err_payload = getattr(e, "raw", None) or str(e)
             if attempt < max_attempts - 1:
-                failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
+                failover = _call_failover(rotator, uid, model_name, 502, err_payload, attempt=attempt)
                 if failover:
                     uid, headers = failover
                     await _failover_jitter(rid)
@@ -4782,7 +4882,7 @@ async def openai_responses(
                                 # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
                                 _mark_model_unavailable(body.get("model") or model_name, uid=uid)
                             if attempt < max_attempts - 1 and rotator:
-                                failover = rotator.record_failure_and_failover(uid, model_name, r.status_code, err_str)
+                                failover = _call_failover(rotator, uid, model_name, r.status_code, err_str, attempt=attempt)
                                 if failover:
                                     uid, headers = failover
                                     await _failover_jitter(rid)
@@ -4806,8 +4906,9 @@ async def openai_responses(
             _record_usage(actual_model, False, t0, error=f"HTTP {e.status_code}", requested_model=model_name, fallback_reason=fallback_reason)
             raise
         except httpx.HTTPError as e:
+            err_payload = getattr(e, "raw", None) or str(e)
             if attempt < max_attempts - 1 and rotator:
-                failover = rotator.record_failure_and_failover(uid, model_name, 502, str(e))
+                failover = _call_failover(rotator, uid, model_name, 502, err_payload, attempt=attempt)
                 if failover:
                     uid, headers = failover
                     await _failover_jitter(rid)
@@ -5273,7 +5374,7 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                             # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
                             _mark_model_unavailable(body.get("model") or model_name, uid=curr_uid)
                         if rotator and attempt < max_attempts - 1:
-                            failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
+                            failover = _call_failover(rotator, curr_uid, model_name, r.status_code, err_str, attempt=attempt)
                             if failover:
                                 curr_uid, curr_headers = failover
                                 if on_account_switched:
@@ -5316,8 +5417,9 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         await _failover_jitter(rid)
                         continue
         except httpx.HTTPError as e:
+            err_payload = getattr(e, "raw", None) or str(e)
             if rotator and attempt < max_attempts - 1:
-                failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
+                failover = _call_failover(rotator, curr_uid, model_name, 502, err_payload, attempt=attempt)
                 if failover:
                     curr_uid, curr_headers = failover
                     await _failover_jitter(rid)
@@ -6070,7 +6172,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 # 点了就 400（踩雷不记账）。此处只记账，**不**引入静默降级（语义另议）。
                                 _mark_model_unavailable(body.get("model") or model_name, uid=curr_uid)
                             if rotator and attempt < max_attempts - 1:
-                                failover = rotator.record_failure_and_failover(curr_uid, model_name, r.status_code, err_str)
+                                failover = _call_failover(rotator, curr_uid, model_name, r.status_code, err_str, attempt=attempt)
                                 if failover:
                                     curr_uid, curr_headers = failover
                                     if on_account_switched:
@@ -6178,8 +6280,9 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 yield pending_events.pop(0)
                         break
             except httpx.HTTPError as e:
+                err_payload = getattr(e, "raw", None) or str(e)
                 if rotator and attempt < max_attempts - 1:
-                    failover = rotator.record_failure_and_failover(curr_uid, model_name, 502, str(e))
+                    failover = _call_failover(rotator, curr_uid, model_name, 502, err_payload, attempt=attempt)
                     if failover:
                         curr_uid, curr_headers = failover
                         await _failover_jitter(rid)

@@ -76,24 +76,38 @@ fn upstream_hard_limit(m: &serde_json::Value) -> Option<i64> {
         .or_else(|| positive(m.get("maxAllowedSize").and_then(|v| v.as_i64())))
 }
 
-/// 从模型条目取客户端默认窗口：`contextWindow.defaultLength` 优先，缺失回退硬上限。
-///
-/// **为什么不是直接用 `maxInputTokens`**：上游 `contextWindow.defaultLength` 才是
-/// 官方客户端实际生效的窗口（实测 300000），而 `maxInputTokens` 是模型能吃的上限
-/// （实测 1000000）。把上限当默认窗口上报，会让 12 个模型对客户端虚报窗口。
-fn upstream_default_window(m: &serde_json::Value) -> Option<i64> {
-    m.pointer("/contextWindow/defaultLength")
-        .and_then(|v| v.as_i64())
-        .filter(|v| *v > 0)
-        .or_else(|| upstream_hard_limit(m))
+/// 从模型条目取最高可用窗口：
+/// 取 supportedLengths 数组、maxLength、defaultLength、maxInputTokens、maxAllowedSize 的最大值。
+/// 确保 12 个 1M 档模型对客户端报出真实 1,000,000 窗口，避免早早被压缩。
+fn upstream_highest_available_window(m: &serde_json::Value) -> Option<i64> {
+    let mut max_val: Option<i64> = None;
+    let mut check = |v: Option<i64>| {
+        if let Some(x) = v.filter(|n| *n > 0) {
+            max_val = Some(max_val.map_or(x, |curr| curr.max(x)));
+        }
+    };
+
+    if let Some(cw) = m.get("contextWindow").and_then(|v| v.as_object()) {
+        if let Some(arr) = cw.get("supportedLengths").and_then(|v| v.as_array()) {
+            for item in arr {
+                check(item.as_i64());
+            }
+        }
+        check(cw.get("maxLength").and_then(|v| v.as_i64()));
+        check(cw.get("defaultLength").and_then(|v| v.as_i64()));
+    }
+    check(m.get("maxInputTokens").and_then(|v| v.as_i64()));
+    check(m.get("maxAllowedSize").and_then(|v| v.as_i64()));
+
+    max_val
 }
 
 /// 组装对外字段：`(max_input_tokens, upstream_max_input_tokens)`。
-/// 两者分别表示「客户端默认窗口」与「上游硬上限」，都尽量保留供 UI 展示。
+/// max_input_tokens 取最高可用上下文窗口。
 fn resolve_context_windows(m: &serde_json::Value) -> (i64, Option<i64>) {
     let hard = upstream_hard_limit(m);
-    let default_window = upstream_default_window(m).unwrap_or(FALLBACK_CONTEXT_WINDOW);
-    (default_window, hard)
+    let highest = upstream_highest_available_window(m).unwrap_or(FALLBACK_CONTEXT_WINDOW);
+    (highest, hard)
 }
 
 /// 是否应从控制台模型表中剔除该条目：
@@ -538,11 +552,9 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
         };
         let (tags, badges) = parse_model_tags_and_badges(raw_tags_map.get(&id), source_tag);
 
-        // 读取用户个性化覆盖设置
-        let mut custom_ctx = None;
+        // 读取用户个性化覆盖设置（上下文手改已废除，仅保留思考强度）
         let mut custom_effort = None;
         if let Some(cfg) = custom_settings.get(&id) {
-            custom_ctx = cfg.get("context_window").and_then(|v| v.as_i64());
             custom_effort = cfg.get("reasoning_effort").and_then(|v| v.as_str()).map(|s| s.to_string());
         }
 
@@ -560,7 +572,7 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
             description: desc,
             tags,
             badges,
-            custom_context_window: custom_ctx,
+            custom_context_window: None,
             custom_reasoning_effort: custom_effort,
             efforts_source,
             availability: if unavailable.contains(&id) { "unavailable".to_string() } else { "available".to_string() },
@@ -571,15 +583,12 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
 }
 
 #[tauri::command]
-pub fn model_save_config(model_id: String, context_window: Option<i64>, reasoning_effort: Option<String>) -> Result<String, String> {
+pub fn model_save_config(model_id: String, _context_window: Option<i64>, reasoning_effort: Option<String>) -> Result<String, String> {
     let mut settings = load_model_settings();
     let entry = settings.entry(model_id.clone()).or_insert_with(|| serde_json::json!({}));
     if let Some(obj) = entry.as_object_mut() {
-        if let Some(cw) = context_window {
-            obj.insert("context_window".into(), serde_json::json!(cw));
-        } else {
-            obj.remove("context_window");
-        }
+        // 上下文手改功能已废除：始终移除 context_window，不再保存手改窗口
+        obj.remove("context_window");
 
         if let Some(ref re) = reasoning_effort {
             if re == "default" || re.is_empty() {
@@ -678,15 +687,25 @@ mod model_entry_parsing_tests {
         serde_json::from_str(json).unwrap()
     }
 
-    /// 核心回归：上报给客户端的窗口必须是 `contextWindow.defaultLength`（客户端默认窗口），
-    /// 不是 `maxInputTokens`（硬上限）。实测 12 个模型把默认 300000 谎报成 1000000。
+    /// 核心回归：上报给客户端的窗口必须是最高可用（supportedLengths / maxLength / maxInputTokens / maxAllowedSize 最大值），
+    /// 确保 12 个 1M 档模型对客户端报出真实 1,000,000 窗口，避免早早被压缩。
     #[test]
-    fn default_window_prefers_context_window_default_length() {
+    fn default_window_resolves_to_highest_available() {
         let m = entry(r#"{"id":"a","maxInputTokens":1000000,
-                         "contextWindow":{"defaultLength":300000,"maxLength":1000000}}"#);
+                         "contextWindow":{"defaultLength":300000,"supportedLengths":[300000,1000000]}}"#);
         let (ctx, hard) = resolve_context_windows(&m);
-        assert_eq!(ctx, 300_000, "必须取 contextWindow.defaultLength 作为默认窗口");
+        assert_eq!(ctx, 1_000_000, "必须取最高可用作为默认窗口");
         assert_eq!(hard, Some(1_000_000), "硬上限应保留在独立字段");
+
+        let m_max = entry(r#"{"id":"a","maxInputTokens":1000000,
+                             "contextWindow":{"defaultLength":300000,"maxLength":1000000}}"#);
+        let (ctx_max, _) = resolve_context_windows(&m_max);
+        assert_eq!(ctx_max, 1_000_000, "maxLength 存在时也应计入最高可用");
+
+        // 若只有 defaultLength 且无其他更高候选，取 defaultLength
+        let m_only_dl = entry(r#"{"id":"a","contextWindow":{"defaultLength":300000}}"#);
+        let (ctx_dl, _) = resolve_context_windows(&m_only_dl);
+        assert_eq!(ctx_dl, 300_000, "仅有 defaultLength 时取该值");
     }
 
     /// `contextWindow.defaultLength` 缺失 → 回退 `maxInputTokens`（兼容老条目）。
@@ -699,7 +718,7 @@ mod model_entry_parsing_tests {
 
         // contextWindow 存在但 defaultLength 缺失/非法（0/负数/非整数）同样回退
         for json in [
-            r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"maxLength":1000000}}"#,
+            r#"{"id":"a","maxInputTokens":64000,"contextWindow":{}}"#,
             r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"defaultLength":0}}"#,
             r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"defaultLength":-5}}"#,
             r#"{"id":"a","maxInputTokens":64000,"contextWindow":{"defaultLength":"300000"}}"#,
