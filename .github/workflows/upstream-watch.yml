@@ -2,8 +2,8 @@ name: Upstream Watch
 
 on:
   schedule:
-    # 每周一、三、五 UTC 01:00（北京时间 09:00）巡检
-    - cron: '0 1 * * 1,3,5'
+    # 每天 UTC 01:00、07:00（北京时间 09:00、15:00）巡检
+    - cron: '0 1,7 * * *'
   workflow_dispatch:
   push:
     branches: [ main ]
