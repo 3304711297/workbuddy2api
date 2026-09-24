@@ -33,7 +33,7 @@ def get_token() -> str:
     return ""
 
 
-def api_get(url: str, token: str) -> dict | list | None:
+def api_get(url: str, token: str) -> tuple[dict | list | None, int]:
     headers = {
         "User-Agent": "WorkBuddy2API-Upstream-Watch",
         "Accept": "application/vnd.github+json",
@@ -42,13 +42,30 @@ def api_get(url: str, token: str) -> dict | list | None:
         headers["Authorization"] = f"Bearer {token}"
 
     req = urllib.request.Request(url, headers=headers)
+    last_status = 0
     for attempt in range(2):
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception:
+                return json.loads(resp.read().decode("utf-8")), getattr(resp, "status", 200)
+        except urllib.error.HTTPError as e:
+            last_status = e.code
+            if e.code == 404:
+                # 404 明确表示仓库/路径不存在（删库/私有化），重试无意义，立即退出
+                return None, 404
             time.sleep(1.5 * (attempt + 1))
-    return None
+        except Exception:
+            last_status = 0
+            time.sleep(1.5 * (attempt + 1))
+    return None, last_status
+
+
+def _normalize_api_response(raw_res: tuple | list | dict | None) -> tuple[dict | list | None, int]:
+    """兼容旧单返回值 mock 与新 (data, status_code) 元组结构。"""
+    if isinstance(raw_res, tuple) and len(raw_res) == 2:
+        return raw_res
+    if raw_res is None:
+        return None, 0
+    return raw_res, 200
 
 
 def lint_sources(data: dict) -> list[str]:
@@ -73,20 +90,41 @@ def check_source(sid: str, cfg: dict, token: str) -> dict:
     repo = cfg["repo"]
     last_commit = cfg.get("last_synced_commit", "").strip()
     last_sha = cfg.get("last_synced_sha", "").strip()
+    baseline = (last_sha or last_commit)[:8]
 
     # 优先查路径为 . 的 commits（确保与代码树真实提交一致）
-    commits = api_get(f"https://api.github.com/repos/{repo}/commits?path=.&per_page=5", token)
+    raw_res = api_get(f"https://api.github.com/repos/{repo}/commits?path=.&per_page=5", token)
+    commits, status_code = _normalize_api_response(raw_res)
+
     if not commits or not isinstance(commits, list):
         # 回退全仓最新 commit
-        commits = api_get(f"https://api.github.com/repos/{repo}/commits?per_page=5", token)
+        raw_res_all = api_get(f"https://api.github.com/repos/{repo}/commits?per_page=5", token)
+        commits, fallback_status = _normalize_api_response(raw_res_all)
+        if fallback_status != 0:
+            status_code = fallback_status
 
     if not commits or not isinstance(commits, list) or len(commits) == 0:
+        if status_code == 404:
+            return {
+                "id": sid,
+                "name": cfg.get("name", sid),
+                "repo": repo,
+                "status": "not_found",
+                "last_commit": baseline,
+                "latest_commit": "N/A",
+                "commit_msg": "上游仓库不可访问 (404 Not Found，疑似删库/转私有；保留基线)",
+                "commit_date": "",
+                "has_update": False,
+                "compare_url": "",
+                "absorbed": cfg.get("absorbed", ""),
+                "note": cfg.get("note", ""),
+            }
         return {
             "id": sid,
             "name": cfg.get("name", sid),
             "repo": repo,
             "status": "query_failed",
-            "last_commit": last_commit[:8],
+            "last_commit": baseline,
             "latest_commit": "N/A",
             "commit_msg": "查询上游失败",
             "commit_date": "",
@@ -146,20 +184,25 @@ def main():
 
     results = []
     updates = []
+    not_found_list = []
+    failures = []
     for sid, cfg in sources.items():
         res = check_source(sid, cfg, token)
         results.append(res)
         if res["has_update"]:
             updates.append(res)
             icon = "🔴"
+        elif res["status"] == "not_found":
+            not_found_list.append(res)
+            icon = "⚠️"
         elif res["status"] == "query_failed":
+            failures.append(res)
             icon = "⚠️"
         else:
             icon = "✅"
         print(f"{icon} [{res['name']}] {res['repo']}: {res['last_commit']} -> {res['latest_commit']} ({res['commit_msg']})")
 
-    failures = [r for r in results if r["status"] == "query_failed"]
-    print(f"\n巡检结束：共发现 {len(updates)} 项存在上游新提交待评估，{len(failures)} 项查询失败。")
+    print(f"\n巡检结束：共发现 {len(updates)} 项存在上游新提交待评估，{len(not_found_list)} 项仓库 404 挂起，{len(failures)} 项查询失败。")
 
     # 生成 Markdown 报告
     report_lines = [
@@ -170,7 +213,9 @@ def main():
         "> **跟进 SOP**：审查对应上游的新提交 Diff 是否有可借鉴机制；若吸收落地，更新 `tools/upstream-sources.json` 对应条目的 `last_synced_commit` 并推 main，CI 会在无待跟进项时自动关闭本 Issue。",
     ]
     if failures:
-        report_lines.append(f">\n> ⚠️ **注意**：本次巡检有 {len(failures)} 项上游仓库查询失败（受网络波动或 GitHub API 限额影响），已标记为降级巡检并保留既有基线。")
+        report_lines.append(f">\n> ⚠️ **注意**：本次巡检有 {len(failures)} 项上游仓库查询异常（受网络抖动或 GitHub API 限额影响），已标记为降级巡检并保留既有基线。")
+    if not_found_list:
+        report_lines.append(f">\n> ℹ️ **说明**：本次巡检检测到 {len(not_found_list)} 项上游仓库返回 404 Not Found（疑似删库、更名或设为私有）；已锁定既有基线，若后续上游恢复公开，巡检将无缝自动恢复看门。")
     report_lines.append("")
     report_lines.append("## 概览")
     report_lines.append("")
@@ -180,6 +225,8 @@ def main():
     for r in results:
         if r["has_update"]:
             st = "🔴 有新提交"
+        elif r["status"] == "not_found":
+            st = "⚠️ 404（挂起保留基线）"
         elif r["status"] == "query_failed":
             st = "⚠️ 查询失败"
         else:
@@ -200,6 +247,12 @@ def main():
             report_lines.append(f"- 本地已吸收：{r['absorbed'] or '无'}")
             report_lines.append(f"- 监控关注点：{r['note'] or '无'}")
             report_lines.append(f"- 跟进方式：审查 Diff；若有采纳落地，将 `tools/upstream-sources.json` 中该项的 `last_synced_commit` 推进为 `{r['latest_commit']}` 并提交推送。")
+        elif r["status"] == "not_found":
+            report_lines.append("- ⚠️ **上游仓库不可访问 (404 Not Found)**：疑似已删库、更名或设为私有。")
+            report_lines.append(f"- 本地基线：`{r['last_commit']}` → 🔒 锁定保留（不作误报；若上游后续恢复公开，将自动恢复看门并比对新提交）。")
+            report_lines.append(f"- 本地已吸收：{r['absorbed'] or '无'}")
+            report_lines.append(f"- 监控关注点：{r['note'] or '无'}")
+            report_lines.append("- 跟进方式：保持基线挂起监听；若上游仓库重新变为公开或恢复，下轮巡检将自动探测最新 commit 并恢复正常看门。")
         elif r["status"] == "query_failed":
             report_lines.append("- ⚠️ 查询上游失败，可能受网络波动或 GitHub API 限额影响，保持当前基线。")
         else:
@@ -208,7 +261,7 @@ def main():
         report_lines.append("")
 
     report_lines.append("---")
-    report_lines.append(f"**待跟进项目数：{len(updates)}** · **查询失败数：{len(failures)}**")
+    report_lines.append(f"**待跟进项目数：{len(updates)}** · **404 挂起数：{len(not_found_list)}** · **查询失败数：{len(failures)}**")
 
     report_text = "\n".join(report_lines)
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
@@ -218,11 +271,14 @@ def main():
     if gh_output:
         has_updates_str = "true" if len(updates) > 0 else "false"
         has_query_failures_str = "true" if len(failures) > 0 else "false"
+        has_not_found_str = "true" if len(not_found_list) > 0 else "false"
         with open(gh_output, "a", encoding="utf-8") as f:
             f.write(f"has_updates={has_updates_str}\n")
             f.write(f"update_count={len(updates)}\n")
             f.write(f"has_query_failures={has_query_failures_str}\n")
             f.write(f"query_failure_count={len(failures)}\n")
+            f.write(f"has_not_found={has_not_found_str}\n")
+            f.write(f"not_found_count={len(not_found_list)}\n")
 
 
 if __name__ == "__main__":

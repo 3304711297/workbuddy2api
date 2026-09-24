@@ -79,7 +79,7 @@ jobs:
         run: |
           EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-            gh issue close "$EXISTING" --comment "✅ 所有借鉴源查询成功且基线与上游一致，自动收口。下次有新提交会自动重新开 Issue。" || true
+            gh issue close "$EXISTING" --comment "✅ 所有可用借鉴源基线与上游一致（404 仓库已锁定基线挂起待恢复），自动收口。下次有新提交会自动重新开 Issue。" || true
           else
             echo "无待跟进项，也无未关闭 Issue，跳过。"
           fi

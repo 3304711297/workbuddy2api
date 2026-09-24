@@ -136,7 +136,7 @@
       "last_synced_commit": "9a26ae7a",
       "last_synced_sha": "9a26ae7a4f3ed581aaf5f98a9c390f8940659105",
       "absorbed": "借鉴雷达（横向对比与加权调度/多账号池核心架构参考；本轮起其源码作为错误码语义的**上游真源**用于交叉验证）",
-      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。本轮评估 f2ccc7bb→9a26ae7a：改动为小程序成长任务 Sequential_Tasks_2/3 及治理工作流，与本仓内核无重叠，未采纳。"
+      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。本轮评估 f2ccc7bb→9a26ae7a：改动为小程序成长任务 Sequential_Tasks_2/3 及治理工作流，与本仓内核无重叠，未采纳。2026-09-24 巡检发现上游返回 404 Not Found（疑似删库、更名或设为私有）；保留基线 9a26ae7a 挂起监测，若上游恢复公开将自动继续看门。"
     },
     "wb2api-upstream-neipor": {
       "name": "codebuddy-cli2api 全协议网关（neipor，借鉴雷达）",

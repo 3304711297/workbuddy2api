@@ -73,3 +73,37 @@ def test_check_source_detects_update(monkeypatch):
     assert res["has_update"] is True
     assert res["latest_commit"] == "99999999"
     assert "compare/11111111...99999999" in res["compare_url"]
+
+
+def test_check_source_handles_not_found_and_recovers(monkeypatch):
+    # 1. 模拟上游返回 404（删库/私有化）
+    monkeypatch.setattr(check_upstream, "api_get", lambda url, token: (None, 404))
+    cfg = {
+        "repo": "Sliverkiss/workbuddy2api",
+        "last_synced_commit": "9a26ae7a",
+        "name": "Sliverkiss Go 原版"
+    }
+    res = check_upstream.check_source("wb2api-upstream-sliverkiss", cfg, "fake-token")
+    assert res["status"] == "not_found"
+    assert res["has_update"] is False
+    assert res["last_commit"] == "9a26ae7a"
+    assert res["latest_commit"] == "N/A"
+    assert "404" in res["commit_msg"]
+
+    # 2. 模拟后续上游仓库恢复上线并推新提交：无缝恢复看门
+    restored_commits = [
+        {
+            "sha": "bbbbbbbb12345678",
+            "commit": {
+                "message": "feat: repo restored with update",
+                "committer": {"date": "2026-09-25T10:00:00Z"},
+            },
+        }
+    ]
+    monkeypatch.setattr(check_upstream, "api_get", lambda url, token: (restored_commits, 200))
+    res_restored = check_upstream.check_source("wb2api-upstream-sliverkiss", cfg, "fake-token")
+    assert res_restored["status"] == "updated"
+    assert res_restored["has_update"] is True
+    assert res_restored["last_commit"] == "9a26ae7a"
+    assert res_restored["latest_commit"] == "bbbbbbbb"
+    assert "compare/9a26ae7a...bbbbbbbb" in res_restored["compare_url"]
