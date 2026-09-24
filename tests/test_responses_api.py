@@ -43,18 +43,19 @@ def test_responses_previous_response_id_continuation():
     assert msgs[2] == {"role": "user", "content": "continue round 2"}
 
 
-def test_responses_unknown_previous_response_id_graceful():
-    """当 previous_response_id 不存在或过期时，优雅跳过并不破坏当前请求。"""
-    from responses_compat import responses_request_to_chat
+def test_responses_unknown_previous_response_id_raises_not_found():
+    """当 previous_response_id 不存在或过期时，禁止静默分叉，必须抛出 PreviousResponseNotFoundError。"""
+    import pytest
+    from responses_compat import responses_request_to_chat, PreviousResponseNotFoundError
 
     req = {
         "model": "deepseek-chat",
         "previous_response_id": "resp_non_existent",
         "input": "just my message",
     }
-    chat = responses_request_to_chat(req)
-    assert len(chat["messages"]) == 1
-    assert chat["messages"][0] == {"role": "user", "content": "just my message"}
+    with pytest.raises(PreviousResponseNotFoundError) as exc_info:
+        responses_request_to_chat(req)
+    assert exc_info.value.response_id == "resp_non_existent"
     """测试简单字符串 input 转换。"""
     body = {
         "model": "glm-5.2",

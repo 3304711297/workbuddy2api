@@ -6,6 +6,7 @@ and OpenAI Chat Completions API.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import uuid
@@ -185,6 +186,7 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                 text_parts: List[str] = []
                 thinking_parts: List[str] = []
                 tool_calls: List[dict] = []
+                signature_val: Optional[str] = None
 
                 for block in content:
                     if not isinstance(block, dict):
@@ -198,6 +200,14 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                         thinking = block.get("thinking", "")
                         if thinking:
                             thinking_parts.append(thinking)
+                        sig = block.get("signature")
+                        if sig and isinstance(sig, str):
+                            signature_val = sig
+                    elif btype == "redacted_thinking":
+                        # Anthropic redacted_thinking block，在 reasoning_content 中保留占位避免思维链中断
+                        data = block.get("data", "")
+                        placeholder = f"[redacted_thinking: {data[:16]}...]" if data else "[redacted_thinking]"
+                        thinking_parts.append(placeholder)
                     elif btype == "tool_use":
                         if not block.get("id"):
                             raise ValueError(
@@ -222,6 +232,11 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                         })
 
                 asst_msg: Dict[str, Any] = {"role": "assistant"}
+                # 保留完整的 Anthropic 原始结构 Sidecar（用于内部上下文保真与多轮回传）
+                asst_msg["_anthropic_original_content"] = copy.deepcopy(content)
+                if signature_val:
+                    asst_msg["_anthropic_signature"] = signature_val
+
                 if text_parts:
                     asst_msg["content"] = "\n".join(text_parts)
                 elif tool_calls:
@@ -435,6 +450,30 @@ def translate_anthropic_request(body: dict) -> dict:
     openai_req["stream"] = bool(body.get("stream", False))
 
     return openai_req
+
+
+def strip_anthropic_sidecar(target: Any) -> Any:
+    """从 messages 列表或 payload 请求体中剔除以 `_anthropic_` 开头的私有内部元字段，确保发往上游的数据符合规范。"""
+    if isinstance(target, list):
+        cleaned_list = []
+        for item in target:
+            if isinstance(item, dict):
+                cleaned_item = {k: v for k, v in item.items() if not (isinstance(k, str) and k.startswith("_anthropic_"))}
+                cleaned_list.append(cleaned_item)
+            else:
+                cleaned_list.append(item)
+        return cleaned_list
+    elif isinstance(target, dict):
+        cleaned_dict = {}
+        for k, v in target.items():
+            if isinstance(k, str) and k.startswith("_anthropic_"):
+                continue
+            if k == "messages" and isinstance(v, list):
+                cleaned_dict[k] = strip_anthropic_sidecar(v)
+            else:
+                cleaned_dict[k] = v
+        return cleaned_dict
+    return target
 
 
 def translate_openai_response_to_anthropic(openai_resp: dict) -> dict:

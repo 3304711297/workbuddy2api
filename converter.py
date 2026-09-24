@@ -58,11 +58,16 @@ except ImportError:  # 模块缺失时降级为不脱敏
         return []
 
 try:
-    from anthropic_compat import translate_anthropic_request, translate_openai_response_to_anthropic
+    from anthropic_compat import (
+        translate_anthropic_request,
+        translate_openai_response_to_anthropic,
+        strip_anthropic_sidecar,
+    )
     from anthropic_stream import AnthropicStreamTranslator
 except ImportError:
     translate_anthropic_request = None
     translate_openai_response_to_anthropic = None
+    strip_anthropic_sidecar = None
     AnthropicStreamTranslator = None
 
 try:
@@ -365,6 +370,38 @@ def _auth_is_expired(auth: dict) -> bool:
     return time.time() * 1000 >= (expires_at - 60_000)
 
 
+def _get_credential_readiness(session: dict) -> int:
+    """评估会话的凭据可用性等级（数字越小越优先）：
+    0: READY_INSTANT: access token 有效且未过期（无需即时网络调用）
+    1: READY_REFRESHABLE / UNKNOWN: 处于刷新窗口或无 auth 显式声明（向下兼容纯额度 mock）
+    2: UNREADY: access token 缺失且无有效 refreshToken（或 refresh token 确定已过期）
+    """
+    if not isinstance(session, dict):
+        return 1
+    auth = session.get("auth")
+    if not isinstance(auth, dict) or not auth:
+        return 1
+
+    token = auth.get("token") or auth.get("accessToken")
+    refresh_token = auth.get("refreshToken")
+    now_ms = time.time() * 1000
+
+    if token and not _auth_is_expired(auth):
+        return 0
+
+    if refresh_token:
+        ref_exp = auth.get("refreshExpiresAt") or auth.get("refresh_expires_at") or 0
+        try:
+            ref_exp_ms = float(ref_exp)
+            if ref_exp_ms > 0 and now_ms >= ref_exp_ms:
+                return 2
+        except (ValueError, TypeError):
+            pass
+        return 1
+
+    return 2
+
+
 _accounts_cache: tuple[str, dict[str, dict]] = ("", {})
 _accounts_sig: tuple[float, int] = (0.0, 0)
 
@@ -552,6 +589,13 @@ class CredentialManager:
         self._lock = threading.Lock()
         self._cached: dict | None = None
         self._mtime: float = 0.0
+        self._uid_refresh_locks: dict[str, threading.Lock] = {}
+
+    def _get_uid_refresh_lock(self, uid: str) -> threading.Lock:
+        with self._lock:
+            if uid not in self._uid_refresh_locks:
+                self._uid_refresh_locks[uid] = threading.Lock()
+            return self._uid_refresh_locks[uid]
 
     def _read_raw(self) -> dict:
         # 优先从 accounts.json 读取当前活跃会话（与桌面端多账号状态无缝对齐）
@@ -787,45 +831,55 @@ class CredentialManager:
             return ok
 
     def _refresh_session_tokens(self, uid: str, session: dict):
-        auth = session.get("auth") or {}
-        account = session.get("account") or {}
-        refresh_token = auth.get("refreshToken", "")
-        if not refresh_token:
-            return
-        headers = self._build_headers_from(auth, account)
-        headers["X-Refresh-Token"] = refresh_token
-        headers["X-Auth-Refresh-Source"] = "plugin"
-        url = f"{BACKEND}/v2/plugin/auth/token/refresh"
-        try:
-            with httpx.Client(timeout=15) as c:
-                r = c.post(url, headers=headers, json={})
-            data = r.json()
-        except Exception as e:
-            _log(f"刷新账号 {uid[:8]}... 异常: {e}")
-            return
-        if data.get("code") != 0 or not data.get("data"):
-            _log(f"刷新账号 {uid[:8]}... 响应异常: {data.get('msg', data)}")
-            return
-        new_auth = data["data"]
-        new_auth["domain"] = new_auth.get("domain") or auth.get("domain")
-        new_auth["lastRefreshTime"] = int(time.time() * 1000)
-        if not new_auth.get("expiresAt") and new_auth.get("expiresIn"):
-            new_auth["expiresAt"] = int(time.time() * 1000) + new_auth["expiresIn"] * 1000
-        if not new_auth.get("refreshExpiresAt") and new_auth.get("refreshExpiresIn"):
-            new_auth["refreshExpiresAt"] = int(time.time() * 1000) + new_auth["refreshExpiresIn"] * 1000
+        uid_lock = self._get_uid_refresh_lock(uid)
+        with uid_lock:
+            # 获得锁后二次检查：可能上一并发请求已完成刷新并落盘，避免重复网络调用
+            _, accounts = _read_all_accounts(force=True)
+            fresh_session = accounts.get(uid, session)
+            fresh_auth = (fresh_session.get("auth") or {}) if isinstance(fresh_session, dict) else {}
+            if fresh_auth and not _auth_is_expired(fresh_auth):
+                return
 
-        acc_path = _accounts_file()
-        if acc_path.is_file():
+            auth = fresh_auth or session.get("auth") or {}
+            account = (fresh_session.get("account") or session.get("account") or {}) if isinstance(fresh_session, dict) else (session.get("account") or {})
+            refresh_token = auth.get("refreshToken", "")
+            if not refresh_token:
+                return
+            headers = self._build_headers_from(auth, account)
+            headers["X-Refresh-Token"] = refresh_token
+            headers["X-Auth-Refresh-Source"] = "plugin"
+            url = f"{BACKEND}/v2/plugin/auth/token/refresh"
             try:
-                cfg = json.loads(acc_path.read_text(encoding="utf-8"))
-                if uid in cfg.get("accounts", {}):
-                    cfg["accounts"][uid]["auth"] = new_auth
-                    tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
-                    with open(tmp_acc, "w", encoding="utf-8") as f:
-                        json.dump(cfg, f, ensure_ascii=False, indent=2)
-                    os.replace(tmp_acc, acc_path)
+                with httpx.Client(timeout=15) as c:
+                    r = c.post(url, headers=headers, json={})
+                data = r.json()
             except Exception as e:
-                _log(f"写回刷新 token 失败: {e}")
+                _log(f"刷新账号 {uid[:8]}... 异常: {e}")
+                return
+            if data.get("code") != 0 or not data.get("data"):
+                _log(f"刷新账号 {uid[:8]}... 响应异常: {data.get('msg', data)}")
+                return
+            new_auth = data["data"]
+            new_auth["domain"] = new_auth.get("domain") or auth.get("domain")
+            new_auth["lastRefreshTime"] = int(time.time() * 1000)
+            if not new_auth.get("expiresAt") and new_auth.get("expiresIn"):
+                new_auth["expiresAt"] = int(time.time() * 1000) + new_auth["expiresIn"] * 1000
+            if not new_auth.get("refreshExpiresAt") and new_auth.get("refreshExpiresIn"):
+                new_auth["refreshExpiresAt"] = int(time.time() * 1000) + new_auth["refreshExpiresIn"] * 1000
+
+            acc_path = _accounts_file()
+            if acc_path.is_file():
+                try:
+                    cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+                    if uid in cfg.get("accounts", {}):
+                        cfg["accounts"][uid]["auth"] = new_auth
+                        tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
+                        with open(tmp_acc, "w", encoding="utf-8") as f:
+                            json.dump(cfg, f, ensure_ascii=False, indent=2)
+                        os.replace(tmp_acc, acc_path)
+                        _read_all_accounts(force=True)
+                except Exception as e:
+                    _log(f"写回刷新 token 失败: {e}")
 
     def summary(self) -> dict:
         s = self._session()
@@ -3431,9 +3485,10 @@ class AccountRotator:
         return 0
 
     def get_candidate_uids_tiered(self, model: str) -> list[str]:
-        """两级候选筛选（借鉴 momo0410/workbuddy-switch-gateway）：
-        1. 到期分层：优先消耗最快过期的额度（日粒度 YYYY-MM-DD），避免资产过期作废；
-        2. 未知到期日：作为兜底档排在最后。
+        """三级候选筛选与凭据门禁：
+        1. 凭据可用性门禁（ChatGPT 对拍 Direction A）：即时可用（READY_INSTANT）严格优先于待续期（READY_REFRESHABLE）与不可用；
+        2. 到期分层：优先消耗最快过期的额度（日粒度 YYYY-MM-DD），避免资产过期作废；
+        3. 未知到期日：作为兜底档排在最后。
         """
         all_accs = self.get_all_accounts()
         if not all_accs:
@@ -3446,7 +3501,8 @@ class AccountRotator:
         now = int(time.time())
         items = []
         for uid in ready:
-            session = acc_map.get(uid)
+            session = acc_map.get(uid) or {}
+            readiness = _get_credential_readiness(session)
             exp = 0
             if isinstance(session, dict):
                 credit = session.get("credit") or {}
@@ -3466,28 +3522,32 @@ class AccountRotator:
                                 break
             if exp > now:
                 day_key = time.strftime("%Y-%m-%d", time.localtime(exp))
-                items.append((uid, exp, day_key))
+                items.append((uid, exp, day_key, readiness))
             else:
-                items.append((uid, 0, "9999-99-99"))
+                items.append((uid, 0, "9999-99-99", readiness))
 
-        # 按到期日升序排序（最先过期的排最前面）
-        items.sort(key=lambda x: (x[2], x[1]))
-        return [uid for uid, _, _ in items]
+        # 按凭据就绪等级升序、到期日升序、绝对到期时间升序排序
+        items.sort(key=lambda x: (x[3], x[2], x[1]))
+        return [uid for uid, _, _, _ in items]
 
     def _get_top_tier_uids(self, uids: list[str]) -> list[str]:
         """从候选列表中筛选出属于最高优先级到期日档位的所有账号列表（用于同档打散防冲撞）。"""
         if len(uids) <= 1:
             return uids
+        all_accs = dict(self.get_all_accounts())
         now = int(time.time())
-        top_day = None
+        top_key = None
         top_tier = []
         for uid in uids:
+            session = all_accs.get(uid) or {}
+            readiness = _get_credential_readiness(session)
             exp = self.get_account_expire_at(uid)
             day_key = time.strftime("%Y-%m-%d", time.localtime(exp)) if exp > now else "9999-99-99"
-            if top_day is None:
-                top_day = day_key
+            composite_key = (readiness, day_key)
+            if top_key is None:
+                top_key = composite_key
                 top_tier.append(uid)
-            elif day_key == top_day:
+            elif composite_key == top_key:
                 top_tier.append(uid)
             else:
                 break
@@ -4433,6 +4493,8 @@ async def anthropic_messages(
     body["model"] = _normalize_model_name(body.get("model"))
     if "messages" in body:
         body["messages"] = await _inline_remote_images(body["messages"])
+        if strip_anthropic_sidecar is not None:
+            body["messages"] = strip_anthropic_sidecar(body["messages"])
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
@@ -4712,6 +4774,20 @@ async def openai_responses(
     try:
         chat_payload = responses_request_to_chat(raw_body)
     except Exception as e:
+        # 特别捕获 previous_response_not_found 语义异常，返回 OpenAI 官方规范的 400 JSONResponse（不带 FastAPI detail 包裹）
+        if type(e).__name__ == "PreviousResponseNotFoundError":
+            resp_id = getattr(e, "response_id", "unknown")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": f"Previous response with id '{resp_id}' was not found in the local response store. Start a new response chain, or resend the full conversation/input with previous_response_id omitted.",
+                        "type": "invalid_request_error",
+                        "code": "previous_response_not_found",
+                        "param": "previous_response_id",
+                    }
+                },
+            )
         raise HTTPException(status_code=400, detail={"error": {"message": f"invalid responses request: {e}", "type": "invalid_request_error"}})
 
     # Codex CLI 长上下文最小语义闭包投影压缩（默认 safe/off 保持语义完整；支持 header/body/config 显式开启）

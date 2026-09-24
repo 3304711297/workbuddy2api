@@ -14,6 +14,13 @@ import time
 from typing import Any
 
 
+class PreviousResponseNotFoundError(Exception):
+    """当客户端指定 previous_response_id 但本地 response store 找不到该前序响应时抛出。"""
+    def __init__(self, response_id: str):
+        super().__init__(f"Previous response with id '{response_id}' was not found.")
+        self.response_id = response_id
+
+
 _RESPONSE_HISTORY_CACHE: dict[str, list[dict]] = {}
 _MAX_CACHED_RESPONSES = 256
 
@@ -51,12 +58,14 @@ def responses_request_to_chat(body: dict) -> dict:
     """
     messages: list[dict] = []
 
-    # previous_response_id 支持：从响应缓存中复原前序轮次的历史上下文（若存在）
+    # previous_response_id 支持：从响应缓存中复原前序轮次的历史上下文
+    # 严格对齐 OpenAI Responses 协议规范：若显式指定但缓存 miss，必须阻断报错，杜绝静默上下文分叉
     prev_id = body.get("previous_response_id")
     if prev_id and isinstance(prev_id, str):
         cached_history = get_cached_response_messages(prev_id)
-        if cached_history:
-            messages.extend(cached_history)
+        if cached_history is None:
+            raise PreviousResponseNotFoundError(prev_id)
+        messages.extend(cached_history)
 
     # input -> messages
     inp = body.get("input", [])
