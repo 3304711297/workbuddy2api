@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-23",
+  "updated_at": "2026-09-24",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -88,10 +88,10 @@
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
       "repo": "hawklithm/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "ed7e02e2",
-      "last_synced_sha": "ed7e02e2fa16afd2488ae280c786462e621590e0",
+      "last_synced_commit": "539f0ce7",
+      "last_synced_sha": "539f0ce7ee649e72122bff1627490417306b7412",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议与多轮消息互转经验）",
-      "note": "轻量协议代理，原生支持 Claude Code CLI、Codex CLI 与 DeepSeek Harness；已借鉴其 Responses 与 Claude 协议边缘流式处理经验；监控整仓新提交。本轮评估 ae726126→ed7e02e2：新增 `--global` 国内/国际后端切换（一套凭据目录按 backend 隔离）与 trusted PyPI 发布流水线。**未采纳**：本仓已有等价能力——出站 UA 与域名按 `workbuddy.ai`/国内分别仿真、国际版凭据目录亦可交互式生成（`auth_dirs` 已含 mac/win/linux + WSL 宿主穿透），且**本机实证无国际版使用痕迹**（converter.log 全文匹配 `workbuddy.ai` / `codebuddy.ai` 各 0 次，2,000+ 次请求全走国内 endpoint），CLI 加显式 realm 开关属其单进程生态的特有形态，与本仓「桌面端管理多账号 + 单内核服务全部客户端」的架构重叠。"
+      "note": "轻量协议代理，原生支持 Claude Code CLI、Codex CLI 与 DeepSeek Harness；已借鉴其 Responses 与 Claude 协议边缘流式处理经验；监控整仓新提交。本轮评估 ed7e02e2→539f0ce7（包含 a9439e77 与 539f0ce7）：改动涉及 Windows 下 uvicorn 切换至 SelectorEventLoop 抑制 WinError 64 / 10054 套接字断开异常，以及版本号发布 2.0.6。**未采纳**：SelectorEventLoop 在 Windows 下受限于 select() 最大 512 句柄限制且不支持异步子进程管道；WinError 64/10054 系客户端主动断开连接时的良性系统信号，非服务崩溃。本仓由桌面 GUI 与 proxy.rs 管理内核生命周期与结构化日志轮转，无需切换 Windows 默认高性能 ProactorEventLoop 事件循环。"
     },
     "wb2api-upstream-icebears": {
       "name": "workbuddy2api 配额感知版（icebears111，借鉴雷达）",
@@ -124,10 +124,10 @@
       "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
       "repo": "Practice019/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "f5a8c329",
-      "last_synced_sha": "f5a8c32907130468b48ee2420a123759368913a3",
+      "last_synced_commit": "ca8d66f3",
+      "last_synced_sha": "ca8d66f3f4d275a8f3d7b75221f0ebbf9879a648",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 661085d0→f5a8c329：改动为增加批量粘贴导入账号 JSON 接口。本仓由桌面 GUI 与本地 accounts.json 原生管理多账号，未采纳。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 f5a8c329→ca8d66f3（共 14 项提交）：主要改动为接入小米 MiMo 开放平台作为第 5 上游（OAuth/Cookie/桌面端凭证提取/SSO 换票续期全链路）及 Trae 凭据续期自愈与 503 自解释文案。**未采纳**：本仓专注于腾讯 CodeBuddy / WorkBuddy 反代，不维护小米 MiMo / Trae 等多平台模型池；本仓账号生命周期与多账号轮换（AccountRotator）由桌面 GUI 和 token_refresher 原生治理，冷却时本就具备单飞探测自愈与明确错误提示。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
@@ -160,10 +160,10 @@
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "3b1d39b2",
-      "last_synced_sha": "3b1d39b22f44f22ab42fd99dd27e49d4ea843e8f",
+      "last_synced_commit": "9cfdb623",
+      "last_synced_sha": "9cfdb6236437c350563f60cdd97c3ab3f2fac6fd",
       "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；本轮吸收其 #178 客户端用量提示剥离规则）",
-      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 917ac368→3b1d39b2：改动涉及企业版额度查询、思考强度直接按模型能力矩阵吸附（移除环境变量）。本仓本就具备全自动模型思考能力矩阵与透传机制，未采纳。"
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 3b1d39b2→9cfdb623（包含 d5c7690e 与 9cfdb623）：d5c7690e 修复了其 TypeScript 上游在 normalizeMessages 中以 item.content !== undefined 过滤历史消息时误将缺少 content 的 assistant tool_calls 丢弃导致孤儿 tool 报错的问题；9cfdb623 为版本发布 v1.3.14。**无需代码修改**：本仓 Python 实现的 converter 与 responses_projection 始终完整保留 contentless 消息与工具调用配对，不存在上游的误过滤缺陷；已补齐针对性契约测试锁定该行为。"
     },
     "wb2api-upstream-hanhan": {
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
