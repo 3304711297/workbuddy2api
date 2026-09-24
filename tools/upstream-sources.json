@@ -7,10 +7,10 @@
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
       "repo": "xiaofan6ya/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "bc173d82",
-      "last_synced_sha": "bc173d82670dee4ef9761e78b274b7157ddb08b6",
+      "last_synced_commit": "bb2da825",
+      "last_synced_sha": "bb2da825a84535f67fcef5c18a16d2ae6064b01e",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 14003 瞬时模型级限流识别与秒级短冷却机制；吸收其「HTTP 200 包着的错误不得当成功」语义）",
-      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 3582c2ee→bc173d82：采纳 bc173d82「14003 是模型级限流，改判 request_rate 并走秒级短冷却（20s±5s），避免 300s 软限流导致整个模型被过度冷冻甚至整池停摆」，已在 converter.py 中独立落地并通过 699 项单测全绿锁定。"
+      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 bc173d82→bb2da825：修复 /api/growth 无鉴权、/gw/health 泄露敏感信息、文档默认开放等。**无需采纳**：本仓面向桌面级开发者，无云端多租户管理面；且本仓 /health 早已收窄仅返回布尔状态（status/authenticated），不泄露任何路径、手机号或余额，同时保持免鉴权以满足本地 GUI 与更新脚本探活契约。"
     },
     "wb2api-upstream-distpub": {
       "name": "workbuddy2api 增强 fork（DistPub，借鉴雷达）",
@@ -124,10 +124,10 @@
       "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
       "repo": "Practice019/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "ca8d66f3",
-      "last_synced_sha": "ca8d66f3f4d275a8f3d7b75221f0ebbf9879a648",
+      "last_synced_commit": "1f2a7a9a",
+      "last_synced_sha": "1f2a7a9ab09b5f5c723d7a43bc8e6d1e8d0f4b0c",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 f5a8c329→ca8d66f3（共 14 项提交）：主要改动为接入小米 MiMo 开放平台作为第 5 上游（OAuth/Cookie/桌面端凭证提取/SSO 换票续期全链路）及 Trae 凭据续期自愈与 503 自解释文案。**未采纳**：本仓专注于腾讯 CodeBuddy / WorkBuddy 反代，不维护小米 MiMo / Trae 等多平台模型池；本仓账号生命周期与多账号轮换（AccountRotator）由桌面 GUI 和 token_refresher 原生治理，冷却时本就具备单飞探测自愈与明确错误提示。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 ca8d66f3→1f2a7a9a（共 5 项提交）：改动为 Go 账号池导入/OAuth 凭据投影（poolAuthsFromCreds 解决 secret 渠道凭证丢失）与全池一键完成任务受限并发及跳过已知无法自动化任务（Expert_Philanthropy 等）。**无需采纳**：本仓专注于纯反代与桌面 GUI 架构，不维护成长任务/签到打卡自动化脚本；本仓多账号池凭证由原生 AccountRotator 维护，无 Go 内部结构体投影丢失问题。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
@@ -160,10 +160,10 @@
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "9cfdb623",
-      "last_synced_sha": "9cfdb6236437c350563f60cdd97c3ab3f2fac6fd",
-      "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；本轮吸收其 #178 客户端用量提示剥离规则）",
-      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 3b1d39b2→9cfdb623（包含 d5c7690e 与 9cfdb623）：d5c7690e 修复了其 TypeScript 上游在 normalizeMessages 中以 item.content !== undefined 过滤历史消息时误将缺少 content 的 assistant tool_calls 丢弃导致孤儿 tool 报错的问题；9cfdb623 为版本发布 v1.3.14。**无需代码修改**：本仓 Python 实现的 converter 与 responses_projection 始终完整保留 contentless 消息与工具调用配对，不存在上游的误过滤缺陷；已补齐针对性契约测试锁定该行为。"
+      "last_synced_commit": "6ea2a939",
+      "last_synced_sha": "6ea2a939fac3d8ac58d2ada40831d784507dfe55",
+      "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；本轮吸收其 #194 /v1/messages 内部 system 角色保真与 #178 用量提示剥离规则）",
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 9cfdb623→6ea2a939（包含 83c499f5 与 6ea2a939）：83c499f5 修复其在 /v1/messages 中把客户端发送在 messages 内部的 system 角色误当作 assistant 发送的问题；6ea2a939 为版本发布 v1.3.15。**已验证并锁定**：本仓 Python 实现的 anthropic_compat 始终正确保留 system 角色；已同步补强 strip_attribution 纯用量提示丢弃空壳逻辑，并新增专项契约测试锁定 system 角色不退化。"
     },
     "wb2api-upstream-hanhan": {
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",

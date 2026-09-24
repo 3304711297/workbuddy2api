@@ -300,7 +300,9 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
 
         elif role == "system":
             if isinstance(content, str):
-                openai_msgs.append({"role": "system", "content": _strip_attribution(content)})
+                cleaned = _strip_attribution(content)
+                if cleaned.strip() or not content.strip():
+                    openai_msgs.append({"role": "system", "content": cleaned})
             elif isinstance(content, list):
                 sys_text = _extract_system_prompt(content)
                 if sys_text:

@@ -104,6 +104,41 @@ class TestTranslateAnthropicRequest:
         assert len(res["messages"]) == 1
         assert res["messages"][0]["role"] == "user"
 
+    def test_system_role_inside_messages_list(self):
+        # 验证 /v1/messages 中直接包含 role="system" 的消息（如部分客户端/代理的非常规行为）
+        # 1. role="system" 绝不得被降级或误转换为 role="assistant"（对齐 orangeboyChen/codebuddy2api #194）
+        # 2. 支持纯文本与 content 块两种形态，且正常剥离 attribution
+        body = {
+            "model": "deepseek-v4.1-flash",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "content": [{"type": "text", "text": "Answer in one sentence."}]},
+                {"role": "assistant", "content": "Sure thing."},
+                {"role": "system", "content": "Be polite and concise."},
+            ],
+        }
+        res = translate_anthropic_request(body)
+        assert len(res["messages"]) == 4
+        assert res["messages"][0] == {"role": "user", "content": "Hi"}
+        assert res["messages"][1] == {"role": "system", "content": "Answer in one sentence."}
+        assert res["messages"][2]["role"] == "assistant"
+        assert res["messages"][2]["content"] == "Sure thing."
+        assert res["messages"][3] == {"role": "system", "content": "Be polite and concise."}
+
+    def test_system_role_inside_messages_drops_empty_reminder_shell(self):
+        # 若 messages 内部的 system 消息仅包含客户端用量提示或 attribution，剥离后为空则整条丢弃，不留空壳
+        body = {
+            "model": "deepseek-v4.1-flash",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "<system-reminder>Token usage: 12 / 200000; 199988 remaining</system-reminder>"},
+                {"role": "system", "content": "x-anthropic-billing-header: only-attribution"},
+            ],
+        }
+        res = translate_anthropic_request(body)
+        assert len(res["messages"]) == 1
+        assert res["messages"][0] == {"role": "user", "content": "Hello"}
+
     def test_messages_with_text_blocks(self):
         body = {
             "model": "claude-3-5-sonnet-20241022",
