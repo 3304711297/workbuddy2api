@@ -1318,6 +1318,12 @@ test('更新启动命令必须显式赋予有意义的窗口标题（避免空�
     /\.arg\(["']start["']\)\s*\.arg\(["'][^"']+["']\)/.test(spawnCode),
     'cmd start 缺少非空的窗口标题参数'
   );
+  // windows.ps1 自身也必须在启动时通过 $Host.UI.RawUI.WindowTitle / [Console]::Title 设置标题，
+  // 杜绝 Windows 提升权限时将控制台窗口退化为 cmd.exe 绝对路径的现象
+  assert.ok(
+    /WindowTitle\s*=/.test(handoff) || /\[Console\]::Title\s*=/.test(handoff),
+    'windows.ps1 未显式设置 WindowTitle / [Console]::Title'
+  );
 });
 
 test('更新脚本必须在启动早期配置 UTF-8 控制台编码与虚拟终端支持（防中文乱码与进度条失效）', () => {

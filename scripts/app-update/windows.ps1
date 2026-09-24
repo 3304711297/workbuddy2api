@@ -91,6 +91,8 @@ try {
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $env:LESSCHARSET = 'utf-8'
+    $Host.UI.RawUI.WindowTitle = 'WorkBuddy2API 更新程序'
+    [Console]::Title = 'WorkBuddy2API 更新程序'
 } catch { }
 
 $updateDir = Join-Path $env:LOCALAPPDATA 'workbuddy2api\update'

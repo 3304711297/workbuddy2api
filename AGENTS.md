@@ -104,7 +104,7 @@ pwsh 7+ 与 5.1 都要跑一遍（两者报错数可能不同）。**"无日志�
 **正解（对齐 Hermes `apps/desktop/electron/updater-process.ts:158`）**：
 `cmd /d /s /c start "WorkBuddy2API 更新程序" /min <powershell_abs_path> -File <script>` —— cmd 立即退出、脚本获得**自己的最小化控制台**，
 既解决 console 初始化问题（克服 ①），又让 `Write-Host` 的进度对用户可见（克服 ②）。
-⚠️ **start 的第一个参数必须赋予明确标题**：若传空串 `""`，Windows 控制台窗口标题栏会退化显示为 `cmd.exe`，导致用户看到任务栏是 powershell 但窗口标题是 cmd.exe 的伪装现象。
+⚠️ **start 的第一个参数必须赋予明确标题，且脚本内必须二次锁定窗口标题**：若传空串 `""`，Windows 控制台窗口标题栏会退化显示为 `cmd.exe`；同时 Windows 在提权模式（Administrator）下有将控制台标题退化为 cmd 路径的缺陷，因此脚本启动时必须同时由 `$Host.UI.RawUI.WindowTitle` 与 `[Console]::Title` 将窗口标题强行固化为 `WorkBuddy2API 更新程序`。
 Rust 侧**不得再设置任何 `creation_flags`**。契约锁定：
 `tests/test_app_update_contract.test.js` 的 spawn flags 断言（禁 DETACHED_PROCESS / 禁 CREATE_NO_WINDOW / 禁 .creation_flags()，且锁定标题非空）。
 ⚠️ **控制台 UTF-8 编码与 VT100 / 进度条渲染三件套（2026-09-24 修复）**：
