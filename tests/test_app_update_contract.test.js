@@ -1335,10 +1335,14 @@ test('更新脚本必须在启动早期配置 UTF-8 控制台编码与虚拟终�
 });
 
 test('更新脚本构建阶段必须启用 Cargo 进度条环境变量且实时流式回显', () => {
-  // 确保 cargo tauri build 触发动态进度条
+  // 确保 cargo tauri build 触发动态进度条且携带 width，防止 Cargo 1.80+ 报 "always" progress requires a `width` key
   assert.ok(
     /CARGO_TERM_PROGRESS_WHEN/.test(handoff),
     'windows.ps1 未设置 CARGO_TERM_PROGRESS_WHEN=always：重定向捕获时 Cargo 默认关闭进度条'
+  );
+  assert.ok(
+    /CARGO_TERM_PROGRESS_WIDTH/.test(handoff),
+    'windows.ps1 未设置 CARGO_TERM_PROGRESS_WIDTH：Cargo 1.80+ 在 non-tty 且 progress=always 下强制要求 width key'
   );
 });
 

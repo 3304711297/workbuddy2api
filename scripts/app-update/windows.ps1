@@ -821,6 +821,7 @@ try {
     # ── 5. Rust 重建（必须走 tauri CLI） ────────────────────────────────────
     Write-State -Phase 'building' -Message '正在编译应用（此步耗时较长）'
     $env:CARGO_TERM_PROGRESS_WHEN = 'always'
+    $env:CARGO_TERM_PROGRESS_WIDTH = '80'
     $env:CARGO_TERM_COLOR = 'always'
     Push-Location (Join-Path $InstallRoot 'src-tauri')
     try {
@@ -968,6 +969,7 @@ catch {
                 Push-Location (Join-Path $InstallRoot 'src-tauri')
                 try {
                     $env:CARGO_TERM_PROGRESS_WHEN = 'always'
+                    $env:CARGO_TERM_PROGRESS_WIDTH = '80'
                     $env:CARGO_TERM_COLOR = 'always'
                     $cargoCode = Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建'
                     if ($cargoCode -eq 0) {

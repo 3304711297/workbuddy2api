@@ -110,7 +110,7 @@ Rust 侧**不得再设置任何 `creation_flags`**。契约锁定：
 ⚠️ **控制台 UTF-8 编码与 VT100 / 进度条渲染三件套（2026-09-24 修复）**：
 ① **中文识别乱码**：Windows PowerShell 5.1 / 默认控制台代码页为 CP936(GBK)，git/cargo/npm 输出 UTF-8 中文时会大面积乱码。脚本开头必须显式设置 `[Console]::OutputEncoding = [Console]::InputEncoding = $OutputEncoding = UTF-8` 与 `$env:LESSCHARSET = 'utf-8'`。
 ② **ANSI 虚拟终端支持**：`Wb2aConsole` 除了清除 QuickEdit 外，必须在输出流设置 `ENABLE_VIRTUAL_TERMINAL_PROCESSING(0x0004)`，确保控制台具备原生解析 ANSI 转义序列与动态进度条的能力。
-③ **构建进度条与流式回显**：`$out = & $cmd 2>&1` 会因非 TTY 管道导致 Cargo 默认关闭进度条且阻塞至执行结束；构建前必须注入 `$env:CARGO_TERM_PROGRESS_WHEN = 'always'` 与 `$env:CARGO_TERM_COLOR = 'always'`，且 `Invoke-Logged` 改用管道实时流式回显到控制台，恢复构建动态进度。
+③ **构建进度条与流式回显**：`$out = & $cmd 2>&1` 会因非 TTY 管道导致 Cargo 默认关闭进度条且阻塞至执行结束；构建前必须注入 `$env:CARGO_TERM_PROGRESS_WHEN = 'always'`、`$env:CARGO_TERM_PROGRESS_WIDTH = '80'`（Cargo 1.80+ 在 non-tty 且 progress=always 下强制要求提供 width）与 `$env:CARGO_TERM_COLOR = 'always'`，且 `Invoke-Logged` 改用管道实时流式回显到控制台，恢复构建动态进度。
 ⚠️ **光有控制台窗口不够 —— 脚本必须把进度 `Write-Host` 回显，否则用户在窗口里看到的是空白**：
 实测本脚本 `Write-Host` 调用数曾为 **0**（只写文件日志），给窗口等于白给。修法：`Write-Log` 在
 写文件后追加 `Write-Host "[$Level] $Message"`（Hermes 的 `Write-HandoffLog` 内部同样有 `Write-Host $line`）。
