@@ -5422,6 +5422,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                 failover = _call_failover(rotator, curr_uid, model_name, 502, err_payload, attempt=attempt)
                 if failover:
                     curr_uid, curr_headers = failover
+                    if on_account_switched:
+                        on_account_switched(curr_uid)
                     await _failover_jitter(rid)
                     continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
@@ -6101,7 +6103,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     def _reset_attempt_state() -> None:
         """丢弃本轮的缓冲与统计，为新一次尝试腾出干净状态。"""
-        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter, total_events, saw_done
+        nonlocal buf, finish_reason, ttft_ms, err_msg, attempt_saw_progress, saw_filter, total_events, saw_done, line_buf
         pending_events.clear()
         attempt_content.clear()
         tool_names.clear()
@@ -6281,10 +6283,15 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                         break
             except httpx.HTTPError as e:
                 err_payload = getattr(e, "raw", None) or str(e)
-                if rotator and attempt < max_attempts - 1:
+                # 流式 replay-safety 硬契约：仅在尚未向客户端交付任何实质性输出（not attempt_saw_progress）时允许换号重放；
+                # 一旦客户端已经观察到当前 generation 的响应字节，绝对禁止跨账号重放（防内容双重拼接污染），直接终止流并报错。
+                if rotator and attempt < max_attempts - 1 and not attempt_saw_progress:
                     failover = _call_failover(rotator, curr_uid, model_name, 502, err_payload, attempt=attempt)
                     if failover:
                         curr_uid, curr_headers = failover
+                        if on_account_switched:
+                            on_account_switched(curr_uid)
+                        _reset_attempt_state()
                         await _failover_jitter(rid)
                         continue
                 _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
