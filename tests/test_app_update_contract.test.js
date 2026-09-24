@@ -1298,3 +1298,68 @@ test('更新脚本必须抑制控制台的 QuickEdit 模式（否则点击窗口
     '未用按位清除（& ~ENABLE_QUICK_EDIT_MODE）：直接赋值会覆盖掉其它必需的控制台模式位'
   );
 });
+
+test('更新启动命令必须显式赋予有意义的窗口标题（避免空标题被系统默认渲染成 cmd.exe）', () => {
+  const code = stripRustComments(updateRs);
+  const fnStart = code.indexOf('pub fn apply_app_update');
+  assert.ok(fnStart > 0, '未找到 apply_app_update 定义');
+  const afterStart = code.slice(fnStart);
+  const bodyLines = afterStart.split('\n').map((l) => l.trimEnd());
+  const endIdx = bodyLines.findIndex((line, i) => i > 0 && line === '}');
+  const spawnCode = bodyLines.slice(1, endIdx).join('\n');
+
+  // cmd start 的第一个带引号参数是窗口标题。
+  // 若为空串 ""，Windows 会将控制台窗口标题栏默认渲染成 cmd.exe 路径，导致用户困惑
+  assert.ok(
+    !/\.arg\(["']start["']\)\s*\.arg\(["']["']\)/.test(spawnCode),
+    'cmd start 后面传了空标题 ""：Windows 控制台标题栏会退化显示为 cmd.exe，必须赋予明确的更新窗口标题'
+  );
+  assert.ok(
+    /\.arg\(["']start["']\)\s*\.arg\(["'][^"']+["']\)/.test(spawnCode),
+    'cmd start 缺少非空的窗口标题参数'
+  );
+});
+
+test('更新脚本必须在启动早期配置 UTF-8 控制台编码与虚拟终端支持（防中文乱码与进度条失效）', () => {
+  // 必须设置 [Console]::OutputEncoding / $OutputEncoding 为 UTF-8，彻底解决中文乱码与本地化工具输出解析
+  assert.ok(
+    /\[Console\]::OutputEncoding\s*=/.test(handoff) || /\$OutputEncoding\s*=/.test(handoff),
+    'windows.ps1 未设置 UTF-8 控制台编码：Windows PowerShell 默认按 GBK/OEM 解码，导致中文路径/日志大面积乱码'
+  );
+
+  // 必须开启 ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x0004)
+  assert.ok(
+    /ENABLE_VIRTUAL_TERMINAL_PROCESSING|0x0004/.test(handoff),
+    'windows.ps1 未开启控制台虚拟终端处理（ENABLE_VIRTUAL_TERMINAL_PROCESSING / 0x0004）：导致 ANSI 转义序列与进度条无法正常渲染'
+  );
+});
+
+test('更新脚本构建阶段必须启用 Cargo 进度条环境变量且实时流式回显', () => {
+  // 确保 cargo tauri build 触发动态进度条
+  assert.ok(
+    /CARGO_TERM_PROGRESS_WHEN/.test(handoff),
+    'windows.ps1 未设置 CARGO_TERM_PROGRESS_WHEN=always：重定向捕获时 Cargo 默认关闭进度条'
+  );
+});
+
+test('Rust 侧 resolve_powershell 优先探测 pwsh7（含绝对路径）并在缺失时降级到系统 PowerShell', () => {
+  const code = stripRustComments(updateRs);
+  const fnStart = code.indexOf('fn resolve_powershell');
+  assert.ok(fnStart > 0, '未找到 resolve_powershell 定义');
+  const afterStart = code.slice(fnStart);
+  const bodyLines = afterStart.split('\n').map((l) => l.trimEnd());
+  const endIdx = bodyLines.findIndex((line, i) => i > 0 && line === '}');
+  const fnCode = bodyLines.slice(1, endIdx).join('\n');
+
+  // 必须优先查 pwsh / pwsh 7
+  assert.ok(
+    fnCode.indexOf('pwsh') < fnCode.indexOf('powershell.exe') || fnCode.indexOf('pwsh') < fnCode.indexOf('System32'),
+    'resolve_powershell 未优先探测 pwsh 7'
+  );
+  // which 查到后必须返回绝对路径（path.to_string_lossy），不得丢弃路径返回裸命令名
+  assert.ok(
+    /to_string_lossy/.test(fnCode),
+    'resolve_powershell 查到可执行文件后未返回绝对路径：返回裸名会导致 cmd start 在非交互子进程下定位失败'
+  );
+});
+

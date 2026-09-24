@@ -85,6 +85,14 @@ $autoStartProxyEnabled = ($AutoStartProxy -eq 'true')
 
 $ErrorActionPreference = 'Stop'
 
+# ── 全局 UTF-8 与控制台输入输出编码（彻底解决中文乱码与本地化工具输出解析） ───
+try {
+    [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $env:LESSCHARSET = 'utf-8'
+} catch { }
+
 $updateDir = Join-Path $env:LOCALAPPDATA 'workbuddy2api\update'
 if ([string]::IsNullOrWhiteSpace($LogPath)) { $LogPath = Join-Path $updateDir 'app-update.log' }
 if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDir 'app-update-state.json' }
@@ -92,7 +100,7 @@ if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = Join-Path $updateDi
 $logDir = Split-Path -Parent $LogPath
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-# ── 关闭控制台的 QuickEdit 模式（2026-09-20 用户实测修复）────────────────────
+# ── 关闭控制台的 QuickEdit 模式并启用 VT100 / ANSI 虚拟终端 ─────────────────
 # 症状：cargo tauri build 阶段长时间毫无输出，**按一下回车才继续**。
 # 根因：`cmd start /min` 分配的控制台默认开启 QuickEdit。用户一旦点击窗口（或误触），
 # 控制台进入「标记/选择」状态，**任何往 stdout 写入的进程都会被内核阻塞**，
@@ -103,6 +111,8 @@ if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path 
 # ENABLE_EXTENDED_FLAGS(0x0080)** 才会让 QuickEdit 的清除生效（MSDN 原文：
 # "To enable or disable this mode, use ENABLE_EXTENDED_FLAGS in the mode parameter
 #  and include or clear ENABLE_QUICK_EDIT_MODE."）。
+# 同时启用输出流的 ENABLE_VIRTUAL_TERMINAL_PROCESSING(0x0004)，确保控制台具备原生 VT100
+# 转义序列解析能力（构建进度条、彩色文字与行级动态刷新）。
 # 全部失败也不影响功能：这只是体验优化，出错就静默跳过（不因它中止更新）。
 try {
     $qkSig = @'
@@ -116,14 +126,22 @@ public static class Wb2aConsole {
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
     public const int STD_INPUT_HANDLE = -10;
+    public const int STD_OUTPUT_HANDLE = -11;
     public const uint ENABLE_EXTENDED_FLAGS = 0x0080;
     public const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+    public const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
     public static string DisableQuickEdit() {
-        IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
-        uint mode;
-        if (!GetConsoleMode(h, out mode)) { return "GetConsoleMode failed"; }
-        uint updated = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
-        if (!SetConsoleMode(h, updated)) { return "SetConsoleMode failed"; }
+        IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
+        uint inMode;
+        if (GetConsoleMode(hIn, out inMode)) {
+            uint updatedIn = (inMode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
+            SetConsoleMode(hIn, updatedIn);
+        }
+        IntPtr hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        uint outMode;
+        if (GetConsoleMode(hOut, out outMode)) {
+            SetConsoleMode(hOut, outMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
         return "ok";
     }
 }
@@ -521,9 +539,11 @@ function Throw-Failure {
 function Invoke-Logged {
     param([string]$FilePath, [string[]]$Arguments, [string]$What)
     Write-Log "执行：$FilePath $($Arguments -join ' ')"
-    $out = & $FilePath @Arguments 2>&1
+    & $FilePath @Arguments 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        Write-Log "  $line"
+    }
     $code = $LASTEXITCODE
-    foreach ($line in $out) { Write-Log "  $line" }
     if ($code -ne 0) { Write-Log "$What 失败（退出码 $code）" 'ERROR' }
     return $code
 }
@@ -800,6 +820,8 @@ try {
 
     # ── 5. Rust 重建（必须走 tauri CLI） ────────────────────────────────────
     Write-State -Phase 'building' -Message '正在编译应用（此步耗时较长）'
+    $env:CARGO_TERM_PROGRESS_WHEN = 'always'
+    $env:CARGO_TERM_COLOR = 'always'
     Push-Location (Join-Path $InstallRoot 'src-tauri')
     try {
         # ⚠️ 绝不改成 cargo build --release：custom-protocol feature 只有 tauri CLI 会带上，
@@ -945,6 +967,8 @@ catch {
             if ($npmCode -eq 0) {
                 Push-Location (Join-Path $InstallRoot 'src-tauri')
                 try {
+                    $env:CARGO_TERM_PROGRESS_WHEN = 'always'
+                    $env:CARGO_TERM_COLOR = 'always'
                     $cargoCode = Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建'
                     if ($cargoCode -eq 0) {
                         $rollbackRebuildOk = $true

@@ -93,17 +93,24 @@ pwsh 7+ 与 5.1 都要跑一遍（两者报错数可能不同）。**"无日志�
 `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` 是 AppExecLink 重解析点，`is_file()`
 对它返回 false → which 静默找不到 pwsh → 回退 5.1 → 触发上述 BOM 死亡链。
 判定用 `fs::metadata().is_ok()`（`update.rs::path_is_executable`）。
-⚠️ **spawn 更新脚本的三重 flag 陷阱（最终方案：改用 `cmd start /min` 包装，别再直接 spawn powershell）**：
+⚠️ **PowerShell 7 优先与绝对路径解析（2026-09-24 用户实测修复）**：
+`resolve_powershell()` 必须**优先探测 pwsh 7**，包括 `POWERSHELL` 环境变量、PATH 上的 `pwsh`，以及常见物理安装路径（`%ProgramFiles%\PowerShell\7\pwsh.exe`、`%LOCALAPPDATA%\Programs\PowerShell\7\pwsh.exe`、WindowsApps 等）；仅在全无 pwsh 7 时才降级到系统自带的 Windows PowerShell 5.1。且**必须返回规范绝对路径**（`PathBuf.to_string_lossy()`），禁止返回裸名 `"pwsh"`（会导致 cmd 子进程在非标准 PATH 下定位失败或 Store 别名拒绝访问）。
+⚠️ **spawn 更新脚本的三重 flag 陷阱与窗口标题（改用 `cmd start "WorkBuddy2API 更新程序" /min` 包装）**：
 实测对照（Rust 同款 creationflags 逐变量，覆盖 Store 别名/物理路径 pwsh/PS 5.1）：
 ① `DETACHED_PROCESS`(0x8) → 进程 spawn 成功但**静默不执行任何脚本**就退出（无日志、无状态文件）；
 ② `CREATE_NO_WINDOW`(0x08000000) → 脚本能跑，但**控制台被完全隐藏**，用户看不到任何进度
 （2026-09-20 用户实测反馈「Hermes 能看到进度，你这个看不到」）；
 ③ `CREATE_NEW_CONSOLE`(0x10) → 可跑且有窗口，但脱离性与外观不如方案④。
 **正解（对齐 Hermes `apps/desktop/electron/updater-process.ts:158`）**：
-`cmd /d /s /c start "" /min <powershell> -File <script>` —— cmd 立即退出、脚本获得**自己的最小化控制台**，
+`cmd /d /s /c start "WorkBuddy2API 更新程序" /min <powershell_abs_path> -File <script>` —— cmd 立即退出、脚本获得**自己的最小化控制台**，
 既解决 console 初始化问题（克服 ①），又让 `Write-Host` 的进度对用户可见（克服 ②）。
+⚠️ **start 的第一个参数必须赋予明确标题**：若传空串 `""`，Windows 控制台窗口标题栏会退化显示为 `cmd.exe`，导致用户看到任务栏是 powershell 但窗口标题是 cmd.exe 的伪装现象。
 Rust 侧**不得再设置任何 `creation_flags`**。契约锁定：
-`tests/test_app_update_contract.test.js` 的 spawn flags 断言（禁 DETACHED_PROCESS / 禁 CREATE_NO_WINDOW / 禁 .creation_flags()）。
+`tests/test_app_update_contract.test.js` 的 spawn flags 断言（禁 DETACHED_PROCESS / 禁 CREATE_NO_WINDOW / 禁 .creation_flags()，且锁定标题非空）。
+⚠️ **控制台 UTF-8 编码与 VT100 / 进度条渲染三件套（2026-09-24 修复）**：
+① **中文识别乱码**：Windows PowerShell 5.1 / 默认控制台代码页为 CP936(GBK)，git/cargo/npm 输出 UTF-8 中文时会大面积乱码。脚本开头必须显式设置 `[Console]::OutputEncoding = [Console]::InputEncoding = $OutputEncoding = UTF-8` 与 `$env:LESSCHARSET = 'utf-8'`。
+② **ANSI 虚拟终端支持**：`Wb2aConsole` 除了清除 QuickEdit 外，必须在输出流设置 `ENABLE_VIRTUAL_TERMINAL_PROCESSING(0x0004)`，确保控制台具备原生解析 ANSI 转义序列与动态进度条的能力。
+③ **构建进度条与流式回显**：`$out = & $cmd 2>&1` 会因非 TTY 管道导致 Cargo 默认关闭进度条且阻塞至执行结束；构建前必须注入 `$env:CARGO_TERM_PROGRESS_WHEN = 'always'` 与 `$env:CARGO_TERM_COLOR = 'always'`，且 `Invoke-Logged` 改用管道实时流式回显到控制台，恢复构建动态进度。
 ⚠️ **光有控制台窗口不够 —— 脚本必须把进度 `Write-Host` 回显，否则用户在窗口里看到的是空白**：
 实测本脚本 `Write-Host` 调用数曾为 **0**（只写文件日志），给窗口等于白给。修法：`Write-Log` 在
 写文件后追加 `Write-Host "[$Level] $Message"`（Hermes 的 `Write-HandoffLog` 内部同样有 `Write-Host $line`）。

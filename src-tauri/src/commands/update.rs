@@ -573,13 +573,13 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
         let shell = resolve_powershell();
 
         // 参数顺序必须与脚本 param() 声明无关地保持「-File <script> -Name <value>」配对。
-        // start 的首个参数是窗口标题（空串），/min 使其最小化启动。
+        // start 的首个参数是窗口标题，赋予明确标题以防 Windows 默认渲染为 cmd.exe；/min 使其最小化启动。
         let mut cmd = std::process::Command::new("cmd.exe");
         cmd.arg("/d")
             .arg("/s")
             .arg("/c")
             .arg("start")
-            .arg("")
+            .arg("WorkBuddy2API 更新程序")
             .arg("/min")
             .arg(&shell)
             .arg("-NoProfile")
@@ -690,27 +690,56 @@ pub fn apply_app_update(app: tauri::AppHandle) -> Result<String, String> {
 /// 而更新脚本本身已兼容 5.1（无 BOM 写入、避免 5.1 不支持的语法）。
 /// 只返回 "pwsh" 会让缺 pwsh 的机器在 `cmd.spawn()` 处以
 /// 「无法启动更新程序：系统找不到指定的文件」失败，用户完全无从判断原因。
+/// 确定 Windows 下用于执行更新编排脚本的 PowerShell 解析路径。
+///
+/// 优先级原则（用户明确要求）：
+/// 1. 优先调用 PowerShell 7 (`pwsh.exe`)，且尽可能返回绝对路径（防子进程 PATH 缺失或命令定位失败）；
+/// 2. 若系统未安装 PowerShell 7，再优雅降级为系统自带的 Windows PowerShell (`powershell.exe` 5.1)。
 #[cfg(target_os = "windows")]
 fn resolve_powershell() -> String {
-    if let Some(p) = env_compat("POWERSHELL").filter(|p| Path::new(p).exists()) {
+    // 0. 环境变量 POWERSHELL 显式指定（最高优先级）
+    if let Some(p) = env_compat("POWERSHELL").filter(|p| path_is_executable(Path::new(p))) {
         return p;
     }
-    // PATH 上能找到 pwsh 就用它（版本更新、行为更一致）
-    if which("pwsh").is_some() {
-        return "pwsh".to_string();
+
+    // 1. 优先寻找 PowerShell 7 (pwsh)
+    // 1a. PATH 上的 pwsh（若找到，返回规范绝对路径）
+    if let Some(p) = which("pwsh") {
+        return p.to_string_lossy().to_string();
     }
-    // 回退系统自带 5.1：路径由 %SystemRoot% 派生，不硬编码盘符
+    // 1b. 常见的 PowerShell 7 标准物理安装位置（覆盖未加入用户全局 PATH 的情况）
+    let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+
+    let pwsh7_candidates = [
+        Path::new(&program_files).join("PowerShell").join("7").join("pwsh.exe"),
+        Path::new(&local_app_data).join("Programs").join("PowerShell").join("7").join("pwsh.exe"),
+        Path::new(&program_files_x86).join("PowerShell").join("7").join("pwsh.exe"),
+        Path::new(&local_app_data).join("Microsoft").join("WindowsApps").join("pwsh.exe"),
+    ];
+    for candidate in &pwsh7_candidates {
+        if path_is_executable(candidate) {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+
+    // 2. pwsh 7 不存在，降级为普通 Windows PowerShell (5.1)
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
     let ps51 = Path::new(&system_root)
         .join("System32")
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-    if ps51.exists() {
+    if path_is_executable(&ps51) {
         return ps51.to_string_lossy().to_string();
     }
-    // 都找不到仍返回 "pwsh"，让调用方的 spawn 报错带上原始信息
-    "pwsh".to_string()
+    if let Some(p) = which("powershell") {
+        return p.to_string_lossy().to_string();
+    }
+
+    // 3. 都找不到仍返回 "powershell"，让调用方的 spawn 报错带上原始信息
+    "powershell".to_string()
 }
 
 /// 在 PATH 中查找可执行文件（仅 Windows）。
@@ -1292,8 +1321,8 @@ mod tests {
         let path = Path::new(&resolved);
         if path.components().count() > 1 {
             assert!(
-                path.is_file(),
-                "resolve_powershell 返回了带路径但不存在的文件：{resolved}"
+                path_is_executable(path),
+                "resolve_powershell 返回了带路径但不存在或不可执行的文件：{resolved}"
             );
         } else {
             assert!(
