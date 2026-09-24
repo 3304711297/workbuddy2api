@@ -204,43 +204,49 @@ export function initSettings() {
     };
   };
 
+  // 串行单写队列（P1-4 防御并发 Lost Update）：保证并发配置保存请求按序串行执行
+  let saveChain = Promise.resolve();
+
   const persistSettings = async (patch = {}) => {
-    try {
-      // 写盘前先读一次磁盘真源：只回填「本次未修改」的字段（dirty 字段绝不回灌，
-      // 否则用户刚改的值会被磁盘旧值覆盖——清空密钥 / LAN 开关曾因此失效）
+    saveChain = saveChain.catch(() => {}).then(async () => {
       try {
-        const latest = await invokeTauri('get_app_settings');
-        if (latest) {
-          if (!('rotate_mode' in patch) && latest.rotate_mode) rotateModeCache = latest.rotate_mode;
-          if (!('rotate_count' in patch) && latest.rotate_count) rotateCountCache = latest.rotate_count;
-          if (!('model_list_mode' in patch) && latest.model_list_mode) modelListModeCache = latest.model_list_mode;
-          if (!('log_level' in patch) && latest.log_level) logLevelCache = latest.log_level;
-          if (!('log_payloads' in patch) && typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
-          if (!('listen_host' in patch) && latest.listen_host) listenHostCache = latest.listen_host;
-          if (!('snapshots' in patch) && typeof latest.snapshots === 'boolean') snapshotsCache = latest.snapshots;
-          if (!('snapshots_keep' in patch) && Number.isInteger(latest.snapshots_keep) && latest.snapshots_keep > 0) {
-            snapshotsKeepCache = latest.snapshots_keep;
+        // 写盘前先读一次磁盘真源：只回填「本次未修改」的字段（dirty 字段绝不回灌，
+        // 否则用户刚改的值会被磁盘旧值覆盖——清空密钥 / LAN 开关曾因此失效）
+        try {
+          const latest = await invokeTauri('get_app_settings');
+          if (latest) {
+            if (!('rotate_mode' in patch) && latest.rotate_mode) rotateModeCache = latest.rotate_mode;
+            if (!('rotate_count' in patch) && latest.rotate_count) rotateCountCache = latest.rotate_count;
+            if (!('model_list_mode' in patch) && latest.model_list_mode) modelListModeCache = latest.model_list_mode;
+            if (!('log_level' in patch) && latest.log_level) logLevelCache = latest.log_level;
+            if (!('log_payloads' in patch) && typeof latest.log_payloads === 'boolean') logPayloadsCache = latest.log_payloads;
+            if (!('listen_host' in patch) && latest.listen_host) listenHostCache = latest.listen_host;
+            if (!('snapshots' in patch) && typeof latest.snapshots === 'boolean') snapshotsCache = latest.snapshots;
+            if (!('snapshots_keep' in patch) && Number.isInteger(latest.snapshots_keep) && latest.snapshots_keep > 0) {
+              snapshotsKeepCache = latest.snapshots_keep;
+            }
+            // 密钥：本次未修改且输入框为空时才回退磁盘值（用户可能刚改完就点保存）
+            const apiKeyEl = document.getElementById('input-api-key');
+            if (!('api_key' in patch) && apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
+              apiKeyCache = latest.api_key;
+            }
           }
-          // 密钥：本次未修改且输入框为空时才回退磁盘值（用户可能刚改完就点保存）
-          const apiKeyEl = document.getElementById('input-api-key');
-          if (!('api_key' in patch) && apiKeyEl && !apiKeyEl.value.trim() && typeof latest.api_key === 'string') {
-            apiKeyCache = latest.api_key;
-          }
+        } catch (readErr) {
+          // 读盘失败必须中止本次保存：dirty-merge 依赖磁盘真源回填「本次未修改」的字段，
+          // 读不到就只剩内存 cache —— 其中 api_key 等字段可能是陈旧值，带着它写盘等于把
+          // 旧密钥落回磁盘（用户以为改了，实际没改）。宁可让用户重试，也不静默写旧数据。
+          console.warn('读取磁盘设置失败，已中止本次保存:', readErr);
+          showToast('读取磁盘设置失败，本次保存已中止（未写入任何改动），请稍后重试', 'error');
+          return false;
         }
-      } catch (readErr) {
-        // 读盘失败必须中止本次保存：dirty-merge 依赖磁盘真源回填「本次未修改」的字段，
-        // 读不到就只剩内存 cache —— 其中 api_key 等字段可能是陈旧值，带着它写盘等于把
-        // 旧密钥落回磁盘（用户以为改了，实际没改）。宁可让用户重试，也不静默写旧数据。
-        console.warn('读取磁盘设置失败，已中止本次保存:', readErr);
-        showToast('读取磁盘设置失败，本次保存已中止（未写入任何改动），请稍后重试', 'error');
+        await invokeTauri('save_app_settings', { settings: buildSettingsPayload(patch) });
+        return true;
+      } catch (err) {
+        showToast(`保存设置失败: ${err.message || err}`, 'error');
         return false;
       }
-      await invokeTauri('save_app_settings', { settings: buildSettingsPayload(patch) });
-      return true;
-    } catch (err) {
-      showToast(`保存设置失败: ${err.message || err}`, 'error');
-      return false;
-    }
+    });
+    return saveChain;
   };
 
   // 用户手动改动追踪（先于异步配置加载绑定）

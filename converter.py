@@ -626,19 +626,28 @@ class CredentialManager:
         s_candidate = dict(s)
         s_candidate["auth"] = new_auth
 
+        # 优先绑定当前 session 的 immutable UID，杜绝在途刷新完成时 active_uid 被切换导致的串号覆写
+        target_uid = str((s.get("account") or {}).get("uid") or "")
+        current_active = None
+
         # 1. 明确 accounts.json 为真源：若 accounts.json 存在，必须成功写回，失败抛异常阻断提交
         acc_path = _accounts_file()
         if acc_path.is_file():
             try:
                 cfg = json.loads(acc_path.read_text(encoding="utf-8"))
+                accounts = cfg.get("accounts") or {}
                 active_uid = cfg.get("active_uid")
-                if not active_uid or active_uid not in cfg.get("accounts", {}):
-                    raise ValueError(f"accounts.json 缺少 active_uid 或活跃账号 {active_uid} 不存在")
-                cfg["accounts"][active_uid]["auth"] = new_auth
+                current_active = active_uid
+                write_uid = target_uid if (target_uid and target_uid in accounts) else active_uid
+                if not write_uid or write_uid not in accounts:
+                    raise ValueError(f"accounts.json 缺少目标账号 (target={target_uid}, active={active_uid})")
+                accounts[write_uid]["auth"] = new_auth
                 tmp_acc = acc_path.with_suffix(acc_path.suffix + ".tmp")
                 with open(tmp_acc, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_acc, acc_path)
+                global _accounts_sig
+                _accounts_sig = (0.0, 0)
             except Exception as e:
                 _log(f"写入 accounts.json 失败：{e}")
                 raise RuntimeError(f"写入真源 accounts.json 失败：{e}") from e
@@ -654,7 +663,10 @@ class CredentialManager:
                 _log(f"写入 .info 兼容镜像失败：{e}", level="debug")
 
         s["auth"] = new_auth
-        self._cached = s
+        if current_active and target_uid and current_active != target_uid:
+            self._cached = None
+        else:
+            self._cached = s
         mtimes = [self.path.stat().st_mtime] if self.path and self.path.is_file() else []
         try:
             acc_p = _accounts_file()
@@ -5389,22 +5401,9 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
                         return
                     if on_account_switched and curr_uid:
                         on_account_switched(curr_uid)
-                    # 聚合等待期间定期下发 SSE 注释保活心跳，防止中间代理或客户端 60s 静默超时
-                    collect_task = asyncio.create_task(_collect_stream(r, t0))
-                    try:
-                        while not collect_task.done():
-                            done, _ = await asyncio.wait({collect_task}, timeout=5.0)
-                            if not done:
-                                yield b": ping\n\n"
-                        collected, ttft_ms = await collect_task
-                    except BaseException:
-                        if not collect_task.done():
-                            collect_task.cancel()
-                            try:
-                                await collect_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
-                        raise
+                    # 聚合上游流：在聚合与校验完成前保持 Pre-commit 纯净态，不提前 yield 注释心跳，
+                    # 确保 DeferredHeaderStreamingResponse 延迟到最终账号确定后才提交响应头，杜绝 failover 响应头错配
+                    collected, ttft_ms = await _collect_stream(r, t0)
                     # 空拒答（上游抽样误伤）：本路径是「先聚合后伪流式下发」，
                     # 判定发生在任何字节发往客户端之前 → 无需缓冲窗口，直接同账号重试。
                     if _is_blank_refusal(collected) and blank_retries < _BLANK_REFUSAL_MAX_RETRIES:
@@ -6057,7 +6056,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     usage_recorded = False
     blank_retries = 0                  # 空拒答同账号重试计数（上限 _BLANK_REFUSAL_MAX_RETRIES）
-    pending_events: list[bytes] = []   # 首包确认窗口内缓冲的帧（重试时丢弃，防拒答文案泄漏）
+    pending_events: collections.deque[bytes] = collections.deque()   # 首包确认窗口内缓冲的帧（deque.popleft() 提供 O(1) 冲刷性能）
     attempt_saw_progress = False       # 本轮是否已出现「实质推进」（见 _progress_reached）
     attempt_content: list[str] = []    # 本轮累积正文，供长度阈值与空拒答判定复用
     total_events = 0                   # 本轮收到的成帧事件总数（空流哨兵用）
@@ -6206,7 +6205,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                     pending_events.append(evt)
                                     continue
                                 while pending_events:
-                                    yield pending_events.pop(0)
+                                    yield pending_events.popleft()
                                 yield evt
                         for evt in coal.flush():
                             total_events += 1
@@ -6214,7 +6213,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 pending_events.append(evt)
                                 continue
                             while pending_events:
-                                yield pending_events.pop(0)
+                                yield pending_events.popleft()
                             yield evt
                         # 空流哨兵：连一个成帧事件都没收到 ⇒ 上游故障，绝不伪装成空回答。
                         # 判据刻意放在观察窗判定**之前**：完全空流与「空拒答」是两回事
@@ -6260,7 +6259,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                             # 先把缓冲里尚未放行的事件交出（保留已产出的诚实内容面），
                             # 再补一个错误帧，客户端据此判定响应不完整。
                             while pending_events:
-                                yield pending_events.pop(0)
+                                yield pending_events.popleft()
                             yield _err_event(json.dumps(
                                 {"error": {"message": err_msg,
                                            "type": "upstream_error"}}).encode(), 502)
@@ -6279,7 +6278,7 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                                 continue
                             # 非空拒答或已达上限：原样透传，保留诚实的错误面
                             while pending_events:
-                                yield pending_events.pop(0)
+                                yield pending_events.popleft()
                         break
             except httpx.HTTPError as e:
                 err_payload = getattr(e, "raw", None) or str(e)
