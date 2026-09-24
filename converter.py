@@ -3818,6 +3818,19 @@ def _get_rotator() -> AccountRotator:
     return _ACCOUNT_ROTATOR
 
 
+def _select_account_sync(rotator, cred, model_name, override_uid, override_strat):
+    """同步的账号选择逻辑（内部可能做 token 刷新网络 I/O 与 turing 子进程调用）。
+
+    由调用方经 ``asyncio.to_thread`` 在工作线程中执行，避免阻塞事件循环
+    （P0-1：同步刷新曾冻结整个网关 15–20 秒）。
+    """
+    if rotator:
+        return rotator.select_account(
+            model_name, override_uid=override_uid, override_mode=override_strat
+        )
+    return (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+
+
 def _rolling_usage(model: str) -> dict:
     """内存 ring 聚合该模型今日(UTC+8)及近 5h/24h 的成功请求与 tokens。
 
@@ -4239,10 +4252,8 @@ async def chat_completions(request: Request,
         if rotator
         else (None, None)
     )
-    uid, headers = (
-        rotator.select_account(model_name, override_uid=override_uid, override_mode=override_strat)
-        if rotator
-        else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    uid, headers = await asyncio.to_thread(
+        _select_account_sync, rotator, cred, model_name, override_uid, override_strat
     )
     if not headers:
         raise HTTPException(
@@ -4549,10 +4560,8 @@ async def anthropic_messages(
         if rotator
         else (None, None)
     )
-    uid, headers = (
-        rotator.select_account(model_name, override_uid=override_uid, override_mode=override_strat)
-        if rotator
-        else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    uid, headers = await asyncio.to_thread(
+        _select_account_sync, rotator, cred, model_name, override_uid, override_strat
     )
     if not headers:
         return JSONResponse(
@@ -4830,10 +4839,8 @@ async def openai_responses(
         if rotator
         else (None, None)
     )
-    uid, headers = (
-        rotator.select_account(model_name, override_uid=override_uid, override_mode=override_strat)
-        if rotator
-        else (getattr(cred, "get_active_uid", lambda: "")(), cred.get_headers())
+    uid, headers = await asyncio.to_thread(
+        _select_account_sync, rotator, cred, model_name, override_uid, override_strat
     )
     if not headers:
         raise HTTPException(
@@ -4888,10 +4895,11 @@ async def openai_responses(
                                 res_sse = converter_inst.feed_chunk(chunk_json)
                                 if res_sse:
                                     yield res_sse.encode("utf-8")
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            except Exception as e:
+                                # P0-2：chunk 静默丢弃曾导致回答缺字且无任何日志，至少记 debug
+                                _log(f"[{rid}] responses 流式：chunk 转换失败已跳过: {type(e).__name__}: {e}", level="debug")
+                    except Exception as e:
+                        _log(f"[{rid}] responses 流式：chunk 处理异常已跳过: {type(e).__name__}: {e}", level="debug")
                 if buf.strip():
                     line_s = buf.strip()
                     if line_s.startswith("data:"):
@@ -4902,8 +4910,8 @@ async def openai_responses(
                                 res_sse = converter_inst.feed_chunk(chunk_json)
                                 if res_sse:
                                     yield res_sse.encode("utf-8")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                _log(f"[{rid}] responses 流式：尾部 chunk 转换失败已跳过: {type(e).__name__}: {e}", level="debug")
                 finish_sse = converter_inst.finish()
                 if finish_sse:
                     yield finish_sse.encode("utf-8")
