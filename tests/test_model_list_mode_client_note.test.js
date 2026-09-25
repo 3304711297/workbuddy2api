@@ -1,14 +1,25 @@
-// 设置页「模型清单模式」的客户端侧说明契约（2026-09-16）
-//
-// 背景（真实用户困惑）：用户选了「仅展示可用模型」，但 Hermes 模型选择器里仍有
-// 需授权模型。原因不是内核过滤失效（/v1/models 实测已无 gpt 系列），而是客户端
-// 侧的自定义端点勾了 discover_models: false —— 它改用自己配置里写死的 models 列表，
-// 从不请求本清单。用户在原开关上反复尝试，无从判断真正原因。
-//
-// 本测试锁定：设置页必须对这一「责任边界」给出说明，且随当前选择切换文案。
-// 采用**行为断言**（驱动真实模块 + DOM 桩），而非「源码里出现某句话」——
-// 后者在文案挪位置或改名后仍会通过，属于本仓库反复踩过的弱断言。
-
+/**
+ * 设置页「模型清单模式」的客户端侧说明契约（React+TS 迁移版，2026-09-16）
+ *
+ * 背景（真实用户困惑）：用户选了「仅展示可用模型」，但 Hermes 模型选择器里仍有
+ * 需授权模型。原因不是内核过滤失效（/v1/models 实测已无 gpt 系列），而是客户端
+ * 侧的自定义端点勾了 discover_models: false —— 它改用自己配置里写死的 models 列表，
+ * 从不请求本清单。用户在原开关上反复尝试，无从判断真正原因。
+ *
+ * 本测试锁定：设置页必须对这一「责任边界」给出说明，且随当前选择切换文案。
+ *
+ * 迁移映射：
+ * - 旧 settings.js 的 MODEL_LIST_MODE_NOTES / renderModelListModeNote（DOM 读写）
+ *   → 新 SettingsPage.tsx 的 React 条件渲染
+ *     t(form.modelListMode === 'available' ? 'settings.modelListModeNote.available'
+ *                                          : 'settings.modelListModeNote.all')，
+ *   文案本体迁入 src/i18n/zh-CN.ts 词典；
+ * - 同源文案另有一份在 src/services/modelBilling.ts 的 MODEL_LIST_MODE_NOTES
+ *  （供 ModelsPage 使用），两处共同受「不得误导性承诺」约束；
+ * - 「DOM 缺失降级 / textContent / 初始化渲染」旧断言在 React 下不再适用：
+ *   说明由 form.modelListMode 派生（单一数据源，天然与选择同步），
+ *   JSX 文本插值替代了 textContent/innerHTML，normalizeModelListMode 保证永不 undefined。
+ */
 import test from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -17,90 +28,102 @@ import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
-const settingsSrc = readFileSync(join(root, 'src', 'settings.js'), 'utf8');
-const htmlSrc = readFileSync(join(root, 'index.html'), 'utf8');
+const SETTINGS_TSX = readFileSync(join(root, 'src', 'pages', 'SettingsPage.tsx'), 'utf8');
+const ZH_CN = readFileSync(join(root, 'src', 'i18n', 'zh-CN.ts'), 'utf8');
+const SERVICE_TS = readFileSync(join(root, 'src', 'services', 'settingsService.ts'), 'utf8');
+const MODEL_BILLING_TS = readFileSync(join(root, 'src', 'services', 'modelBilling.ts'), 'utf8');
 
-test('index.html 提供说明的挂载点', () => {
+function dictValue(key) {
+  const m = new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'((?:[^'\\\\]|\\\\.)*)'`).exec(ZH_CN);
+  assert.ok(m, `i18n 词典缺少 ${key}`);
+  return m[1];
+}
+
+test('说明随当前选择动态切换（available / all 各有专属文案）', () => {
+  // React 条件渲染：说明直接派生自表单态，随选择即时切换（旧 renderModelListModeNote 的行为对等）
   assert.ok(
-    htmlSrc.includes('id="model-list-mode-client-note"'),
-    '设置页「模型清单模式」附近应有说明元素的挂载点'
+    /t\(\s*form\.modelListMode === 'available'\s*\?\s*'settings\.modelListModeNote\.available'\s*:\s*'settings\.modelListModeNote\.all',?\s*\)/.test(SETTINGS_TSX),
+    '设置页必须按 form.modelListMode 动态选择 available/all 说明文案'
   );
-  // 该元素必须位于模型清单模式下拉之后的同一 form-group 内，避免被挪到无关位置
-  const idx = htmlSrc.indexOf('id="model-list-mode-client-note"');
-  const selectIdx = htmlSrc.indexOf('id="select-model-list-mode"');
-  assert.ok(selectIdx > 0 && idx > selectIdx, '说明应紧邻该下拉（位于其后）');
+  const avail = dictValue('settings.modelListModeNote.available');
+  const all = dictValue('settings.modelListModeNote.all');
+  assert.ok(avail.length > 0 && all.length > 0, 'available/all 说明文案都必须非空');
+  assert.notEqual(avail, all, '两档说明文案必须不同（否则切换无意义）');
 });
 
-test('说明文案点出「客户端 discover_models 关闭时本开关不生效」这一责任边界', () => {
-  // 抽取提示表内容做断言（不依赖具体措辞的顺序）
-  const m = /MODEL_LIST_MODE_NOTES\s*=\s*\{([\s\S]*?)\n\};/.exec(settingsSrc);
-  assert.ok(m, '应存在 MODEL_LIST_MODE_NOTES 文案表');
-  const table = m[1];
-
-  // available 分支：必须提到客户端的 Discover models / discover_models，
-  // 否则用户无法知道该去哪儿改。
+test('available 说明点出「客户端 discover_models 关闭时本开关不生效」这一责任边界', () => {
+  const avail = dictValue('settings.modelListModeNote.available');
+  // 必须提到客户端的 Discover models / discover_models，否则用户无法知道该去哪儿改
   assert.ok(
-    /available:/.test(table),
-    'available 分支应有专属说明（用户正是选它时遇到困惑）'
-  );
-  const availPart = table.slice(table.indexOf('available:'), table.indexOf('all:'));
-  assert.ok(
-    /Discover models|discover_models/.test(availPart),
-    'available 分支须点名客户端「Discover models」开关，否则用户无从下手'
+    /Discover models|discover_models/.test(avail),
+    'available 说明须点名客户端「Discover models」开关，否则用户无从下手'
   );
   assert.ok(
-    /不生效|管不到|只改变|只影响/.test(availPart),
-    'available 分支须说清「本开关管不到客户端写死的列表」这一边界'
+    /不生效|管不到|只改变|只影响/.test(avail),
+    'available 说明须说清「本开关管不到客户端写死的列表」这一边界'
   );
   // 反向断言：不能承诺「改了这里客户端就没了」这类误导
   assert.ok(
-    !/选此项即可让客户端.*隐藏|即可从客户端移除/.test(availPart),
+    !/选此项即可让客户端.*隐藏|即可从客户端移除|客户端就会隐藏/.test(avail),
     '不得给出「选了这里客户端就会隐藏该模型」的误导性承诺'
   );
 });
 
-test('渲染函数存在且按 mode 取值（行为：不同选择给出不同文案）', () => {
+test('all 说明同样不得写误导性承诺', () => {
+  const all = dictValue('settings.modelListModeNote.all');
   assert.ok(
-    /function renderModelListModeNote\s*\(\s*mode\s*\)/.test(settingsSrc),
-    '应有接收 mode 的渲染函数'
-  );
-  assert.ok(
-    /MODEL_LIST_MODE_NOTES\[mode\]/.test(settingsSrc),
-    '渲染函数应按 mode 查表取值，而不是写死一句'
-  );
-  // 容错：mode 未知时回退到 all，而不是渲染 undefined
-  assert.ok(
-    /MODEL_LIST_MODE_NOTES\[mode\]\s*\|\|\s*MODEL_LIST_MODE_NOTES\.all/.test(settingsSrc),
-    '未知 mode 应回退到 all 文案，避免把 undefined 写进界面'
+    !/选此项即可让客户端.*隐藏|即可从客户端移除|客户端就会隐藏/.test(all),
+    'all 说明也不得给出误导性承诺'
   );
 });
 
-test('写入路径覆盖「切换时」与「初始化回读时」两种场景', () => {
-  // 切换时必须立即更新说明（否则提示与实际选择不符）
+test('说明经 JSX 文本渲染，不得用 innerHTML 注入', () => {
+  // 说明渲染点在 <p className="muted field-hint"> 内做文本插值
   assert.ok(
-    /modelListModeCache\s*=\s*v;\s*[\r\n]+\s*renderModelListModeNote\(v\)/.test(settingsSrc),
-    'change 事件里应渲染说明'
+    /<p className="muted field-hint">\s*\{\s*t\(\s*form\.modelListMode/.test(SETTINGS_TSX),
+    '说明必须经 JSX 文本插值渲染'
   );
-  // 首次进入设置页时必须渲染（否则提示区域为空）
   assert.ok(
-    /renderModelListModeNote\(modelListModeCache\)/.test(settingsSrc),
-    '初始化回读配置后应渲染说明'
+    !SETTINGS_TSX.includes('dangerouslySetInnerHTML'),
+    'SettingsPage 不得用 dangerouslySetInnerHTML 写静态文案'
   );
 });
 
-test('DOM 缺失时安全降级（不得硬崩打断整个设置页）', () => {
-  const fn = settingsSrc.slice(settingsSrc.indexOf('function renderModelListModeNote'));
-  const body = fn.slice(0, fn.indexOf('\n}') + 2);
+test('说明与表单态同源：非法 mode 永不渲染 undefined', () => {
+  // form.modelListMode 唯一来源是 loadFromDisk 的 normalizeModelListMode 回填
+  // 与 onModelListMode 的归一化写入 —— 文案选择表达式只有 available/all 两支，
+  // 非法值在入库前就被归一，不可能把 undefined 写进界面。
   assert.ok(
-    /if\s*\(\s*!el\s*\)\s*return/.test(body),
-    '取不到元素时应直接返回（本文件其它处同约定：DOM 缺失不得硬崩）'
+    /const modelListMode = normalizeModelListMode\(cfg\.model_list_mode\)/.test(SERVICE_TS),
+    'loadFromDisk 必须用 normalizeModelListMode 归一化磁盘值'
   );
   assert.ok(
-    /\.textContent\s*=/.test(body),
-    '应使用 textContent 写入（文案含引号等字符，textContent 无需转义且无注入面）'
+    /const mode = normalizeModelListMode\(value\)/.test(SETTINGS_TSX),
+    'onModelListMode 必须用 normalizeModelListMode 归一化用户选择'
+  );
+  const start = SERVICE_TS.indexOf('export function normalizeModelListMode');
+  const fn = SERVICE_TS.slice(start, SERVICE_TS.indexOf('}', start) + 1);
+  assert.ok(
+    /v === 'available' \? 'available' : 'all'/.test(fn),
+    'normalizeModelListMode 必须把非法值归一到 all'
+  );
+});
+
+test('同源文案一致性：modelBilling.ts 的 MODEL_LIST_MODE_NOTES 守同一边界', () => {
+  // ModelsPage 用的说明表与设置页文案同源，「不得误导性承诺」约束两处一致
+  assert.ok(
+    MODEL_BILLING_TS.includes('MODEL_LIST_MODE_NOTES'),
+    'modelBilling.ts 应保留 MODEL_LIST_MODE_NOTES 说明表'
+  );
+  const m = /MODEL_LIST_MODE_NOTES[^=]*=\s*\{([\s\S]*?)\n\};/.exec(MODEL_BILLING_TS);
+  assert.ok(m, '未找到 MODEL_LIST_MODE_NOTES 表');
+  const table = m[1];
+  assert.ok(
+    /available:/.test(table) && /Discover models|discover_models/.test(table),
+    'available 分支须点名客户端「Discover models」'
   );
   assert.ok(
-    !/innerHTML/.test(body),
-    '不得用 innerHTML 写静态文案'
+    !/选此项即可让客户端.*隐藏|即可从客户端移除/.test(table),
+    '同源文案同样不得给出误导性承诺'
   );
 });

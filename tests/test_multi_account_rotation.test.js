@@ -1,3 +1,19 @@
+/**
+ * 多账号轮换契约测试（React+TS 迁移版）。
+ *
+ * 契约变更说明（中文）：
+ *   旧前端契约（index.html 的 select-rotate-mode / input-rotate-count /
+ *   btn-save-rotation / rotation-status-badge 四控件 + accounts.js 的
+ *   initRotationPolicy / syncRotationPolicyCard / saveRotationPolicy + main.js
+ *   调用）在 React 迁移中**未被迁移**：src/pages/AccountsPage.tsx 与
+ *   src/pages/SettingsPage.tsx 均无轮换策略 UI。settingsService.ts 的注释仍称
+ *   「账号页调度策略卡负责 rotate_*」，并通过 setPeerCaches 保留了「账号页写入
+ *   rotate 字段」的内存镜像入口，但实际无页面调用。
+ *   后端契约（Rust AppConfig 字段 + proxy.rs 透传 + converter.py AccountRotator）
+ *   未动，原断言原样保留。新对等断言锁定前端数据链路不丢字段：
+ *   settingsService 仍携带 rotate_mode/rotate_count（默认 off/1，dirty merge 不丢），
+ *   tauri.ts 类型保留两字段，App 在 accounts 页挂载 AccountsPage。
+ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,31 +24,45 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-const HTML = fs.readFileSync(path.join(REPO_ROOT, 'index.html'), 'utf-8');
-const ACCOUNTS_JS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'accounts.js'), 'utf-8');
-const MAIN_JS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'main.js'), 'utf-8');
-const LIB_RS = fs.readFileSync(path.join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf-8');
-const PROXY_RS = fs.readFileSync(path.join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'proxy.rs'), 'utf-8');
-const CONVERTER_PY = fs.readFileSync(path.join(REPO_ROOT, 'converter.py'), 'utf-8');
+const read = (p) => fs.readFileSync(path.join(REPO_ROOT, p), 'utf-8');
+const SETTINGS_SERVICE = read('src/services/settingsService.ts');
+const TAURI_TS = read('src/services/tauri.ts');
+const ACCOUNTS_TSX = read('src/pages/AccountsPage.tsx');
+const SETTINGS_TSX = read('src/pages/SettingsPage.tsx');
+const APP_TSX = read('src/App.tsx');
+const LIB_RS = read('src-tauri/src/lib.rs');
+const PROXY_RS = read('src-tauri/src/commands/proxy.rs');
+const CONVERTER_PY = read('converter.py');
 
-test('index.html 含多账号调度策略卡的三个必需控件', () => {
-  assert.ok(HTML.includes('id="select-rotate-mode"'), '缺少调度策略下拉');
-  assert.ok(HTML.includes('id="input-rotate-count"'), '缺少轮换阈值输入框');
-  assert.ok(HTML.includes('id="btn-save-rotation"'), '缺少保存按钮');
-  assert.ok(HTML.includes('id="rotation-status-badge"'), '缺少状态徽章');
+test('轮换策略卡 UI 在 React 迁移中被移除（契约变更：无页面再渲染调度策略控件）', () => {
+  // 旧 index.html 的四控件 id 必须不再出现于新前端（无残留、无半成品绑定）
+  for (const id of ['select-rotate-mode', 'input-rotate-count', 'btn-save-rotation', 'rotation-status-badge']) {
+    assert.ok(!ACCOUNTS_TSX.includes(id), `AccountsPage.tsx 不得残留旧控件 ${id}`);
+    assert.ok(!SETTINGS_TSX.includes(id), `SettingsPage.tsx 不得残留旧控件 ${id}`);
+  }
+  // 旧 accounts.js 的 initRotationPolicy / syncRotationPolicyCard / saveRotationPolicy 无 React 对等实现
+  for (const fn of ['initRotationPolicy', 'syncRotationPolicyCard', 'saveRotationPolicy']) {
+    assert.ok(!ACCOUNTS_TSX.includes(fn), `AccountsPage.tsx 不得残留旧函数 ${fn}`);
+  }
 });
 
-test('accounts.js 导出 initRotationPolicy 且 main.js 已调用', () => {
-  assert.ok(ACCOUNTS_JS.includes('export function initRotationPolicy'), 'accounts.js 未导出 initRotationPolicy');
-  assert.ok(ACCOUNTS_JS.includes('syncRotationPolicyCard'), 'accounts.js 缺少 syncRotationPolicyCard');
-  assert.ok(ACCOUNTS_JS.includes('saveRotationPolicy'), 'accounts.js 缺少 saveRotationPolicy');
-  assert.ok(MAIN_JS.includes('initRotationPolicy'), 'main.js 未导入 initRotationPolicy');
-  assert.ok(MAIN_JS.includes('initRotationPolicy();'), 'main.js 未调用 initRotationPolicy()');
+test('前端数据链路仍携带 rotate_mode / rotate_count（dirty merge 不丢字段）', () => {
+  // settingsService 表单态 + 默认值（off/1，与后端兜底一致）
+  assert.ok(SETTINGS_SERVICE.includes('rotateMode'), 'settingsService 缺少 rotateMode');
+  assert.ok(SETTINGS_SERVICE.includes('rotateCount'), 'settingsService 缺少 rotateCount');
+  assert.ok(SETTINGS_SERVICE.includes("rotateMode: 'off'"), 'rotateMode 默认值必须为 off');
+  assert.ok(SETTINGS_SERVICE.includes('rotateCount: 1'), 'rotateCount 默认值必须为 1');
+  // 落盘 payload 必须带全字段（AppConfig 整对象覆盖写盘，缺字段会被 serde default 抹回）
+  assert.ok(SETTINGS_SERVICE.includes('rotate_mode: rotateModeCache'), 'persist payload 缺少 rotate_mode');
+  assert.ok(SETTINGS_SERVICE.includes('rotate_count: rotateCountCache'), 'persist payload 缺少 rotate_count');
+  // 「他页写入」内存镜像入口保留（账号页调度策略卡的历史写入位）
+  assert.ok(SETTINGS_SERVICE.includes('setPeerCaches'), '缺少 setPeerCaches（rotate 字段的跨页同步入口）');
 });
 
-test('账号卡片状态徽章区分活跃与待机就绪', () => {
-  assert.ok(ACCOUNTS_JS.includes('● 活跃中'), '缺少活跃态徽章文案');
-  assert.ok(ACCOUNTS_JS.includes('○ 待机就绪'), '缺少待机就绪徽章文案');
+test('tauri.ts 类型层保留 rotate_mode / rotate_count 且 App 挂载账号页', () => {
+  assert.ok(TAURI_TS.includes('rotate_mode: string'), 'tauri.ts 类型缺少 rotate_mode');
+  assert.ok(TAURI_TS.includes('rotate_count: number'), 'tauri.ts 类型缺少 rotate_count');
+  assert.ok(APP_TSX.includes("tab === 'accounts' && <AccountsPage />"), 'App 未在 accounts 页挂载 AccountsPage');
 });
 
 test('Rust AppConfig 含 rotate_mode / rotate_count 且带 serde default（旧配置兼容）', () => {
