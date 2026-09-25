@@ -368,6 +368,16 @@ class ResponsesStreamConverter:
         self._usage: dict | None = None
         self._failed = False
         self._saw_terminal = False   # 见 finish() 的截断哨兵
+        # P0-3：message 与 function_call item 共享一个单调递增的 output_index 分配器，
+        # 保证同一流内每个 output item 的 index 唯一（不再依赖"文本是否先到"的时序假设）
+        self._next_output_index = 0
+        self._msg_output_idx: int | None = None
+
+    def _alloc_output_index(self) -> int:
+        """分配下一个唯一的 output_index。"""
+        idx = self._next_output_index
+        self._next_output_index += 1
+        return idx
 
     def feed_chunk(self, chunk: dict) -> str:
         """处理已解析的单个 ChatCompletions JSON chunk，输出 Responses SSE 行。"""
@@ -412,7 +422,7 @@ class ResponsesStreamConverter:
             self._usage = chunk["usage"]
 
         for choice in chunk.get("choices", []):
-            delta = choice.get("delta", {})
+            delta = choice.get("delta") or {}
 
             # 思考/推理链增量累积（支持多轮思维链延续）
             rc = delta.get("reasoning_content") or delta.get("reasoning")
@@ -423,9 +433,10 @@ class ResponsesStreamConverter:
             content = delta.get("content")
             if content:
                 if not self._emitted_msg_item:
+                    self._msg_output_idx = self._alloc_output_index()
                     events.append(self._fmt("response.output_item.added", {
                         "response_id": self.resp_id,
-                        "output_index": 0,
+                        "output_index": self._msg_output_idx,
                         "item": self._build_msg_item("in_progress", empty=True),
                     }))
                     self._emitted_msg_item = True
@@ -434,7 +445,7 @@ class ResponsesStreamConverter:
                     events.append(self._fmt("response.content_part.added", {
                         "response_id": self.resp_id,
                         "item_id": self.msg_id,
-                        "output_index": 0,
+                        "output_index": self._msg_output_idx,
                         "content_index": 0,
                         "part": {"type": "output_text", "text": "", "annotations": []},
                     }))
@@ -444,17 +455,17 @@ class ResponsesStreamConverter:
                 events.append(self._fmt("response.output_text.delta", {
                     "response_id": self.resp_id,
                     "item_id": self.msg_id,
-                    "output_index": 0,
+                    "output_index": self._msg_output_idx,
                     "content_index": 0,
                     "delta": content,
                 }))
 
-            # 工具调用增量
-            for tc in delta.get("tool_calls", []):
+            # 工具调用增量（P0-2：上游可能下发 "tool_calls": null，必须 None 安全）
+            for tc in delta.get("tool_calls") or []:
                 idx = _tool_index(tc.get("index", 0))
                 if idx not in self._tool_calls:
-                    base = 1 if (self._emitted_msg_item or self._content) else 0
-                    oi = base + len(self._tool_calls)
+                    # P0-3：从单调计数器分配，message 与 function_call 永不共享 index
+                    oi = self._alloc_output_index()
                     self._tool_calls[idx] = {
                         "id": tc.get("id", ""),
                         "name": "",
@@ -522,14 +533,14 @@ class ResponsesStreamConverter:
             events.append(self._fmt("response.output_text.done", {
                 "response_id": self.resp_id,
                 "item_id": self.msg_id,
-                "output_index": 0,
+                "output_index": self._msg_output_idx,
                 "content_index": 0,
                 "text": self._content,
             }))
             events.append(self._fmt("response.content_part.done", {
                 "response_id": self.resp_id,
                 "item_id": self.msg_id,
-                "output_index": 0,
+                "output_index": self._msg_output_idx,
                 "content_index": 0,
                 "part": {"type": "output_text", "text": self._content, "annotations": []},
             }))
@@ -537,7 +548,7 @@ class ResponsesStreamConverter:
         if self._emitted_msg_item:
             events.append(self._fmt("response.output_item.done", {
                 "response_id": self.resp_id,
-                "output_index": 0,
+                "output_index": self._msg_output_idx,
                 "item": self._build_msg_item("completed"),
             }))
 
