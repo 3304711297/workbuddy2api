@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-24",
+  "updated_at": "2026-09-25",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -16,10 +16,10 @@
       "name": "workbuddy2api 增强 fork（DistPub，借鉴雷达）",
       "repo": "DistPub/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "3e6b223a",
-      "last_synced_sha": "3e6b223a4c27ff98c9a14e25039e32fec3e33487",
+      "last_synced_commit": "ddf7978b",
+      "last_synced_sha": "ddf7978bdafcbedfb2d925e5a849eb041e317511",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 reasoning 合并器/空段清洗/品牌词脱敏）",
-      "note": "xiaofan6ya 的活跃 fork（内置 Turing SDK/macOS 适配/content_localizer 敏感词定位）；已吸收 reasoning 合并器与品牌词脱敏；监控整仓新提交。"
+      "note": "xiaofan6ya 的活跃 fork（内置 Turing SDK/macOS 适配/content_localizer 敏感词定位）；已吸收 reasoning 合并器与品牌词脱敏；监控整仓新提交。本轮评估 3e6b223a→ddf7978b：新增基于 Electron 绑定的 macOS 桌面端 $wbEncrypted:1 auth 文件自动解密。**未采纳**：本仓面向 Windows 桌面端且凭证真源统一收敛在 accounts.json 与桌面端未加密会话，无对应需求，亦不引入额外的 cryptography 重量级依赖。"
     },
     "c2api-upstream-iceean": {
       "name": "codebuddy2api 衍生库（IceeAn，借鉴雷达）",
@@ -34,19 +34,19 @@
       "name": "workbuddy-switch-gateway（momo0410，借鉴雷达）",
       "repo": "momo0410/workbuddy-switch-gateway",
       "branch": "main",
-      "last_synced_commit": "2826573a",
-      "last_synced_sha": "2826573a28ad6d6a737861206244a341486f8f33",
+      "last_synced_commit": "6a11696f",
+      "last_synced_sha": "6a11696f24a0f01cf356447f632af339bab62849",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
-      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 00d49874→2826573a：支持企业版账号额度查询（/billing/meter/get-enterprise-user-usage）与发布 0.8.12。本仓面向桌面级个人开发者，凭证来源于本地登录会话，不维护独立的企业版租户计费模型，未采纳。"
+      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 2826573a→6a11696f（包含 3344650 与 6a11696f）：针对其轻量模式（destroy WebView）导致重启白屏的托盘状态清零修复（LIGHTWEIGHT_MODE）与发布 0.8.14。**未采纳**：本仓无销毁 WebView 的轻量模式机制，不存在对应锁死回路；版本发布 chore 无未吸收机制。"
     },
     "wb2api-upstream-linguo": {
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "dbd7c680",
-      "last_synced_sha": "dbd7c680db45d27b9c9fec7b3e0c0d1e57c6ba69",
+      "last_synced_commit": "4879a549",
+      "last_synced_sha": "4879a5494c9bdd838a96b75249d80bba1918834a",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 a0b50880→dbd7c680：2b0eedda 为模型倍率列显示优惠生效价（牌价+折扣+标签+时段说明，对应本仓库 5958e72 已完全覆盖并经 6990cfa 加固），dbd7c680 为版本发布 chore，无未吸收机制。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 dbd7c680→4879a549：资产文件名去除重复的 -panel 后缀的 CI 调整。**未采纳**：纯 CI 构建配置，无业务或协议变更。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -79,10 +79,10 @@
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "650b6594",
-      "last_synced_sha": "650b65945e2772517ab3e8bd4dc30b57b0019461",
+      "last_synced_commit": "65967490",
+      "last_synced_sha": "65967490c9c263949af42318fd71eb9ec14ce586",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；本轮评估 95d83418→650b6594：改动涉及 DeepSeek 11155 reasoning_content 回填、Codex App namespace tools 支持、回退网关侧 web_search。本仓 deepseek_thinking 已完全覆盖 11155 零 trace 回填与 reasoning 镜像，Responses 协议亦已具备，未采纳。"
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；本轮评估 650b6594→65967490：涉及三出站身份选择器、国际版模型表对齐、低余额保留（reserve_credits）以及其内部 normalize_tool_choice 在 tool_choice=\"none\" 时误删 tools 声明导致模型陷入重复循环的修复。**未采纳**：本仓对 tools/tool_choice 实行透传白名单放行（不存在误删声明缺陷），出站 UA 统一锚定官方桌面端，额度调度走多账号智能轮换，无对应变更需求。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",

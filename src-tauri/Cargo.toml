@@ -13,8 +13,9 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# stream: 启用 Response::bytes_stream() 逐块读取 SSE（TTFT 首字时延探测）
-reqwest = { version = "0.13.4", features = ["json", "stream"] }
+# default-features = false：避免 reqwest 0.13 默认通过 rustls 拉入 aws-lc-rs/aws-lc-sys（在 Windows 上强依赖 CMake 与 NASM）；
+# 改用 native-tls（Windows 下自动使用系统 SChannel，天然信任系统证书且零 C 工具链依赖）
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "charset", "http2", "native-tls", "system-proxy"] }
 # StreamExt：驱动 bytes_stream 的迭代（futures-util 已在 reqwest 依赖树中，不引入新包）
 futures-util = "0.3"
 serde_yaml = "0.9"

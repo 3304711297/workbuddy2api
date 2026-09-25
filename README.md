@@ -155,7 +155,7 @@ src-tauri/target/release/workbuddy2api.exe
 ### 方式二：本地构建与源码调试
 
 #### 环境要求
-- Node.js 24+ 与 npm
+- Node.js 20+（推荐 LTS 20 或 22+）与 npm
 - Rust 1.77+ 与 Cargo
 - Python 3.10+（需安装依赖 `httpx fastapi uvicorn[standard]`）
 
@@ -164,15 +164,19 @@ src-tauri/target/release/workbuddy2api.exe
 git clone https://github.com/3304711297/workbuddy2api.git
 cd workbuddy2api
 
-# 2. 安装前端依赖并构建
+# 2. 安装前端依赖
 npm install
-npm run build
 
-# 3. 运行 Tauri 开发模式或构建 Release 版本
-cd src-tauri
-cargo tauri dev       # 调试模式
-cargo tauri build --no-bundle   # Release 编译
+# 3. 运行 Tauri 开发模式或构建 Release 版本（走已内置的 @tauri-apps/cli）
+npm run tauri -- dev                     # 调试模式（自动编译并拉起桌面窗口）
+npm run tauri -- build --no-bundle       # 仅编译 Release 可执行程序（产物：src-tauri/target/release/workbuddy2api.exe）
+npm run tauri build                      # 完整构建（含 NSIS 独立安装包，产物在 src-tauri/target/release/bundle/nsis/）
+
+# 亦可直接双击运行仓库自带的一键构建脚本：
+.\build.cmd                              # 或 PowerShell 执行 .\build.ps1
 ```
+
+> **提示**：若习惯使用 Cargo 原生 CLI，需先执行 `cargo install tauri-cli --version "^2"`，随后可在 `src-tauri` 目录下执行 `cargo tauri dev` 或 `cargo tauri build --no-bundle`。
 
 ---
 
