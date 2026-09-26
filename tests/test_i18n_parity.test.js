@@ -7,16 +7,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-// Node 24 可直接类型剥离导入 .ts
-const { zhCN } = await import(path.join(REPO_ROOT, 'src', 'i18n', 'zh-CN.ts'));
-const { en } = await import(path.join(REPO_ROOT, 'src', 'i18n', 'en.ts'));
-const { toTraditional } = await import(path.join(REPO_ROOT, 'src', 'i18n', 'traditional.ts'));
+// Node 24 可直接类型剥离导入 .ts（Windows 路径必须转为 file:// URL 协议）
+const toUrl = (sub) => pathToFileURL(path.join(REPO_ROOT, sub)).href;
+const { zhCN } = await import(toUrl('src/i18n/zh-CN.ts'));
+const { en } = await import(toUrl('src/i18n/en.ts'));
+const { toTraditional } = await import(toUrl('src/i18n/traditional.ts'));
 
 const zhKeys = new Set(Object.keys(zhCN));
 const enKeys = new Set(Object.keys(en));
