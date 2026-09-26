@@ -236,7 +236,7 @@ export function DebugPage() {
       </table>
 
       {selected && (
-        <div className="card" ref={detailRef} style={{ marginTop: 16 }}>
+        <div className="panel card" ref={detailRef} style={{ marginTop: 16 }}>
           <div className="card-title">
             {selected.endpoint || ''} · {selected.model || ''} · {formatSnapshotTime(selected.ts)}
           </div>

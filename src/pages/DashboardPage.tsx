@@ -11,6 +11,7 @@
  * 所有用户可见文案走 t('dashboard.*')。
  */
 import { useCallback, useMemo, useState } from 'react';
+import { Sparkles, Bot, TerminalSquare, Eye, EyeOff, Copy } from 'lucide-react';
 import { useApp } from '../state/ServiceProvider';
 import { proxyTestChat } from '../services/tauri';
 import { copyToClipboard } from '../services/clipboard';
@@ -56,12 +57,13 @@ function isFiniteNumber(v: unknown): v is number {
 }
 
 export function DashboardPage() {
-  const { running, port, activeNickname, healthTime, desensitize, setTab } = useApp();
+  const { running, port, activeNickname, desensitize, setTab, startProxy, stopProxy, restartProxy } = useApp();
   const { showToast } = useToast();
   const { t } = useI18n();
 
   const [protocol, setProtocol] = useState<TestProtocol>('chat');
   const [result, setResult] = useState<TestResult>(IDLE_RESULT);
+  const [showKey, setShowKey] = useState(false);
 
   const baseUrl = useMemo(() => `http://127.0.0.1:${port}/v1`, [port]);
 
@@ -146,134 +148,181 @@ export function DashboardPage() {
         : t('dashboard.testing');
 
   return (
-    <div className="panel-page active">
-      {/* 顶部状态条：4 个核心指标卡片 (对标 EasyCLIProxyAPI .status-strip) */}
-      <div className="status-strip">
-        <div className="status-card">
-          <div className="status-card-header">
-            <span>{t('dashboard.statusTitle')}</span>
-            <div className={`state-pill ${running ? 'running' : 'stopped'}`}>
-              <span className={`dot ${running ? 'dot-running' : 'dot-stopped'}`}></span>
-              <span className={statusBadgeClass}>{statusBadgeText}</span>
-            </div>
-          </div>
-          <div className="status-card-value">:{port}</div>
-          <div className="status-card-desc">
-            {running ? t('dashboard.modeDirect') : t('dashboard.modeDetecting')}
-          </div>
-        </div>
-
-        <div className="status-card">
-          <div className="status-card-header">
-            <span>{t('dashboard.activeAccount')}</span>
-            <span className={`badge ${running ? 'badge-success' : 'badge-warn'}`}>
-              {running ? '在线' : '离线'}
-            </span>
-          </div>
-          <div className="status-card-value truncate" style={{ fontSize: 16 }}>
-            {activeNickname}
-          </div>
-          <div className="status-card-desc">{healthTime}</div>
-        </div>
-
-        <div className="status-card">
-          <div className="status-card-header">
-            <span>{t('dashboard.protocols')}</span>
-            <strong className="badge badge-info">{protocolBadge}</strong>
-          </div>
-          <div className="status-card-value">3 协议就绪</div>
-          <div className="status-card-desc">Chat / Messages / Responses</div>
-        </div>
-
-        <div className="status-card">
-          <div className="status-card-header">
-            <span>{t('dashboard.desensitize')}</span>
-            <span className={`badge ${desensitize ? 'badge-success' : 'badge-warn'}`}>
-              {desensitize ? t('dashboard.desensitizeOn') : t('dashboard.desensitizeOff')}
-            </span>
-          </div>
-          <div className="status-card-value" style={{ fontSize: 16 }}>
-            {desensitize ? '脱敏激活' : '未开启'}
-          </div>
-          <div className="status-card-desc">API Key 仅内存隔离流转</div>
-        </div>
-      </div>
-
-      {/* 本地接入端点面板 (对标 ECPA .panel) */}
-      <div className="panel client-api-panel">
+    <div className="page kernel-page home-page dashboard-page panel-page active">
+      {/* 1. 服务控制与运行状态 (对标 EasyCLIProxyAPI KernelPage .control-panel) */}
+      <section className="panel control-panel">
         <div className="panel-heading">
           <div>
-            <h3 className="card-title" style={{ fontSize: 16, margin: 0 }}>
-              {t('dashboard.endpointsTitle')}
-            </h3>
-            <p className="card-desc" style={{ margin: '4px 0 0' }}>
-              {t('dashboard.endpointsDesc')}
-            </p>
+            <h2>{t('dashboard.statusTitle')}</h2>
+            <p>{running ? t('dashboard.modeDirect') : t('dashboard.modeDetecting')}</p>
           </div>
-          <button className="btn btn-primary btn-sm" onClick={() => setTab('oauth')}>
+          <span className={`state-pill ${running ? 'success' : 'neutral'}`} role="status">
+            <span className={`status-dot ${running ? 'success' : 'neutral'}`} style={{ marginRight: 6 }} />
+            <span className={statusBadgeClass}>{statusBadgeText}</span>
+          </span>
+        </div>
+
+        {/* 顶部指标状态条 (对标 ECPA .status-strip) */}
+        <div className="status-strip">
+          <div className="status-card status-card-primary">
+            <span className={`status-dot ${running ? 'success' : 'neutral'}`} />
+            <div>
+              <span>{t('dashboard.statusTitle')}</span>
+              <strong className="status-card-value">
+                {running ? `127.0.0.1:${port}` : t('dashboard.stopped')}
+              </strong>
+            </div>
+          </div>
+
+          <div className="status-card">
+            <span>{t('dashboard.activeAccount')}</span>
+            <strong className="status-card-value truncate" title={activeNickname}>
+              {running ? activeNickname : t('status.offline')}
+            </strong>
+          </div>
+
+          <div className="status-card">
+            <span>{t('dashboard.protocols')}</span>
+            <strong className="status-card-value">{protocolBadge}</strong>
+          </div>
+
+          <div className="status-card">
+            <span>{t('dashboard.desensitize')}</span>
+            <strong className="status-card-value">
+              <span className={`badge ${desensitize ? 'badge-success' : 'badge-warn'}`}>
+                {desensitize ? t('dashboard.desensitizeOn') : t('dashboard.desensitizeOff')}
+              </span>
+            </strong>
+          </div>
+        </div>
+
+        {/* 控制操作按钮条 (对标 ECPA control-action-row) */}
+        <div className="button-row panel-action-row control-action-row">
+          <button
+            type="button"
+            className={running ? 'danger-button' : 'primary-button'}
+            disabled={running}
+            onClick={() => void startProxy()}
+          >
+            {running ? t('dashboard.running') : t('service.start')}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!running}
+            onClick={() => void restartProxy()}
+          >
+            {t('service.restart')}
+          </button>
+          <button
+            type="button"
+            className="danger-button"
+            disabled={!running}
+            onClick={() => void stopProxy()}
+          >
+            {t('service.stop')}
+          </button>
+        </div>
+      </section>
+
+      {/* 2. 客户端接入配置面板 (对标 EasyCLIProxyAPI KernelPage .client-api-panel) */}
+      <section className="panel client-api-panel">
+        <div className="panel-heading client-api-heading">
+          <div>
+            <h2>{t('dashboard.endpointsTitle')}</h2>
+            <div className="client-api-key-actions">
+              <span className="client-api-meta">{t('dashboard.apiKey')}:</span>
+              <code className="client-api-key-code">
+                {showKey ? 'local' : '••••••••'}
+              </code>
+              <button
+                type="button"
+                className="icon-button quiet"
+                onClick={() => setShowKey(!showKey)}
+                title={showKey ? '隐藏' : '显示'}
+                aria-label={showKey ? '隐藏' : '显示'}
+              >
+                {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              <button
+                type="button"
+                className="icon-button quiet"
+                onClick={() => void handleCopy('local')}
+                title={t('dashboard.copy')}
+                aria-label={t('dashboard.copy')}
+              >
+                <Copy size={14} />
+              </button>
+              <span className="client-api-divider">|</span>
+              <span className="client-api-meta">Base URL:</span>
+              <code className="client-api-key-code">{baseUrl}</code>
+              <button
+                type="button"
+                className="icon-button quiet"
+                onClick={() => void handleCopy(baseUrl)}
+                title={t('dashboard.copy')}
+                aria-label={t('dashboard.copy')}
+              >
+                <Copy size={14} />
+              </button>
+            </div>
+          </div>
+          <button className="secondary-button" style={{ height: 34, fontSize: 12.5 }} onClick={() => setTab('oauth')}>
             {t('dashboard.gotoOauth')}
           </button>
         </div>
 
-        <div className="grid-2" style={{ marginBottom: 16 }}>
-          <div className="copy-input-group">
-            <label className="field-label">Base URL</label>
-            <div className="input-with-btn">
-              <input className="input mono" type="text" readOnly value={baseUrl} />
-              <button className="btn btn-sm btn-copy" onClick={() => void handleCopy(baseUrl)}>
-                {t('dashboard.copy')}
-              </button>
-            </div>
-          </div>
-          <div className="copy-input-group">
-            <label className="field-label">{t('dashboard.apiKey')}</label>
-            <div className="input-with-btn">
-              <input className="input mono" type="text" readOnly value="local" />
-              <button className="btn btn-sm btn-copy" onClick={() => void handleCopy('local')}>
-                {t('dashboard.copy')}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="endpoint-grid">
+        {/* 客户端接入卡片网格 (对标 ECPA .client-api-grid & .client-api-card) */}
+        <div className="client-api-grid">
           {PROTOCOLS.map((p) => {
             const fullUrl = `${baseUrl}${p.path}`;
+            const Icon = p.id === 'chat' ? Sparkles : p.id === 'messages' ? Bot : TerminalSquare;
             return (
-              <div className="endpoint-card" key={p.id}>
-                <div className="endpoint-header">
-                  <span className="endpoint-title">{t(p.labelKey)}</span>
-                  <span className="endpoint-tag">POST</span>
+              <article key={p.id} className={`client-api-card ${p.id}`}>
+                <div className="client-api-card-heading">
+                  <span className="client-api-logo">
+                    <Icon size={18} />
+                  </span>
+                  <div>
+                    <strong>{t(p.labelKey)}</strong>
+                    <span className="client-api-format-tag">{p.path}</span>
+                  </div>
                 </div>
-                <div className="endpoint-path">{fullUrl}</div>
-                <button
-                  className="btn btn-sm btn-secondary"
-                  style={{ width: '100%', fontSize: 11 }}
-                  onClick={() => void handleCopy(fullUrl)}
-                >
-                  {t('dashboard.copyFullEndpoint')}
-                </button>
-              </div>
+
+                <div className="client-api-values">
+                  <div className="client-api-value-row">
+                    <span>{t(p.labelKey)}</span>
+                    <code title={fullUrl} onClick={() => void handleCopy(fullUrl)}>
+                      {fullUrl}
+                    </code>
+                    <button
+                      type="button"
+                      className="icon-button quiet"
+                      onClick={() => void handleCopy(fullUrl)}
+                      title={t('dashboard.copy')}
+                      aria-label={t('dashboard.copy')}
+                    >
+                      <Copy size={15} />
+                    </button>
+                  </div>
+                </div>
+              </article>
             );
           })}
         </div>
-      </div>
+      </section>
 
-      {/* 连通性实时测试卡片 (对标 ECPA .panel) */}
-      <div className="panel diagnostic-test-panel">
+      {/* 3. 连通性测试面板 (对标 EasyCLIProxyAPI .panel.quiet-panel) */}
+      <section className="panel quiet-panel diagnostic-test-panel">
         <div className="panel-heading">
           <div>
-            <h3 className="card-title" style={{ fontSize: 16, margin: 0 }}>
-              {t('dashboard.testTitle')}
-            </h3>
-            <p className="card-desc" style={{ margin: '4px 0 0' }}>
-              {t('dashboard.testDesc')}
-            </p>
+            <h2>{t('dashboard.testTitle')}</h2>
+            <p>{t('dashboard.testDesc')}</p>
           </div>
           <div className="actions" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <select
               className="input mono"
-              style={{ minWidth: 190 }}
+              style={{ minWidth: 200, height: 38 }}
               title={t('dashboard.testProtocolTitle')}
               value={protocol}
               onChange={(e) => setProtocol(e.target.value as TestProtocol)}
@@ -286,7 +335,8 @@ export function DashboardPage() {
               ))}
             </select>
             <button
-              className="btn btn-primary"
+              type="button"
+              className="btn btn-primary primary-button"
               onClick={() => void runTest()}
               disabled={result.phase === 'running'}
             >
@@ -300,7 +350,7 @@ export function DashboardPage() {
                     display: 'inline-block',
                     marginRight: 6,
                   }}
-                ></span>
+                />
               )}
               {result.phase === 'running' ? t('dashboard.testing') : t('dashboard.test')}
             </button>
@@ -335,7 +385,7 @@ export function DashboardPage() {
             <div className="test-output-quote">{result.output}</div>
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }

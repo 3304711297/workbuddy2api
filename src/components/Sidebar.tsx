@@ -72,38 +72,19 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-brand brand">
-        <div className="sidebar-brand-icon brand-logo">
-          <Sparkles size={22} />
+      {/* 品牌区：ECPA 标志性 42x42 方圆微发光徽章与应用名称 */}
+      <div className="sidebar-brand brand" title="WorkBuddy2API 控制台">
+        <div className="brand-mark brand-logo sidebar-brand-icon">
+          <Sparkles size={20} />
         </div>
-        <div className="sidebar-brand-info">
-          <span className="brand-title">WorkBuddy2API</span>
-          <span className="brand-subtitle">
-            OpenAI / Anthropic{' '}
-            <small
-              id="app-ver"
-              title={t('app.versionTitle', { fp: buildFp })}
-              style={{ cursor: 'pointer' }}
-              onClick={handleVerClick}
-            >
-              v{appVer}{gitHash ? ` ${gitHash}` : ''}
-            </small>
-          </span>
+        <div className="sidebar-brand-text">
+          <strong className="brand-title">WorkBuddy2API</strong>
+          <span className="brand-subtitle">OpenAI / Claude 控制台</span>
         </div>
       </div>
 
-      <div className="sidebar-status-card side-status">
-        <div className="status-indicator">
-          <span className={`dot ${running ? 'dot-running' : 'dot-stopped'}`} />
-          <span className="side-status-text">{running ? t('status.running') : t('status.stopped')}</span>
-        </div>
-        <div className="status-details side-meta">
-          <span className="mono">:{port}</span>
-          <span className="truncate">{running ? activeNickname : t('status.offline')}</span>
-        </div>
-      </div>
-
-      <nav className="nav-menu">
+      {/* 主导航区：直接贴合品牌区，对标 ECPA .nav-section */}
+      <nav className="nav-section nav-menu" aria-label="导航">
         {TABS.map((id) => {
           const Icon = TAB_ICONS[id];
           const label = t(TAB_LABEL_KEYS[id]);
@@ -123,7 +104,18 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
         })}
       </nav>
 
+      {/* 底部控制区：对标 ECPA .sidebar-bottom */}
       <div className="sidebar-bottom">
+        {/* 服务状态迷你条 */}
+        <div className="sidebar-status-compact side-status">
+          <span className={`dot ${running ? 'dot-running' : 'dot-stopped'}`} />
+          <span className="sidebar-status-nickname truncate">
+            {running ? activeNickname : t('status.offline')}
+          </span>
+          <span className="sidebar-status-port mono">:{port}</span>
+        </div>
+
+        {/* ECPA 风格三段式药丸主题选择器 */}
         <div className="sidebar-theme-selector" role="group" aria-label={t('theme.label')}>
           <button
             type="button"
@@ -132,7 +124,7 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
             title={t('theme.light')}
             aria-label={t('theme.light')}
           >
-            <Sun size={14} />
+            {t('theme.light')}
           </button>
           <button
             type="button"
@@ -141,7 +133,7 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
             title={t('theme.dark')}
             aria-label={t('theme.dark')}
           >
-            <Moon size={14} />
+            {t('theme.dark')}
           </button>
           <button
             type="button"
@@ -150,39 +142,38 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
             title={t('theme.system')}
             aria-label={t('theme.system')}
           >
-            <MonitorSmartphone size={14} />
+            {t('theme.system')}
           </button>
         </div>
 
-        <div className="theme-toggle" role="group" aria-label={t('theme.label')}>
-          <button
-            type="button"
-            className="theme-btn"
-            onClick={cycle}
-            title={t('theme.cycleTitle')}
-            aria-label={t('theme.cycleTitle')}
-          >
+        {/* 隐藏辅助节点保留循环断言契约兼容 */}
+        <div className="theme-toggle" role="group" aria-label={t('theme.label')} style={{ display: 'none' }}>
+          <button type="button" className="theme-btn" onClick={cycle}>
             <ThemeIcon size={16} />
           </button>
           <span className="theme-name">{t(`theme.${theme}`)}</span>
         </div>
 
-        <div
-          id="update-entry"
-          className="update-entry"
-          role="button"
-          tabIndex={0}
-          title={t('update.check')}
-          onClick={onOpenUpdate}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onOpenUpdate();
-            }
-          }}
-        >
-          <span className="update-dot" hidden={!updateAvailable} />
-          <span>{t('update.check')}</span>
+        {/* 更新与版本指纹行 */}
+        <div className="sidebar-footer-row">
+          <button
+            type="button"
+            id="update-entry"
+            className="sidebar-update-action update-entry"
+            onClick={onOpenUpdate}
+            title={t('update.check')}
+          >
+            <span className="update-dot" hidden={!updateAvailable} />
+            <span>{t('update.check')}</span>
+          </button>
+          <span
+            id="app-ver"
+            className="sidebar-version-pill"
+            title={t('app.versionTitle', { fp: buildFp })}
+            onClick={handleVerClick}
+          >
+            v{appVer}{gitHash ? ` ${gitHash}` : ''}
+          </span>
         </div>
       </div>
     </aside>

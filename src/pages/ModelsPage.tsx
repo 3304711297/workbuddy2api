@@ -499,7 +499,7 @@ export function ModelsPage() {
       </p>
 
       {/* 模型表格 */}
-      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+      <div className="panel card" style={{ padding: 0, overflowX: 'auto' }}>
         <table className="data-table models-table">
           <thead>
             <tr>

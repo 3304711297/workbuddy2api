@@ -191,7 +191,7 @@ export function LogsPage() {
         </div>
       </div>
 
-      <div className="card log-console" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="panel card log-console" style={{ padding: 0, overflow: 'hidden' }}>
         <div className="log-console-header">
           <span className="mono log-console-path">proxy_stdout.log</span>
           <button

@@ -368,8 +368,8 @@ export function SettingsPage() {
 
       <div className="settings-grid">
         {/* 0. 界面语言（React 迁移新增的 i18n 入口，旧版没有） */}
-        <div className="card settings-card">
-          <div className="card-header-flex">
+        <div className="panel card settings-card">
+          <div className="panel-heading card-header-flex">
             <div>
               <h3 className="card-title">{t('settings.languageTitle')}</h3>
               <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.languageDesc')}</p>
@@ -391,8 +391,8 @@ export function SettingsPage() {
         </div>
 
         {/* 1. 网络与端点配置 */}
-        <div className="card settings-card">
-          <div className="card-header-flex">
+        <div className="panel card settings-card">
+          <div className="panel-heading card-header-flex">
             <div>
               <h3 className="card-title">{t('settings.networkTitle')}</h3>
               <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.networkDesc')}</p>
@@ -461,8 +461,8 @@ export function SettingsPage() {
         </div>
 
         {/* 2. 安全与访问鉴权 */}
-        <div className="card settings-card">
-          <div className="card-header-flex">
+        <div className="panel card settings-card">
+          <div className="panel-heading card-header-flex">
             <div>
               <h3 className="card-title">{t('settings.securityTitle')}</h3>
               <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.securityDesc')}</p>
@@ -531,8 +531,8 @@ export function SettingsPage() {
         </div>
 
         {/* 3. 模型与客户端交互 */}
-        <div className="card settings-card">
-          <div className="card-header-flex">
+        <div className="panel card settings-card">
+          <div className="panel-heading card-header-flex">
             <div>
               <h3 className="card-title">{t('settings.modelTitle')}</h3>
               <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.modelDesc')}</p>
@@ -624,8 +624,8 @@ export function SettingsPage() {
         </div>
 
         {/* 4. 日志、调试与高级运行时 */}
-        <div className="card settings-card">
-          <div className="card-header-flex">
+        <div className="panel card settings-card">
+          <div className="panel-heading card-header-flex">
             <div>
               <h3 className="card-title">{t('settings.logTitle')}</h3>
               <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.logDesc')}</p>

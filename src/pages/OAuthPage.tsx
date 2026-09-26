@@ -121,7 +121,7 @@ export function OAuthPage() {
 
   return (
     <div className="panel-page active">
-      <div className="card oauth-card">
+      <div className="panel card oauth-card">
         <h2 className="card-title">{t('oauth.title')}</h2>
         <p className="card-desc">{t('oauth.desc')}</p>
 

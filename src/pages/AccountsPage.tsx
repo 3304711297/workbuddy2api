@@ -711,7 +711,7 @@ export function AccountsPage() {
       )}
 
       {activeAccount && data && (
-        <div className="account-card-active">
+        <div className="account-card-active panel">
           <div className="account-profile-header">
             <div className="avatar-circle">
               {(activeAccount.nickname || 'W').charAt(0).toUpperCase()}

@@ -34,21 +34,33 @@ export function Header() {
   const { t } = useI18n();
 
   return (
-    <header className="content-header">
+    <header className="content-header workspace-header">
       <div className="header-left">
         <h1>{t(TAB_TITLE_KEYS[tab])}</h1>
         <p className="page-desc">{t(TAB_DESC_KEYS[tab])}</p>
       </div>
-      <div className="header-right">
-        <button type="button" className="btn btn-primary" disabled={running} onClick={() => void startProxy()}>
+      <div className="header-right button-row">
+        <button
+          type="button"
+          className="btn btn-primary primary-button"
+          disabled={running} onClick={() => void startProxy()}
+        >
           <Play size={14} className="btn-icon" />
           {t('service.start')}
         </button>
-        <button type="button" className="btn btn-secondary" disabled={!running} onClick={() => void restartProxy()}>
+        <button
+          type="button"
+          className="btn btn-secondary secondary-button"
+          disabled={!running} onClick={() => void restartProxy()}
+        >
           <RotateCw size={14} className="btn-icon" />
           {t('service.restart')}
         </button>
-        <button type="button" className="btn btn-danger" disabled={!running} onClick={() => void stopProxy()}>
+        <button
+          type="button"
+          className="btn btn-danger danger-button"
+          disabled={!running} onClick={() => void stopProxy()}
+        >
           <Square size={14} className="btn-icon" />
           {t('service.stop')}
         </button>

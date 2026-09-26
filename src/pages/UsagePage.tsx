@@ -260,8 +260,8 @@ export function UsagePage() {
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header-flex">
+      <div className="panel card" style={{ marginTop: 16 }}>
+        <div className="panel-heading card-header-flex">
           <h3 className="card-title">{t('usage.chart.title')}</h3>
           <span className="muted" style={{ fontSize: 12 }}>
             {t('usage.chart.note')}
@@ -320,14 +320,14 @@ export function UsagePage() {
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header-flex">
+      <div className="panel card" style={{ marginTop: 16 }}>
+        <div className="panel-heading card-header-flex">
           <h3 className="card-title">{t('usage.events.title')}</h3>
           <span className="muted" style={{ fontSize: 12 }}>
             {t('usage.events.note')}
           </span>
         </div>
-        <div className="card" style={{ padding: 0, overflowX: 'auto', marginTop: 10 }}>
+        <div className="panel card" style={{ padding: 0, overflowX: 'auto', marginTop: 10 }}>
           <table className="data-table usage-events-table">
             <thead>
               <tr>

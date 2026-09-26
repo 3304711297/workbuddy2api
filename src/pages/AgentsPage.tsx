@@ -201,8 +201,8 @@ export function AgentsPage() {
       </div>
 
       <div className="grid-2">
-        {/* Hermes Agent 卡片 */}
-        <div className="card agent-card">
+        {/* Hermes 接入卡片 */}
+        <div className="panel card agent-card">
           <div className="agent-card-header">
             <div className="agent-icon hermes-icon">H</div>
             <div>
@@ -281,7 +281,7 @@ export function AgentsPage() {
         </div>
 
         {/* ZCode 卡片 */}
-        <div className="card agent-card">
+        <div className="panel card agent-card">
           <div className="agent-card-header">
             <div className="agent-icon zcode-icon">Z</div>
             <div>
