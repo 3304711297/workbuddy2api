@@ -123,6 +123,9 @@ export const zhCN: Record<string, string> = {
   // ---- 扫码登录 ----
   'oauth.title': '浏览器安全授权登录',
   'oauth.desc': '无需下载或安装 WorkBuddy 桌面端，直接通过腾讯官方网页授权登录获取凭据。',
+  'oauth.tab.login': '扫码登录',
+  'oauth.tab.accounts': '账号管理',
+  'oauth.tab.quota': '额度查询',
   'oauth.startButton': '开始网页授权登录',
   'oauth.requesting': '正在向腾讯授权中心发起登录请求...',
   'oauth.waiting': '浏览器已唤起，等待您扫码或登录授权完成...',
@@ -421,6 +424,11 @@ export const zhCN: Record<string, string> = {
   'usage.chart.note': '本地时区 · 每小时一桶',
   'usage.chart.title': '最近 48 小时请求趋势',
   'usage.desc': '本地请求统计（自本版本起记录），TPS 仅统计成功且含首字时延的样本',
+  'usage.tab.overview': '概览',
+  'usage.tab.analysis': '细分分析',
+  'usage.tab.events': '请求明细',
+  'usage.tab.pricing': '模型费率',
+  'usage.tab.dataManagement': '数据管理',
   'usage.events.loadError': '加载请求明细失败: {msg}',
   'usage.events.note': '逐条记录 · 含失败原因与降级链路',
   'usage.events.title': '请求明细',
@@ -455,6 +463,11 @@ export const zhCN: Record<string, string> = {
   // ---- 服务设置 ----
   'settings.title': '服务设置',
   'settings.subtitle': '反代服务的网络、鉴权、模型与日志配置',
+  'settings.tab.all': '全部配置',
+  'settings.tab.general': '常规设置',
+  'settings.tab.network': '网络与安全',
+  'settings.tab.routing': '调度与路由',
+  'settings.tab.software': '软件与调试',
 
   // 界面语言（React 迁移新增的 i18n 入口，旧版没有）
   'settings.languageTitle': '界面语言',

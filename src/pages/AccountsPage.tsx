@@ -469,12 +469,13 @@ function AccountCard({
   );
 }
 
-export function AccountsPage() {
-  const { port, checkHealthNow } = useApp();
+export function AccountsPage({ initialTab = 'accounts' }: { initialTab?: 'accounts' | 'login' | 'quota' }) {
+  const { port, checkHealthNow, setTab } = useApp();
   const { showToast } = useToast();
   const { confirm } = useConfirm();
   const { t } = useI18n();
 
+  const [subTab, setSubTab] = useState<'accounts' | 'login' | 'quota'>(initialTab);
   const loaderRef = useRef<AccountsLoader | null>(null);
   const [data, setData] = useState<AccountsLoadResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -666,6 +667,38 @@ export function AccountsPage() {
 
   return (
     <div className="panel-page active">
+      {/* 次级 Tab 导航：对标 EasyCLIProxyAPI .agent-subpage-tabs.oauth-subpage-tabs */}
+      <div
+        className="agent-subpage-tabs oauth-subpage-tabs"
+        role="tablist"
+        aria-label="账号与鉴权子模块"
+      >
+        <button
+          type="button"
+          className={subTab === 'accounts' ? 'active' : ''}
+          onClick={() => setSubTab('accounts')}
+        >
+          {t('oauth.tab.accounts')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'login' ? 'active' : ''}
+          onClick={() => {
+            setSubTab('login');
+            setTab('oauth');
+          }}
+        >
+          {t('oauth.tab.login')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'quota' ? 'active' : ''}
+          onClick={() => setSubTab('quota')}
+        >
+          {t('oauth.tab.quota')}
+        </button>
+      </div>
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 16 }}>{t('accounts.title')}</h2>
         <button

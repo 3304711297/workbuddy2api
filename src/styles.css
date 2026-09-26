@@ -2362,3 +2362,348 @@ body {
 }
 .update-hint[hidden] { display: none; }
 
+/* --------------------------------------------------------------------------
+   EasyCLIProxyAPI 原生主次 Tab 与使用记录系统
+   -------------------------------------------------------------------------- */
+
+/* 侧栏分组标题与次级导航项 */
+.nav-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 10px 12px 4px;
+  opacity: 0.75;
+}
+
+.nav-item.sub-item,
+.nav-item[data-sub='true'] {
+  padding-left: 28px;
+  min-height: 38px;
+  font-size: 13px;
+  opacity: 0.9;
+}
+.nav-item.sub-item .nav-icon,
+.nav-item[data-sub='true'] .nav-icon {
+  width: 15px;
+  height: 15px;
+  opacity: 0.8;
+}
+
+/* 页面内次级 Tab 切换栏 (对标 ECPA .agent-subpage-tabs & .oauth-subpage-tabs & .config-subpage-tabs) */
+.agent-subpage-tabs,
+.oauth-subpage-tabs,
+.config-subpage-tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  margin-bottom: 16px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.agent-subpage-tabs button,
+.oauth-subpage-tabs button,
+.config-subpage-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 100px;
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.agent-subpage-tabs button:hover:not(.active),
+.oauth-subpage-tabs button:hover:not(.active),
+.config-subpage-tabs button:hover:not(.active) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.agent-subpage-tabs button.active,
+.oauth-subpage-tabs button.active,
+.config-subpage-tabs button.active {
+  background: var(--primary-subtle);
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+/* 页面顶部使用记录 Tab 切换系统 (对标 ECPA .usage-tabs) */
+.usage-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.usage-tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  width: fit-content;
+}
+
+.usage-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 96px;
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.usage-tabs button:hover:not(.active) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.usage-tabs button.active {
+  background: var(--primary-subtle);
+  color: var(--primary);
+  font-weight: 600;
+  border: 1px solid rgba(93, 211, 199, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+/* 过滤工具条 (对标 ECPA .usage-filter-panel) */
+.usage-filter-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.usage-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.usage-filter-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.usage-filter-item select,
+.usage-filter-item input {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+
+/* 核心指标统计网格 (对标 ECPA .usage-stat-grid) */
+.usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.usage-stat-card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.usage-stat-card-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.usage-stat-card-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.usage-stat-card-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* 时间线趋势面板 (对标 ECPA .usage-trend-panel) */
+.usage-trend-panel {
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.usage-trend-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.usage-trend-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 120px;
+  padding: 10px 0 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-trend-col {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  position: relative;
+  cursor: pointer;
+  min-width: 4px;
+}
+
+.usage-trend-fill {
+  background: var(--primary);
+  border-radius: 2px 2px 0 0;
+  min-height: 2px;
+  transition: opacity 0.15s ease;
+}
+
+.usage-trend-col:hover .usage-trend-fill {
+  background: var(--primary-hover);
+  filter: brightness(1.2);
+}
+
+/* Token 构成指标卡片 */
+.token-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.token-metric-card {
+  padding: 12px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.token-metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.token-metric-value {
+  font-size: 16px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  margin-top: 2px;
+}
+
+/* 细分分析网格 (对标 ECPA .usage-analysis-grid) */
+.usage-analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.usage-category-panel {
+  padding: 18px 20px;
+}
+
+.usage-category-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.usage-category-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* 请求流水明细抽屉与模态 */
+.detail-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.detail-modal-card {
+  width: 100%;
+  max-width: 760px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.detail-modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.detail-modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+

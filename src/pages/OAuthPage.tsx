@@ -30,11 +30,12 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function OAuthPage() {
+export function OAuthPage({ initialTab = 'login' }: { initialTab?: 'login' | 'accounts' | 'quota' }) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const { setTab, checkHealthNow } = useApp();
 
+  const [subTab, setSubTab] = useState<'login' | 'accounts' | 'quota'>(initialTab);
   const [inProgress, setInProgress] = useState(false); // 流程区（链接 + 状态）是否可见
   const [starting, setStarting] = useState(false); // begin() 在途 → 禁用开始按钮
   const [authUrl, setAuthUrl] = useState('');
@@ -121,6 +122,41 @@ export function OAuthPage() {
 
   return (
     <div className="panel-page active">
+      {/* 次级 Tab 导航：对标 EasyCLIProxyAPI .agent-subpage-tabs.oauth-subpage-tabs */}
+      <div
+        className="agent-subpage-tabs oauth-subpage-tabs"
+        role="tablist"
+        aria-label="OAuth 管理次级导航"
+      >
+        <button
+          type="button"
+          className={subTab === 'login' ? 'active' : ''}
+          onClick={() => setSubTab('login')}
+        >
+          {t('oauth.tab.login')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'accounts' ? 'active' : ''}
+          onClick={() => {
+            setSubTab('accounts');
+            setTab('accounts');
+          }}
+        >
+          {t('oauth.tab.accounts')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'quota' ? 'active' : ''}
+          onClick={() => {
+            setSubTab('quota');
+            setTab('accounts');
+          }}
+        >
+          {t('oauth.tab.quota')}
+        </button>
+      </div>
+
       <div className="panel card oauth-card">
         <h2 className="card-title">{t('oauth.title')}</h2>
         <p className="card-desc">{t('oauth.desc')}</p>

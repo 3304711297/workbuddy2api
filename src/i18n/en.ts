@@ -123,6 +123,9 @@ export const en: Record<string, string> = {
   // ---- QR Login ----
   'oauth.title': 'Secure Browser Authorization',
   'oauth.desc': 'No need to download the WorkBuddy desktop app — authorize directly via Tencent’s official web page.',
+  'oauth.tab.login': 'OAuth Login',
+  'oauth.tab.accounts': 'Accounts',
+  'oauth.tab.quota': 'Quota',
   'oauth.startButton': 'Start web authorization',
   'oauth.requesting': 'Requesting login from Tencent authorization center...',
   'oauth.waiting': 'Browser opened. Waiting for you to scan or complete authorization...',
@@ -417,10 +420,15 @@ export const en: Record<string, string> = {
   'usage.card.tps': 'Generation speed (TPS)',
   'usage.card.tpsSub': '{samples} samples',
   'usage.chart.barTitle': '{time} · {n} requests · {tokens} tokens',
-  'usage.chart.empty': 'No data yet; statistics are recorded starting from this version',
-  'usage.chart.note': 'Local timezone · one bucket per hour',
-  'usage.chart.title': 'Request trend (last 48 hours)',
-  'usage.desc': 'Local request statistics (recorded since this version); TPS only counts successful samples with TTFT',
+  'usage.chart.empty': 'No data yet; records start from this version.',
+  'usage.chart.note': 'Local time · 1 bucket per hour',
+  'usage.chart.title': 'Requests trend (last 48 hours)',
+  'usage.desc': 'Local request statistics (recorded since this version). TPS only counts successful requests with a measured TTFT.',
+  'usage.tab.overview': 'Overview',
+  'usage.tab.analysis': 'Analysis',
+  'usage.tab.events': 'Events',
+  'usage.tab.pricing': 'Pricing & Models',
+  'usage.tab.dataManagement': 'Data Management',
   'usage.events.loadError': 'Failed to load request details: {msg}',
   'usage.events.note': 'Per-request records · with failure reasons and fallback chain',
   'usage.events.title': 'Request details',
@@ -452,9 +460,14 @@ export const en: Record<string, string> = {
   'usage.table.ttft': 'TTFT',
   'usage.title': 'Usage statistics',
 
-  // ---- Service settings ----
+  // ---- Settings ----
   'settings.title': 'Service Settings',
-  'settings.subtitle': 'Proxy network, auth, model and logging configuration',
+  'settings.subtitle': 'Network, authentication, models and logging configuration for proxy',
+  'settings.tab.all': 'All Settings',
+  'settings.tab.general': 'General',
+  'settings.tab.network': 'Network & Security',
+  'settings.tab.routing': 'Routing & Models',
+  'settings.tab.software': 'Software & Logs',
 
   // UI language (new i18n entry added in the React migration; did not exist before)
   'settings.languageTitle': 'Language',

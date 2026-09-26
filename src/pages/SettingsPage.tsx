@@ -49,12 +49,15 @@ const ENV_VAR_ROWS: Array<{ name: string; descKey: string }> = [
   { name: 'WORKBUDDY2API_USER_AGENT', descKey: 'settings.envUserAgent' },
 ];
 
-export function SettingsPage() {
+export type SettingsTab = 'all' | 'general' | 'network' | 'routing' | 'software';
+
+export function SettingsPage({ initialTab = 'all' }: { initialTab?: SettingsTab }) {
   const { setPort, setDesensitize, checkHealthNow, running, setApiKey } = useApp();
   const { lang, setLang, t } = useI18n();
   const { showToast } = useToast();
   const { confirm } = useConfirm();
 
+  const [subTab, setSubTab] = useState<SettingsTab>(initialTab);
   // ---- 表单态：loadFromDisk 回填后即为真源，用户编辑不再被异步覆盖 ----
   const [form, setForm] = useState<SettingsFormState>(DEFAULT_SETTINGS_FORM);
   const [portText, setPortText] = useState(String(DEFAULT_SETTINGS_FORM.port));
@@ -366,347 +369,400 @@ export function SettingsPage() {
         </div>
       </div>
 
+      {/* 次级 Tab 导航：对标 EasyCLIProxyAPI .agent-subpage-tabs.config-subpage-tabs */}
+      <div
+        className="agent-subpage-tabs config-subpage-tabs"
+        role="tablist"
+        aria-label="服务设置子模块"
+      >
+        <button
+          type="button"
+          className={subTab === 'all' ? 'active' : ''}
+          onClick={() => setSubTab('all')}
+        >
+          {t('settings.tab.all')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'general' ? 'active' : ''}
+          onClick={() => setSubTab('general')}
+        >
+          {t('settings.tab.general')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'network' ? 'active' : ''}
+          onClick={() => setSubTab('network')}
+        >
+          {t('settings.tab.network')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'routing' ? 'active' : ''}
+          onClick={() => setSubTab('routing')}
+        >
+          {t('settings.tab.routing')}
+        </button>
+        <button
+          type="button"
+          className={subTab === 'software' ? 'active' : ''}
+          onClick={() => setSubTab('software')}
+        >
+          {t('settings.tab.software')}
+        </button>
+      </div>
+
       <div className="settings-grid">
         {/* 0. 界面语言（React 迁移新增的 i18n 入口，旧版没有） */}
-        <div className="panel card settings-card">
-          <div className="panel-heading card-header-flex">
-            <div>
-              <h3 className="card-title">{t('settings.languageTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.languageDesc')}</p>
+        {(subTab === 'all' || subTab === 'general') && (
+          <div className="panel card settings-card">
+            <div className="panel-heading card-header-flex">
+              <div>
+                <h3 className="card-title">{t('settings.languageTitle')}</h3>
+                <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.languageDesc')}</p>
+              </div>
             </div>
-          </div>
-          <select
-            className="input"
-            style={{ maxWidth: 340, marginTop: 12 }}
-            value={lang}
-            onChange={(e) => onLangChange(e.target.value)}
-            aria-label={t('settings.languageTitle')}
-          >
-            {LANGS.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* 1. 网络与端点配置 */}
-        <div className="panel card settings-card">
-          <div className="panel-heading card-header-flex">
-            <div>
-              <h3 className="card-title">{t('settings.networkTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.networkDesc')}</p>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <label className="field-label" htmlFor="settings-input-port">{t('settings.portLabel')}</label>
-            <div className="input-with-btn" style={{ maxWidth: 320, marginTop: 6 }}>
-              <input
-                id="settings-input-port"
-                className="input mono"
-                type="number"
-                min={1024}
-                max={65535}
-                value={portText}
-                onChange={(e) => setPortText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void onSavePort();
-                }}
-                aria-label={t('settings.portLabel')}
-              />
-              <button type="button" className="btn btn-secondary" onClick={() => void onSavePort()}>
-                {t('settings.savePort')}
-              </button>
-            </div>
-            <p className="muted field-hint">{t('settings.portHint')}</p>
-          </div>
-
-          <div className="divider" />
-
-          <div>
-            <label className="switch-label">
-              <input
-                type="checkbox"
-                checked={form.autoStartProxy}
-                onChange={(e) => void onToggleAutoStart(e.target.checked)}
-              />
-              <span className="switch-slider" />
-              <span className="switch-text">{t('settings.autoStart')}</span>
-            </label>
-            <p className="muted field-hint">{t('settings.autoStartHint')}</p>
-          </div>
-
-          <div className="divider" />
-
-          <div>
-            <label className="switch-label">
-              <input
-                type="checkbox"
-                checked={lanEnabled}
-                onChange={(e) => void onToggleLan(e.target.checked)}
-              />
-              <span className="switch-slider" />
-              <span className="switch-text">{t('settings.lanLabel')}</span>
-            </label>
-            <p className="muted field-hint" style={{ marginTop: 6 }}>{t('settings.lanHint')}</p>
-            {lanEnabled && (
-              <p className="muted field-hint" style={{ marginTop: 6 }}>
-                {t('settings.lanAddressLabel')}
-                <code className="mono">{lanAddressText}</code>
-                {t('settings.lanAddressRestartNote')}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* 2. 安全与访问鉴权 */}
-        <div className="panel card settings-card">
-          <div className="panel-heading card-header-flex">
-            <div>
-              <h3 className="card-title">{t('settings.securityTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.securityDesc')}</p>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <label className="field-label" htmlFor="settings-input-api-key">{t('settings.apiKeyLabel')}</label>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' }}>
-              <input
-                id="settings-input-api-key"
-                className="input mono"
-                type={showKey ? 'text' : 'password'}
-                value={form.apiKey}
-                placeholder={t('settings.apiKeyPlaceholder')}
-                autoComplete="off"
-                spellCheck={false}
-                style={{ flex: 1, minWidth: 260 }}
-                onChange={(e) => setForm((prev) => ({ ...prev, apiKey: e.target.value }))}
-                onBlur={() => void commitApiKeyEdit()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void commitApiKeyEdit();
-                }}
-              />
-              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowKey((s) => !s)}>
-                {t(showKey ? 'settings.apiKeyHide' : 'settings.apiKeyShow')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                title={t('settings.apiKeyGenTitle')}
-                onClick={() => void onGenApiKey()}
-              >
-                {t('settings.apiKeyGen')}
-              </button>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={() => void onCopyApiKey()}>
-                {t('settings.apiKeyCopy')}
-              </button>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={() => void onClearApiKey()}>
-                {t('settings.apiKeyClear')}
-              </button>
-            </div>
-            <p className="muted field-hint" style={{ marginTop: 6 }}>
-              {t('settings.apiKeyHintA')}
-              <code className="mono">Authorization: Bearer &lt;key&gt;</code>
-              {t('settings.apiKeyHintB')}
-              <code className="mono">x-api-key: &lt;key&gt;</code>
-              {t('settings.apiKeyHintC')}
-            </p>
-          </div>
-
-          <div className="divider" />
-
-          <div>
-            <label className="switch-label">
-              <input
-                type="checkbox"
-                checked={form.desensitize}
-                onChange={(e) => void onToggleDesensitize(e.target.checked)}
-              />
-              <span className="switch-slider" />
-              <span className="switch-text">{t('settings.desensitizeLabel')}</span>
-            </label>
-            <p className="muted field-hint">{t('settings.desensitizeHint')}</p>
-          </div>
-        </div>
-
-        {/* 3. 模型与客户端交互 */}
-        <div className="panel card settings-card">
-          <div className="panel-heading card-header-flex">
-            <div>
-              <h3 className="card-title">{t('settings.modelTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.modelDesc')}</p>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <label className="field-label" htmlFor="settings-select-model-list-mode">
-              {t('settings.modelListModeLabel')}
-            </label>
             <select
-              id="settings-select-model-list-mode"
               className="input"
-              style={{ maxWidth: 340, marginTop: 6 }}
-              value={form.modelListMode}
-              onChange={(e) => void onModelListMode(e.target.value)}
+              style={{ maxWidth: 340, marginTop: 12 }}
+              value={lang}
+              onChange={(e) => onLangChange(e.target.value)}
+              aria-label={t('settings.languageTitle')}
             >
-              <option value="all">{t('settings.modelListModeAll')}</option>
-              <option value="available">{t('settings.modelListModeAvailable')}</option>
-            </select>
-            <p className="muted field-hint">{t('settings.modelListModeHint')}</p>
-            <p className="muted field-hint">
-              {t(
-                form.modelListMode === 'available'
-                  ? 'settings.modelListModeNote.available'
-                  : 'settings.modelListModeNote.all',
-              )}
-            </p>
-          </div>
-
-          <div className="divider" />
-
-          <div>
-            <span className="field-label" id="settings-close-action-label">{t('settings.closeActionLabel')}</span>
-            <div
-              role="radiogroup"
-              aria-labelledby="settings-close-action-label"
-              style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}
-            >
-              {CLOSE_ACTION_OPTIONS.map((o) => (
-                <label
-                  key={o.value}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
-                >
-                  <input
-                    type="radio"
-                    name="close-action"
-                    value={o.value}
-                    checked={form.closeAction === o.value}
-                    onChange={() => void onCloseAction(o.value)}
-                  />
-                  <span>
-                    <strong>{t(o.labelKey)}</strong>
-                    {t(o.descKey)}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div className="divider" />
-
-          <div>
-            <label className="switch-label">
-              <input
-                type="checkbox"
-                checked={form.showDebugConsole}
-                onChange={(e) => void onToggleDebugConsole(e.target.checked)}
-              />
-              <span className="switch-slider" />
-              <span className="switch-text">{t('settings.debugConsoleLabel')}</span>
-            </label>
-            <p className="muted field-hint">{t('settings.debugConsoleHint')}</p>
-          </div>
-
-          <div className="divider" />
-
-          <div>
-            <label className="field-label" htmlFor="settings-data-dir">{t('settings.dataDirLabel')}</label>
-            <input
-              id="settings-data-dir"
-              className="input mono"
-              type="text"
-              readOnly
-              value="%LOCALAPPDATA%\workbuddy2api\accounts.json"
-              style={{ marginTop: 6 }}
-            />
-          </div>
-        </div>
-
-        {/* 4. 日志、调试与高级运行时 */}
-        <div className="panel card settings-card">
-          <div className="panel-heading card-header-flex">
-            <div>
-              <h3 className="card-title">{t('settings.logTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.logDesc')}</p>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <label className="field-label" htmlFor="settings-select-log-level">
-              {t('settings.logLevelLabel')}
-            </label>
-            <select
-              id="settings-select-log-level"
-              className="input"
-              style={{ maxWidth: 420, marginTop: 6 }}
-              value={form.logLevel}
-              onChange={(e) => void onLogLevel(e.target.value)}
-            >
-              {LOG_LEVELS.map((lv) => (
-                <option key={lv} value={lv}>
-                  {t(`settings.logLevel.${lv}`)}
+              {LANGS.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.label}
                 </option>
               ))}
             </select>
-            <p className="muted field-hint" style={{ marginTop: 6 }}>{t('settings.logLevelHint')}</p>
+          </div>
+        )}
 
-            <label className="switch-label" style={{ marginTop: 8 }}>
-              <input
-                type="checkbox"
-                checked={form.logPayloads}
-                onChange={(e) => void onToggleLogPayloads(e.target.checked)}
-              />
-              <span className="switch-slider" />
-              <span className="switch-text">{t('settings.logPayloadsLabel')}</span>
-            </label>
-            <p className="muted field-hint">{t('settings.logPayloadsHint')}</p>
+        {/* 1. 网络与端点配置 */}
+        {(subTab === 'all' || subTab === 'network') && (
+          <div className="panel card settings-card">
+            <div className="panel-heading card-header-flex">
+              <div>
+                <h3 className="card-title">{t('settings.networkTitle')}</h3>
+                <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.networkDesc')}</p>
+              </div>
+            </div>
 
-            <label className="switch-label" style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 12 }}>
+              <label className="field-label" htmlFor="settings-input-port">{t('settings.portLabel')}</label>
+              <div className="input-with-btn" style={{ maxWidth: 320, marginTop: 6 }}>
+                <input
+                  id="settings-input-port"
+                  className="input mono"
+                  type="number"
+                  min={1024}
+                  max={65535}
+                  value={portText}
+                  onChange={(e) => setPortText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void onSavePort();
+                  }}
+                  aria-label={t('settings.portLabel')}
+                />
+                <button type="button" className="btn btn-secondary" onClick={() => void onSavePort()}>
+                  {t('settings.savePort')}
+                </button>
+              </div>
+              <p className="muted field-hint">{t('settings.portHint')}</p>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <label className="switch-label">
+                <input
+                  type="checkbox"
+                  checked={form.autoStartProxy}
+                  onChange={(e) => void onToggleAutoStart(e.target.checked)}
+                />
+                <span className="switch-slider" />
+                <span className="switch-text">{t('settings.autoStart')}</span>
+              </label>
+              <p className="muted field-hint">{t('settings.autoStartHint')}</p>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <label className="switch-label">
+                <input
+                  type="checkbox"
+                  checked={lanEnabled}
+                  onChange={(e) => void onToggleLan(e.target.checked)}
+                />
+                <span className="switch-slider" />
+                <span className="switch-text">{t('settings.lanLabel')}</span>
+              </label>
+              <p className="muted field-hint" style={{ marginTop: 6 }}>{t('settings.lanHint')}</p>
+              {lanEnabled && (
+                <p className="muted field-hint" style={{ marginTop: 6 }}>
+                  {t('settings.lanAddressLabel')}
+                  <code className="mono">{lanAddressText}</code>
+                  {t('settings.lanAddressRestartNote')}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 2. 安全与访问鉴权 */}
+        {(subTab === 'all' || subTab === 'network') && (
+          <div className="panel card settings-card">
+            <div className="panel-heading card-header-flex">
+              <div>
+                <h3 className="card-title">{t('settings.securityTitle')}</h3>
+                <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.securityDesc')}</p>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <label className="field-label" htmlFor="settings-input-api-key">{t('settings.apiKeyLabel')}</label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' }}>
+                <input
+                  id="settings-input-api-key"
+                  className="input mono"
+                  type={showKey ? 'text' : 'password'}
+                  value={form.apiKey}
+                  placeholder={t('settings.apiKeyPlaceholder')}
+                  autoComplete="off"
+                  spellCheck={false}
+                  style={{ flex: 1, minWidth: 260 }}
+                  onChange={(e) => setForm((prev) => ({ ...prev, apiKey: e.target.value }))}
+                  onBlur={() => void commitApiKeyEdit()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void commitApiKeyEdit();
+                  }}
+                />
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowKey((s) => !s)}>
+                  {t(showKey ? 'settings.apiKeyHide' : 'settings.apiKeyShow')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  title={t('settings.apiKeyGenTitle')}
+                  onClick={() => void onGenApiKey()}
+                >
+                  {t('settings.apiKeyGen')}
+                </button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => void onCopyApiKey()}>
+                  {t('settings.apiKeyCopy')}
+                </button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => void onClearApiKey()}>
+                  {t('settings.apiKeyClear')}
+                </button>
+              </div>
+              <p className="muted field-hint" style={{ marginTop: 6 }}>
+                {t('settings.apiKeyHintA')}
+                <code className="mono">Authorization: Bearer &lt;key&gt;</code>
+                {t('settings.apiKeyHintB')}
+                <code className="mono">x-api-key: &lt;key&gt;</code>
+                {t('settings.apiKeyHintC')}
+              </p>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <label className="switch-label">
+                <input
+                  type="checkbox"
+                  checked={form.desensitize}
+                  onChange={(e) => void onToggleDesensitize(e.target.checked)}
+                />
+                <span className="switch-slider" />
+                <span className="switch-text">{t('settings.desensitizeLabel')}</span>
+              </label>
+              <p className="muted field-hint">{t('settings.desensitizeHint')}</p>
+            </div>
+          </div>
+        )}
+
+        {/* 3. 模型与客户端交互 */}
+        {(subTab === 'all' || subTab === 'routing' || subTab === 'general') && (
+          <div className="panel card settings-card">
+            <div className="panel-heading card-header-flex">
+              <div>
+                <h3 className="card-title">{t('settings.modelTitle')}</h3>
+                <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.modelDesc')}</p>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <label className="field-label" htmlFor="settings-select-model-list-mode">
+                {t('settings.modelListModeLabel')}
+              </label>
+              <select
+                id="settings-select-model-list-mode"
+                className="input"
+                style={{ maxWidth: 340, marginTop: 6 }}
+                value={form.modelListMode}
+                onChange={(e) => void onModelListMode(e.target.value)}
+              >
+                <option value="all">{t('settings.modelListModeAll')}</option>
+                <option value="available">{t('settings.modelListModeAvailable')}</option>
+              </select>
+              <p className="muted field-hint">{t('settings.modelListModeHint')}</p>
+              <p className="muted field-hint">
+                {t(
+                  form.modelListMode === 'available'
+                    ? 'settings.modelListModeNote.available'
+                    : 'settings.modelListModeNote.all',
+                )}
+              </p>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <span className="field-label" id="settings-close-action-label">{t('settings.closeActionLabel')}</span>
+              <div
+                role="radiogroup"
+                aria-labelledby="settings-close-action-label"
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}
+              >
+                {CLOSE_ACTION_OPTIONS.map((o) => (
+                  <label
+                    key={o.value}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+                  >
+                    <input
+                      type="radio"
+                      name="close-action"
+                      value={o.value}
+                      checked={form.closeAction === o.value}
+                      onChange={() => void onCloseAction(o.value)}
+                    />
+                    <span>
+                      <strong>{t(o.labelKey)}</strong>
+                      {t(o.descKey)}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <label className="switch-label">
+                <input
+                  type="checkbox"
+                  checked={form.showDebugConsole}
+                  onChange={(e) => void onToggleDebugConsole(e.target.checked)}
+                />
+                <span className="switch-slider" />
+                <span className="switch-text">{t('settings.debugConsoleLabel')}</span>
+              </label>
+              <p className="muted field-hint">{t('settings.debugConsoleHint')}</p>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <label className="field-label" htmlFor="settings-data-dir">{t('settings.dataDirLabel')}</label>
               <input
-                type="checkbox"
-                checked={form.snapshots}
-                onChange={(e) => void onToggleSnapshots(e.target.checked)}
-              />
-              <span className="switch-slider" />
-              <span className="switch-text">{t('settings.snapshotsLabel')}</span>
-            </label>
-            <p className="muted field-hint">
-              {t('settings.snapshotsKeepLabel')}
-              <input
-                type="number"
+                id="settings-data-dir"
                 className="input mono"
-                style={{ width: 76, fontSize: 12, padding: '4px 8px', margin: '0 4px' }}
-                min={10}
-                max={2000}
-                step={10}
-                value={keepText}
-                onChange={(e) => setKeepText(e.target.value)}
-                onBlur={() => void commitSnapshotsKeep()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void commitSnapshotsKeep();
-                }}
-                aria-label={t('settings.snapshotsKeepLabel')}
+                type="text"
+                readOnly
+                value="%LOCALAPPDATA%\workbuddy2api\accounts.json"
+                style={{ marginTop: 6 }}
               />
-              {t('settings.snapshotsKeepUnit')}
-            </p>
+            </div>
           </div>
+        )}
 
-          <div className="divider" />
+        {/* 4. 日志、调试与高级运行时 */}
+        {(subTab === 'all' || subTab === 'software' || subTab === 'routing') && (
+          <div className="panel card settings-card">
+            <div className="panel-heading card-header-flex">
+              <div>
+                <h3 className="card-title">{t('settings.logTitle')}</h3>
+                <p className="card-desc" style={{ marginBottom: 0 }}>{t('settings.logDesc')}</p>
+              </div>
+            </div>
 
-          <div>
-            <span className="field-label">{t('settings.advancedTitle')}</span>
-            <ul className="muted field-hint" style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 11, lineHeight: 1.9 }}>
-              {ENV_VAR_ROWS.map((row) => (
-                <li key={row.name}>
-                  <code className="mono">{row.name}</code>
-                  {' —— '}
-                  {t(row.descKey)}
-                </li>
-              ))}
-            </ul>
+            <div style={{ marginTop: 12 }}>
+              <label className="field-label" htmlFor="settings-select-log-level">
+                {t('settings.logLevelLabel')}
+              </label>
+              <select
+                id="settings-select-log-level"
+                className="input"
+                style={{ maxWidth: 420, marginTop: 6 }}
+                value={form.logLevel}
+                onChange={(e) => void onLogLevel(e.target.value)}
+              >
+                {LOG_LEVELS.map((lv) => (
+                  <option key={lv} value={lv}>
+                    {t(`settings.logLevel.${lv}`)}
+                  </option>
+                ))}
+              </select>
+              <p className="muted field-hint" style={{ marginTop: 6 }}>{t('settings.logLevelHint')}</p>
+
+              <label className="switch-label" style={{ marginTop: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={form.logPayloads}
+                  onChange={(e) => void onToggleLogPayloads(e.target.checked)}
+                />
+                <span className="switch-slider" />
+                <span className="switch-text">{t('settings.logPayloadsLabel')}</span>
+              </label>
+              <p className="muted field-hint">{t('settings.logPayloadsHint')}</p>
+
+              <label className="switch-label" style={{ marginTop: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={form.snapshots}
+                  onChange={(e) => void onToggleSnapshots(e.target.checked)}
+                />
+                <span className="switch-slider" />
+                <span className="switch-text">{t('settings.snapshotsLabel')}</span>
+              </label>
+              <p className="muted field-hint">
+                {t('settings.snapshotsKeepLabel')}
+                <input
+                  type="number"
+                  className="input mono"
+                  style={{ width: 76, fontSize: 12, padding: '4px 8px', margin: '0 4px' }}
+                  min={10}
+                  max={2000}
+                  step={10}
+                  value={keepText}
+                  onChange={(e) => setKeepText(e.target.value)}
+                  onBlur={() => void commitSnapshotsKeep()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void commitSnapshotsKeep();
+                  }}
+                  aria-label={t('settings.snapshotsKeepLabel')}
+                />
+                {t('settings.snapshotsKeepUnit')}
+              </p>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <span className="field-label">{t('settings.advancedTitle')}</span>
+              <ul className="muted field-hint" style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 11, lineHeight: 1.9 }}>
+                {ENV_VAR_ROWS.map((row) => (
+                  <li key={row.name}>
+                    <code className="mono">{row.name}</code>
+                    {' —— '}
+                    {t(row.descKey)}
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
