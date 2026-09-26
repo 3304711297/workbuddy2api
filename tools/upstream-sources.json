@@ -1,16 +1,16 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-25",
+  "updated_at": "2026-09-26",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
       "repo": "xiaofan6ya/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "bb2da825",
-      "last_synced_sha": "bb2da825a84535f67fcef5c18a16d2ae6064b01e",
+      "last_synced_commit": "5e792f79",
+      "last_synced_sha": "5e792f79d215c7d9ad31d55a5d80e151cf5a5044",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 14003 瞬时模型级限流识别与秒级短冷却机制；吸收其「HTTP 200 包着的错误不得当成功」语义）",
-      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 bc173d82→bb2da825：修复 /api/growth 无鉴权、/gw/health 泄露敏感信息、文档默认开放等。**无需采纳**：本仓面向桌面级开发者，无云端多租户管理面；且本仓 /health 早已收窄仅返回布尔状态（status/authenticated），不泄露任何路径、手机号或余额，同时保持免鉴权以满足本地 GUI 与更新脚本探活契约。"
+      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 bb2da825→5e792f79：上游针对用户报告连接异常将换号上限由 3 提升至 6，并在 transport 异常时提取真实异常类名与详情（_exc_text(e)）以区分 ReadTimeout 与 ConnectError。**未采纳**：本仓轮换与重试由 AccountRotator 及 Half-Open 单飞探针管理，rotate_count 可由用户按需配置；且本仓 proxy.rs 与 converter.py 早已将异常分类结构化输出并在前端错误分类中提示，无需硬编码换号次数。"
     },
     "wb2api-upstream-distpub": {
       "name": "workbuddy2api 增强 fork（DistPub，借鉴雷达）",
@@ -34,19 +34,19 @@
       "name": "workbuddy-switch-gateway（momo0410，借鉴雷达）",
       "repo": "momo0410/workbuddy-switch-gateway",
       "branch": "main",
-      "last_synced_commit": "6a11696f",
-      "last_synced_sha": "6a11696f24a0f01cf356447f632af339bab62849",
+      "last_synced_commit": "7116dbf9",
+      "last_synced_sha": "7116dbf961f4062e13250ba60b3524848eeb359c",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
-      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 2826573a→6a11696f（包含 3344650 与 6a11696f）：针对其轻量模式（destroy WebView）导致重启白屏的托盘状态清零修复（LIGHTWEIGHT_MODE）与发布 0.8.14。**未采纳**：本仓无销毁 WebView 的轻量模式机制，不存在对应锁死回路；版本发布 chore 无未吸收机制。"
+      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 6a11696f→7116dbf9（包含 2237900b 与 7116dbf9）：针对其本地 auth 文件解析出 $wbEncrypted 加密信封对象透传至 React 触发异常的问题，通过 display_string 强制标量归一。**未采纳**：本仓凭证统一收敛于 accounts.json 与桌面端未加密会话，不读取 macOS/Docker 未解密信封，天然不存在该对象透传问题；版本发布 chore 无未吸收机制。"
     },
     "wb2api-upstream-linguo": {
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "4879a549",
-      "last_synced_sha": "4879a5494c9bdd838a96b75249d80bba1918834a",
+      "last_synced_commit": "4466a3e6",
+      "last_synced_sha": "4466a3e6a9096ed09c24b9cbb96ba2a8b748b5d1",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 dbd7c680→4879a549：资产文件名去除重复的 -panel 后缀的 CI 调整。**未采纳**：纯 CI 构建配置，无业务或协议变更。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 4879a549→4466a3e6：其 Web 控制台积分包到期字段补读 CycleEndTime（ExpiredTime → PackageEndTime → CycleEndTime），修复面板到期列恒为—。**未采纳**：本仓面向桌面端个人开发者，配额查询走 get-user-resource-summary 聚合容量（CycleTotalCapacity/CycleRemainCapacity/CycleUsedCapacity），不展示逐包明细到期列，无对应渲染需求。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -79,10 +79,10 @@
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "65967490",
-      "last_synced_sha": "65967490c9c263949af42318fd71eb9ec14ce586",
+      "last_synced_commit": "cf19aed5",
+      "last_synced_sha": "cf19aed596f859100d25a108550d9890f35c7855",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；本轮评估 650b6594→65967490：涉及三出站身份选择器、国际版模型表对齐、低余额保留（reserve_credits）以及其内部 normalize_tool_choice 在 tool_choice=\"none\" 时误删 tools 声明导致模型陷入重复循环的修复。**未采纳**：本仓对 tools/tool_choice 实行透传白名单放行（不存在误删声明缺陷），出站 UA 统一锚定官方桌面端，额度调度走多账号智能轮换，无对应变更需求。"
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；本轮评估 65967490→cf19aed5（包含 337b7fc2 与 cf19aed5，涵盖 v1.5.8~v1.6.0）：涉及国际版出站出口分配按钮更名、隐藏桌面端扫描导入入口（因客户端存储引入 $wbEncrypted 加密）、README 文档精简；v1.5.9 增加针对 OhMyOpenCode (OmO) Sisyphus-Junior 身份短语改写以规避 11128 拦截（本仓脱敏体系与已知指纹改写层已具备中性 CLI 改写能力，且本仓暂无 OmO 用户样本，保持当前脱敏表不盲目扩充）；v1.6.0 增加国际版自动化每日聊天打卡签到（本仓签到机制定位于桌面端手动触发，不做自动化定时打卡以规避风控）。**未采纳**：本仓架构与产品定位差异，无对应需求。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
