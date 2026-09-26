@@ -18,6 +18,8 @@ import {
   X,
   Copy,
   Info,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useToast } from '../services/toast';
@@ -76,6 +78,78 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * 顶部水平同步滚动条 (对标 EasyCLIProxyAPI TableTopScrollbar)
+ */
+function TableTopScrollbar({
+  tableWrapRef,
+}: {
+  tableWrapRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const scrollbarRef = useRef<HTMLDivElement | null>(null);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const scrollbar = scrollbarRef.current;
+    const track = trackRef.current;
+    const tableWrap = tableWrapRef.current;
+    if (!scrollbar || !track || !tableWrap) return;
+
+    let lastScrollbarLeft = scrollbar.scrollLeft;
+    let lastTableLeft = tableWrap.scrollLeft;
+
+    const syncTable = () => {
+      const left = scrollbar.scrollLeft;
+      if (left === lastScrollbarLeft) return;
+      lastScrollbarLeft = left;
+      tableWrap.scrollLeft = left;
+      lastTableLeft = tableWrap.scrollLeft;
+    };
+
+    const syncScrollbar = () => {
+      const left = tableWrap.scrollLeft;
+      if (left === lastTableLeft) return;
+      lastTableLeft = left;
+      scrollbar.scrollLeft = left;
+      lastScrollbarLeft = scrollbar.scrollLeft;
+    };
+
+    const updateLayout = () => {
+      const clientWidth = tableWrap.clientWidth;
+      const maxScroll = Math.max(0, tableWrap.scrollWidth - clientWidth);
+      const left = Math.min(tableWrap.scrollLeft, maxScroll);
+
+      scrollbar.classList.toggle('is-hidden', maxScroll <= 1);
+      track.style.width = `${(scrollbar.clientWidth || clientWidth) + maxScroll}px`;
+      tableWrap.scrollLeft = left;
+      scrollbar.scrollLeft = left;
+      lastTableLeft = tableWrap.scrollLeft;
+      lastScrollbarLeft = scrollbar.scrollLeft;
+    };
+
+    updateLayout();
+    scrollbar.addEventListener('scroll', syncTable, { passive: true });
+    tableWrap.addEventListener('scroll', syncScrollbar, { passive: true });
+
+    const resizeObserver = new ResizeObserver(updateLayout);
+    resizeObserver.observe(tableWrap);
+    resizeObserver.observe(scrollbar);
+    if (tableWrap.firstElementChild) resizeObserver.observe(tableWrap.firstElementChild);
+
+    return () => {
+      scrollbar.removeEventListener('scroll', syncTable);
+      tableWrap.removeEventListener('scroll', syncScrollbar);
+      resizeObserver.disconnect();
+    };
+  }, [tableWrapRef]);
+
+  return (
+    <div ref={scrollbarRef} className="usage-table-top-scrollbar" aria-hidden="true">
+      <div ref={trackRef} style={{ height: 1 }} />
+    </div>
+  );
+}
+
 export function UsagePage({ initialTab = 'overview' }: { initialTab?: UsageTab }) {
   const { t } = useI18n();
   const { showToast } = useToast();
@@ -91,6 +165,7 @@ export function UsagePage({ initialTab = 'overview' }: { initialTab?: UsageTab }
   const [total, setTotal] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<UsageEvent | null>(null);
 
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const loaderRef = useRef<UsageLoader | null>(null);
   const mountedRef = useRef(false);
 
@@ -228,7 +303,7 @@ export function UsagePage({ initialTab = 'overview' }: { initialTab?: UsageTab }
   };
 
   return (
-    <div className="panel-page usage-records-page active">
+    <section className="page management-page usage-records-page">
       {/* 顶部标题与次级 Tab 切换栏 (对标 EasyCLIProxyAPI .usage-topbar & .usage-tabs) */}
       <div className="usage-topbar">
         <div className="usage-tabs" role="tablist" aria-label={t('usage.title')}>
@@ -521,18 +596,61 @@ export function UsagePage({ initialTab = 'overview' }: { initialTab?: UsageTab }
               <p>{t('usage.events.note')}</p>
             </div>
           </div>
-          <div className="panel card" style={{ padding: 0, overflowX: 'auto', marginTop: 10 }}>
-            <table className="data-table usage-events-table">
+
+          <div className="usage-events-summary">
+            <div className="usage-events-summary-left">
+              <span className="usage-events-count-badge">
+                共 {total > 0 ? total.toLocaleString() : (events?.length ?? 0)} 条请求
+              </span>
+              <span className="usage-pagination-summary">
+                {events && events.length > 0
+                  ? `第 ${(page - 1) * 50 + 1} - ${Math.min(page * 50, total || events.length)} 条`
+                  : '暂无数据'}
+              </span>
+            </div>
+            <div className="usage-events-summary-right">
+              <div className="usage-pagination-right usage-pagination-top">
+                <button
+                  type="button"
+                  className="usage-page-nav-btn"
+                  disabled={page <= 1}
+                  onClick={() => handlePage(page - 1)}
+                >
+                  <ChevronLeft size={14} />
+                  <span>{t('usage.page.prev')}</span>
+                </button>
+                <span className="usage-pagination-info">
+                  {t('usage.page.info', { page, pages: totalPages, total })}
+                </span>
+                <button
+                  type="button"
+                  className="usage-page-nav-btn"
+                  disabled={page >= totalPages}
+                  onClick={() => handlePage(page + 1)}
+                >
+                  <span>{t('usage.page.next')}</span>
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {events && events.length > 0 ? (
+            <TableTopScrollbar tableWrapRef={tableWrapRef} />
+          ) : null}
+
+          <div ref={tableWrapRef} className="usage-table-wrap">
+            <table className="usage-events-table" style={{ width: '100%', minWidth: 960 }}>
               <thead>
                 <tr>
-                  <th>{t('usage.table.time')}</th>
-                  <th>{t('usage.table.model')}</th>
-                  <th>{t('usage.table.status')}</th>
-                  <th>{t('usage.table.tokens')}</th>
-                  <th>{t('usage.table.latency')}</th>
-                  <th>{t('usage.table.ttft')}</th>
-                  <th>{t('usage.table.error')}</th>
-                  <th>操作</th>
+                  <th className="align-center"><div className="usage-th-content"><span>{t('usage.table.time')}</span></div></th>
+                  <th className="align-center"><div className="usage-th-content"><span>{t('usage.table.model')}</span></div></th>
+                  <th className="align-center"><div className="usage-th-content"><span>{t('usage.table.status')}</span></div></th>
+                  <th className="align-center"><div className="usage-th-content"><span>{t('usage.table.tokens')}</span></div></th>
+                  <th className="align-center"><div className="usage-th-content"><span>{t('usage.table.latency')}</span></div></th>
+                  <th className="align-center"><div className="usage-th-content"><span>{t('usage.table.ttft')}</span></div></th>
+                  <th className="align-left"><div className="usage-th-content"><span>{t('usage.table.error')}</span></div></th>
+                  <th className="align-center"><div className="usage-th-content"><span>操作</span></div></th>
                 </tr>
               </thead>
               <tbody>
@@ -609,26 +727,36 @@ export function UsagePage({ initialTab = 'overview' }: { initialTab?: UsageTab }
             </table>
           </div>
           <div
-            className="usage-pager"
-            style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 10 }}
+            className="usage-events-summary"
+            style={{ borderTop: '1px solid var(--theme-e3e1db)', borderBottom: 0 }}
           >
-            <button
-              className="btn btn-secondary btn-sm"
-              disabled={page <= 1}
-              onClick={() => handlePage(page - 1)}
-            >
-              {t('usage.page.prev')}
-            </button>
-            <span className="muted mono" style={{ fontSize: 12 }}>
-              {t('usage.page.info', { page, pages: totalPages, total })}
-            </span>
-            <button
-              className="btn btn-secondary btn-sm"
-              disabled={page >= totalPages}
-              onClick={() => handlePage(page + 1)}
-            >
-              {t('usage.page.next')}
-            </button>
+            <div className="usage-events-summary-left">
+              <span className="muted mono" style={{ fontSize: 12 }}>
+                {t('usage.page.info', { page, pages: totalPages, total })}
+              </span>
+            </div>
+            <div className="usage-events-summary-right">
+              <div className="usage-pagination-right">
+                <button
+                  type="button"
+                  className="usage-page-nav-btn"
+                  disabled={page <= 1}
+                  onClick={() => handlePage(page - 1)}
+                >
+                  <ChevronLeft size={14} />
+                  <span>{t('usage.page.prev')}</span>
+                </button>
+                <button
+                  type="button"
+                  className="usage-page-nav-btn"
+                  disabled={page >= totalPages}
+                  onClick={() => handlePage(page + 1)}
+                >
+                  <span>{t('usage.page.next')}</span>
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
           </div>
         </section>
       )}
@@ -728,7 +856,7 @@ export function UsagePage({ initialTab = 'overview' }: { initialTab?: UsageTab }
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 }
 

@@ -83,40 +83,25 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
         </div>
       </div>
 
-      {/* 主导航区：对标 ECPA .nav-section 架构（清晰划分主 Tab 与次级分组） */}
-      <nav className="nav-section nav-menu" aria-label="导航">
+      {/* 主导航区：对标 ECPA .nav-section 架构 */}
+      <nav className="nav-section" aria-label="导航">
         {TABS.map((id) => {
           const Icon = TAB_ICONS[id];
           const label = t(TAB_LABEL_KEYS[id]);
-          const isSub = id === 'accounts' || id === 'models' || id === 'logs' || id === 'debug';
-          const groupTitle =
-            id === 'dashboard'
-              ? '核心服务'
-              : id === 'oauth'
-                ? '授权与账号'
-                : id === 'agents'
-                  ? '智能体'
-                  : id === 'usage'
-                    ? '使用记录'
-                    : id === 'settings'
-                      ? '系统配置'
-                      : null;
 
           return (
-            <React.Fragment key={id}>
-              {groupTitle && <div className="nav-group-title">{groupTitle}</div>}
-              <button
-                type="button"
-                className={`nav-item${tab === id ? ' active' : ''}`}
-                data-tab={id}
-                data-sub={isSub ? 'true' : undefined}
-                title={label}
-                onClick={() => setTab(id)}
-              >
-                <Icon size={isSub ? 15 : 18} className="nav-icon" />
-                <span>{label}</span>
-              </button>
-            </React.Fragment>
+            <button
+              key={id}
+              type="button"
+              className={`nav-item${tab === id ? ' active' : ''}`}
+              data-tab={id}
+              title={label}
+              onClick={() => setTab(id)}
+            >
+              <Icon size={17} className="nav-icon" aria-hidden="true" />
+              <span>{label}</span>
+              {id === 'settings' && <span className="update-dot" hidden={!updateAvailable} />}
+            </button>
           );
         })}
       </nav>
