@@ -30,6 +30,15 @@ BILLING_RS = REPO_ROOT / "src-tauri" / "src" / "commands" / "billing.rs"
 MODELS_JS = REPO_ROOT / "src" / "models.js"
 CONVERTER_PY = REPO_ROOT / "converter.py"
 
+
+def _get_models_frontend_code() -> str:
+    """获取模型前端逻辑与文案源码（兼顾旧 models.js 与新 React TSX/i18n 分层）。"""
+    if MODELS_JS.exists():
+        return _read(MODELS_JS)
+    models_tsx = REPO_ROOT / "src" / "pages" / "ModelsPage.tsx"
+    zh_cn_ts = REPO_ROOT / "src" / "i18n" / "zh-CN.ts"
+    return _read(models_tsx) + "\n" + _read(zh_cn_ts)
+
 # 官方实测矩阵 CLOUD 源（cloud_product_config_cache，21 模型；2026-09-11 提取）
 CLOUD_MATRIX = {
     "deepseek-v4.1-flash": (["low", "high", "max"], "high", True),
@@ -183,38 +192,38 @@ def test_billing_can_disable_falls_back_to_catalog():
 
 def test_frontend_default_option_means_follow_client():
     """前端默认项文案必须明示「跟随客户端」，不得误导为固定 high。"""
-    js = _read(MODELS_JS)
-    assert "默认（跟随客户端下发值）" in js, "弹窗默认项文案未明确透传语义"
-    assert "默认 (跟随客户端)" in js, "列表行默认文案未明确透传语义"
+    src = _get_models_frontend_code()
+    assert "默认（跟随客户端下发值）" in src, "弹窗默认项文案未明确透传语义"
+    assert "默认 (跟随客户端)" in src, "列表行默认文案未明确透传语义"
 
 
 def test_frontend_does_not_hardcode_default_effort_as_label():
     """默认项不得再渲染成「默认 (high)」这种把上游默认值当成本地档位的写法（无论是初次渲染还是 updateModelCells）。"""
-    js = _read(MODELS_JS)
-    assert ">默认 (${esc(m.default_effort)})<" not in js
-    assert "默认 (${m.default_effort})" not in js
-    assert "默认 (${" not in js
+    src = _get_models_frontend_code()
+    assert ">默认 (${esc(m.default_effort)})<" not in src
+    assert "默认 (${m.default_effort})" not in src
+    assert "默认 (${" not in src
 
 
 def test_frontend_shows_matrix_source_hint():
     """使用本地矩阵兜底时，前端需提示来源，避免用户误以为上游完整下发。"""
-    js = _read(MODELS_JS)
-    assert "m.efforts_source === 'catalog'" in js or "m.efforts_source" in js
-    assert "内置覆盖表" in js
+    src = _get_models_frontend_code()
+    assert "efforts_source === 'catalog'" in src or "efforts_source" in src
+    assert "内置覆盖表" in src
 
 
 def test_frontend_handles_merged_source():
     """前端需覆盖 merged 来源（半截矩阵补全）的提示分支。"""
-    js = _read(MODELS_JS)
-    assert "'merged'" in js, "前端未处理 merged 来源"
+    src = _get_models_frontend_code()
+    assert "'merged'" in src, "前端未处理 merged 来源"
 
 
 def test_frontend_renders_all_catalog_efforts_and_disable():
     """前端必须能渲染覆盖表全部档位与关闭思考项。"""
-    js = _read(MODELS_JS)
-    assert "for (const ef of m.supported_efforts)" in js
-    assert "m.can_disable_thinking" in js
-    assert "🚫 关闭思考" in js
+    src = _get_models_frontend_code()
+    assert "for (const ef of m.supported_efforts)" in src or "supported_efforts.map" in src
+    assert "can_disable_thinking" in src
+    assert "🚫 关闭思考" in src
 
 
 # ---------- D: 反代不拦截客户端的 reasoning_effort（ultra 透传） ----------

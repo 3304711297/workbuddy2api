@@ -1,4 +1,4 @@
-// Hermes 接入检测契约测试（2026-09-16）
+// Hermes 接入检测契约测试（React+TS 迁移版，2026-09-16 背景见下）。
 //
 // 背景（真实线上问题）：用户在 Hermes 里把反代登记为 `providers.workbuddy2api`
 // （含全部模型），但顶层 `model.provider` 指向另一个订阅（opencode-free）、
@@ -10,6 +10,13 @@
 //   2. 判据带**端口比对**（本机另有回环服务如 18080，仅凭「回环 + /v1」会误报）；
 //   3. 前端读取的返回字段名与 Rust 序列化结果一致（snake_case）——
 //      本仓库历史上多次出现「把 Rust 形参名/IPC 键名搞混」的缺陷，这里显式锁死。
+//
+// 契约变更说明（中文）：
+//   旧前端断言目标是 src/agents.js（`res.hermes_proxy_base_url`）与 index.html 的
+//   `id="hermes-proxy-url"` + getElementById 写入。React 迁移后由
+//   src/pages/AgentsPage.tsx 读取 `status.hermes_proxy_base_url`（仍 snake_case），
+//   接入点展示为 t('agents.hermesProxy')（接入点）标签 + mono 文本节点，
+//   不再使用任何元素 id。hermes_proxy_base_url 必须保持 snake_case。
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -20,8 +27,9 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const agentsRs = readFileSync(join(root, 'src-tauri', 'src', 'commands', 'agents.rs'), 'utf8');
-const agentsJs = readFileSync(join(root, 'src', 'agents.js'), 'utf8');
-const html = readFileSync(join(root, 'index.html'), 'utf8');
+const agentsTsx = readFileSync(join(root, 'src', 'pages', 'AgentsPage.tsx'), 'utf8');
+const agentsService = readFileSync(join(root, 'src', 'services', 'agentsService.ts'), 'utf8');
+const i18n = readFileSync(join(root, 'src', 'i18n', 'zh-CN.ts'), 'utf8');
 
 test('Hermes 检测覆盖 providers / model_aliases / custom_providers 三个落点', () => {
   // 三个落点必须都被扫描：真实配置用的是 providers.<name>，而 model_aliases 是
@@ -75,32 +83,39 @@ test('「已接入」判定在 proxy_registered 为真时成立（顶层 base_ur
   );
 });
 
-test('返回字段是 snake_case，与前端读取的键名一致', () => {
+test('返回字段是 snake_case，与前端读取的键名一致（hermes_proxy_base_url 必须保持 snake_case）', () => {
   // Rust 侧结构体无 rename_all 时按字段名原样序列化（snake_case）。
   assert.ok(
     /pub hermes_proxy_base_url: String/.test(agentsRs),
     'Rust 侧应有 hermes_proxy_base_url 字段'
   );
+  // React 迁移后的读取点：AgentsPage.tsx 读 status.hermes_proxy_base_url
   assert.ok(
-    agentsJs.includes('res.hermes_proxy_base_url'),
-    '前端必须读 snake_case 的 hermes_proxy_base_url'
+    agentsTsx.includes('status.hermes_proxy_base_url'),
+    'AgentsPage.tsx 必须读 snake_case 的 status.hermes_proxy_base_url'
   );
   assert.ok(
-    !agentsJs.includes('res.hermesProxyBaseUrl'),
+    !agentsTsx.includes('hermesProxyBaseUrl') && !agentsService.includes('hermesProxyBaseUrl'),
     '前端不得读 camelCase —— 返回值不经 tauri-macros 驼峰化，写成驼峰会静默取到 undefined'
   );
   // 既有的两个字段同样锁死，防止有人「顺手统一成驼峰」
-  assert.ok(agentsJs.includes('res.hermes_configured'));
-  assert.ok(agentsJs.includes('res.hermes_config_path'));
+  assert.ok(agentsTsx.includes('status.hermes_configured'), 'AgentsPage.tsx 必须读 status.hermes_configured');
+  assert.ok(agentsTsx.includes('status.hermes_config_path'), 'AgentsPage.tsx 必须读 status.hermes_config_path');
 });
 
 test('UI 展示接入点，便于用户核对命中的地址', () => {
+  // 旧实现用 id="hermes-proxy-url" + getElementById 写入；React 版改为
+  // t('agents.hermesProxy')（接入点）标签 + 文本节点直接渲染，无元素 id。
   assert.ok(
-    html.includes('id="hermes-proxy-url"'),
-    'index.html 应有接入点展示元素'
+    agentsTsx.includes("t('agents.hermesProxy')"),
+    'AgentsPage.tsx 必须渲染「接入点」标签'
   );
   assert.ok(
-    agentsJs.includes("getElementById('hermes-proxy-url')"),
-    'agents.js 应写入该元素'
+    /'agents\.hermesProxy': '接入点'/.test(i18n),
+    'i18n 必须有 agents.hermesProxy = 接入点'
+  );
+  assert.ok(
+    !agentsTsx.includes('hermes-proxy-url'),
+    'React 迁移后不得再有 hermes-proxy-url 元素 id（渲染改为声明式）'
   );
 });

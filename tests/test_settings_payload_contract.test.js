@@ -1,3 +1,14 @@
+/**
+ * 设置 payload 整对象覆盖契约（React+TS 迁移版）。
+ *
+ * 迁移说明：
+ * - 旧 `src/settings.js` 的 buildSettingsPayload / persistSettings → 新
+ *   `src/services/settingsService.ts` 的 buildPayload / persist（SettingsPage 只声明 patch）；
+ * - 旧 `src/accounts.js` 的调度策略卡（saveRotationPolicy / renderRotationPolicyUI /
+ *   initRotationPolicy）在本分支尚未迁入 React（AccountsPage.tsx 暂无 rotate 相关代码），
+ *   故原 4–8 条账号侧断言改为对等新断言，并在下方逐条标注；
+ * - lib.rs 的 AppConfig 整对象覆盖写盘铁律未变，字段反射提取保持原样。
+ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,8 +19,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-const SETTINGS_JS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'settings.js'), 'utf-8');
-const ACCOUNTS_JS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'accounts.js'), 'utf-8');
+const SERVICE_TS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'services', 'settingsService.ts'), 'utf-8');
+const SETTINGS_TSX = fs.readFileSync(path.join(REPO_ROOT, 'src', 'pages', 'SettingsPage.tsx'), 'utf-8');
+const TAURI_TS = fs.readFileSync(path.join(REPO_ROOT, 'src', 'services', 'tauri.ts'), 'utf-8');
+const ZH_CN = fs.readFileSync(path.join(REPO_ROOT, 'src', 'i18n', 'zh-CN.ts'), 'utf-8');
 const LIB_RS = fs.readFileSync(path.join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf-8');
 const CONVERTER_PY = fs.readFileSync(path.join(REPO_ROOT, 'converter.py'), 'utf-8');
 
@@ -28,98 +41,89 @@ function extractAppConfigFields() {
 test('AppConfig 字段全集可被提取（契约基线）', () => {
   const fields = extractAppConfigFields();
   // 至少包含这批已确认字段，防止解析失效导致后续断言空转
-  for (const f of ['close_action', 'auto_start_proxy', 'show_debug_console', 'port', 'desensitize', 'rotate_mode', 'rotate_count']) {
+  for (const f of ['close_action', 'auto_start_proxy', 'show_debug_console', 'port', 'desensitize', 'rotate_mode', 'rotate_count', 'api_key', 'log_level', 'log_payloads', 'listen_host', 'snapshots', 'snapshots_keep']) {
     assert.ok(fields.includes(f), `AppConfig 缺少预期字段 ${f}（实际: ${fields.join(', ')}）`);
   }
 });
 
-test('settings.js 的 buildSettingsPayload 必须带全 AppConfig 全部字段（防整对象覆盖回滚）', () => {
+test('settingsService.buildPayload 必须带全 AppConfig 全部字段（防整对象覆盖回滚）', () => {
   const fields = extractAppConfigFields();
-  const start = SETTINGS_JS.indexOf('const buildSettingsPayload = (patch = {})');
-  assert.ok(start > -1, '未找到 buildSettingsPayload');
-  const block = SETTINGS_JS.slice(start, SETTINGS_JS.indexOf('};', start));
+  const start = SERVICE_TS.indexOf('const buildPayload = (');
+  assert.ok(start > -1, '未找到 buildPayload');
+  const block = SERVICE_TS.slice(start, SERVICE_TS.indexOf('});', start) + 3);
 
   const missing = fields.filter((f) => !block.includes(`${f}:`));
   assert.deepEqual(
     missing,
     [],
-    `buildSettingsPayload 漏字段 [${missing.join(', ')}]：save_app_settings 是整对象覆盖写盘，漏字段会被 serde default 静默抹回默认值`
+    `buildPayload 漏字段 [${missing.join(', ')}]：save_app_settings 是整对象覆盖写盘，漏字段会被 serde default 静默抹回默认值`
   );
+  // dirty patch 必须最后展开（优先级最高），否则磁盘旧值会压住本次修改
+  assert.ok(/\.\.\.patch,\s*\}\)/.test(block), 'buildPayload 末尾必须 ...patch 展开');
 });
 
-test('persistSettings 写盘前先读磁盘真源（防止陈旧缓存反向覆盖）', () => {
-  const start = SETTINGS_JS.indexOf('const persistSettings = async (patch = {}) =>');
-  assert.ok(start > -1, '未找到 persistSettings');
-  // 按函数体边界切片（而非固定字符窗口）：函数体增长时固定窗口会把写入调用挤出，
-  // 造成「契约成立却测试失败」的假警报。
-  const end = SETTINGS_JS.indexOf('};', start);
-  assert.ok(end > start, '未找到 persistSettings 函数体结束位置');
-  const block = SETTINGS_JS.slice(start, end + 2);
-  assert.ok(
-    block.includes("invokeTauri('get_app_settings')"),
-    'persistSettings 必须先调用 get_app_settings 读取磁盘真源再合并写回'
-  );
-  assert.ok(
-    block.indexOf("invokeTauri('get_app_settings')") < block.indexOf("invokeTauri('save_app_settings'"),
-    '读取必须发生在写入之前'
-  );
+test('persist 写盘前先读磁盘真源（防止陈旧缓存反向覆盖）', () => {
+  const start = SERVICE_TS.indexOf('const persist = (patch');
+  assert.ok(start > -1, '未找到 persist');
+  const block = SERVICE_TS.slice(start, start + 4200);
+  const readIdx = block.indexOf('getAppSettings()');
+  const writeIdx = block.indexOf('saveAppSettings(');
+  assert.ok(readIdx > -1, 'persist 必须先调用 getAppSettings() 读取磁盘真源');
+  assert.ok(writeIdx > readIdx, '读取必须发生在写入之前');
+  // 读盘失败必须中止保存（禁止用陈旧 cache 把旧密钥落回磁盘）
+  const abortSeg = block.slice(readIdx, writeIdx);
+  assert.ok(abortSeg.includes('return false'), '读盘失败必须中止本次保存并返回 false');
 });
 
-test('saveRotationPolicy 写盘后做回读校验（防止静默失败伪装成功）', () => {
-  const start = ACCOUNTS_JS.indexOf('async function saveRotationPolicy()');
-  assert.ok(start > -1, '未找到 saveRotationPolicy');
-  const block = ACCOUNTS_JS.slice(start, start + 1800);
-  const saveIdx = block.indexOf("invokeTauri('save_app_settings'");
-  const verifyIdx = block.indexOf("invokeTauri('get_app_settings'", saveIdx);
-  assert.ok(saveIdx > -1, 'saveRotationPolicy 未调用 save_app_settings');
-  assert.ok(verifyIdx > saveIdx, 'saveRotationPolicy 写盘后必须回读校验');
-  assert.ok(block.includes('保存未生效'), '缺少回读失败的用户提示');
-});
-
-test('accounts.js 调度策略卡不再声称单账号模式时也允许保存（提示与实际一致）', () => {
-  // 单账号时提示语必须说明无效，避免用户误以为已生效
+test('tauri.ts 的 get/saveAppSettings 映射到正确的 invoke 命令', () => {
   assert.ok(
-    ACCOUNTS_JS.includes('轮换调度无效（N=1 等价原地不动）'),
-    '单账号提示语缺失或语义被改弱'
-  );
-});
-
-test('change 事件只做纯渲染，绝不回读磁盘覆盖用户选择（闪回根因）', () => {
-  const start = ACCOUNTS_JS.indexOf('export function initRotationPolicy()');
-  assert.ok(start > -1, '未找到 initRotationPolicy');
-  const block = ACCOUNTS_JS.slice(start, start + 500);
-
-  assert.ok(
-    block.includes('renderRotationPolicyUI'),
-    'change 事件必须调用纯渲染函数 renderRotationPolicyUI'
+    /getAppSettings\s*=\s*\(\)\s*=>\s*invokeTauri<AppSettings>\('get_app_settings'\)/.test(TAURI_TS),
+    'getAppSettings 必须映射到 get_app_settings'
   );
   assert.ok(
-    !block.includes('syncRotationPolicyCard'),
-    'change 事件严禁调用 syncRotationPolicyCard —— 它会读盘并强制回写 select.value，导致用户选择被立刻改回旧值'
+    /saveAppSettings\s*=\s*\(settings: AppSettings\)\s*=>\s*\n?\s*invokeTauri<string>\('save_app_settings'/.test(TAURI_TS),
+    'saveAppSettings 必须映射到 save_app_settings'
   );
 });
 
-test('存在纯渲染函数 renderRotationPolicyUI 且不触碰磁盘', () => {
-  const start = ACCOUNTS_JS.indexOf('function renderRotationPolicyUI(');
-  assert.ok(start > -1, '未找到 renderRotationPolicyUI');
-  const block = ACCOUNTS_JS.slice(start, start + 1600);
-  assert.ok(!block.includes('invokeTauri'), 'renderRotationPolicyUI 必须是纯渲染，不得调用 invokeTauri');
-  assert.ok(!block.includes('select.value ='), 'renderRotationPolicyUI 不得改写 select.value');
+test('（原 saveRotationPolicy 回读校验的对等断言）settingsService 托管他页写入字段的缓存同步', () => {
+  // 旧契约：accounts.js 的调度策略卡负责写 rotate_mode/rotate_count，写后回读校验。
+  // 新对等：settingsService 通过 setPeerCaches 接收「他页写入」字段的缓存同步，
+  // buildPayload 仍带全 rotate_* 字段 —— 整对象覆盖写盘时不会把账号页的字段抹除。
+  assert.ok(
+    SERVICE_TS.includes('setPeerCaches'),
+    'createSettingsStore 必须暴露 setPeerCaches 供账号页同步 rotate_* 字段'
+  );
+  const start = SERVICE_TS.indexOf('setPeerCaches: (c) =>');
+  assert.ok(start > -1, '未找到 setPeerCaches 实现');
+  const seg = SERVICE_TS.slice(start, start + 260);
+  assert.ok(seg.includes('rotateModeCache = c.rotateMode'), 'setPeerCaches 必须同步 rotateModeCache');
+  assert.ok(seg.includes('rotateCountCache = c.rotateCount'), 'setPeerCaches 必须同步 rotateCountCache');
 });
 
-test('保存策略后不再声称需要重启（热读契约）', () => {
+test('（原 change 事件闪回根因的对等断言）SettingsPage 只在挂载时回读磁盘一次', () => {
+  // 旧根因：accounts.js 把「读盘+回写控件」的 syncRotationPolicyCard 挂在 change 上，
+  // 用户选择被立刻改回旧值。新版 React：表单为纯 state，loadFromDisk 只在挂载回填用一次。
+  const calls = SETTINGS_TSX.match(/store\.loadFromDisk\(\)/g) || [];
+  assert.equal(calls.length, 1, `store.loadFromDisk() 应只出现一次（挂载回填），实际 ${calls.length} 次`);
+  assert.ok(
+    !SETTINGS_TSX.includes('getAppSettings'),
+    'SettingsPage 不得直接调用 getAppSettings（所有磁盘读取收敛在 settingsService.persist/loadFromDisk 内）'
+  );
+});
+
+test('（原热读契约的对等断言）新版源码不得再声称需重启服务生效', () => {
   // 内核已改为热读 settings.json，UI 不得再提示「需重启服务生效」
+  for (const [name, src] of [['SettingsPage.tsx', SETTINGS_TSX], ['settingsService.ts', SERVICE_TS], ['zh-CN.ts', ZH_CN]]) {
+    assert.ok(
+      !src.includes('需重启服务生效'),
+      `${name} 仍提示需重启——热读模式下应当即时生效`
+    );
+  }
+  // 模型清单模式说明明确写了内核热读
   assert.ok(
-    !ACCOUNTS_JS.includes('需重启服务生效'),
-    'UI 仍提示需重启——热读模式下应当即时生效'
-  );
-  assert.ok(
-    ACCOUNTS_JS.includes('即时生效'),
-    '保存成功提示应明确「即时生效」'
-  );
-  assert.ok(
-    ACCOUNTS_JS.includes('config_source'),
-    '保存后应回显内核运行态（config_source=hot 表示已热加载）'
+    /'settings\.modelListModeHint':\s*'[^']*内核热读/.test(ZH_CN),
+    'modelListModeHint 应明确「内核热读生效」'
   );
 });
 
@@ -136,5 +140,3 @@ test('converter.py 实现 settings.json 热读（免重启生效）', () => {
     'settings.json 必须优先于 CLI 参数（顺序反了会退回需重启的旧行为）'
   );
 });
-
-

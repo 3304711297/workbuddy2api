@@ -12,6 +12,10 @@
 // 同时锁定视觉层级：--text-muted 必须比 --text-secondary 更弱（深色更暗/浅色更浅），
 // 否则「次要文字」会与「次级文字」同权重，层级被压平（把变量直接提亮到 secondary 是
 // 一种能让对比度达标、却破坏设计语义的假修复）。
+//
+// 迁移说明（2026-09-26）：旧 src/style.css 在 React+TS 迁移中改名为 src/styles.css
+// （内容与主题变量块结构保持：深色取 `:root {` 块，浅色取 `[data-theme="light"] {` 块）。
+// 本文件仅替换读取路径，全部对比度计算逻辑与前提断言保持不变。
 
 import { test } from 'node:test';
 import assert from 'node:assert';
@@ -20,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CSS = readFileSync(join(__dirname, '..', 'src', 'style.css'), 'utf8');
+const CSS = readFileSync(join(__dirname, '..', 'src', 'styles.css'), 'utf8');
 
 const AA_SMALL_TEXT = 4.5;
 

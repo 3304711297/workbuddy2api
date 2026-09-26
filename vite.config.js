@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import { execSync } from 'child_process';
 
@@ -12,6 +13,7 @@ const buildFingerprint = `v${pkg.version} ${gitHash}`;
 // Tauri 要求产物使用相对路径；输出目录与 src-tauri/tauri.conf.json 的 frontendDist 对应
 export default defineConfig({
   base: './',
+  plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
     __GIT_HASH__: JSON.stringify(gitHash),

@@ -1,5 +1,5 @@
 /**
- * 局域网访问与监听地址契约测试（第六轮：对标 EasyCLIProxyAPI 的 get_lan_ipv4 / 网络设置）
+ * 局域网访问与监听地址契约测试（React+TS 迁移版；第六轮：对标 EasyCLIProxyAPI 的 get_lan_ipv4 / 网络设置）
  *
  * 背景：内核支持 --host（默认 127.0.0.1，非回环时强制要求 --api-key 或
  * --unsafe-expose 显式确认），但 GUI **从不传 --host**，用户也无法在界面
@@ -9,6 +9,12 @@
  *   1) 显式开关（默认关闭，保持回环）
  *   2) 无密钥时拒绝开启（内核会 exit 1，前端应提前拦截并引导）
  *   3) UI 明确警示风险并展示可复制的局域网地址
+ *
+ * 迁移映射：
+ * - 旧 index.html 的 chk-lan-access / lan-address → 新 SettingsPage.tsx 的
+ *   onToggleLan / lanEnabled / lanAddressText / probeLanIp（文案经 t() 走 i18n 词典）；
+ * - 旧 settings.js 的 listen_host 逻辑 → 新 onToggleLan + saveField({ listen_host: host })；
+ * - converter.py / proxy.rs / lib.rs 后端契约未变，原断言保留。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,8 +28,8 @@ const JS = (p) => readFileSync(join(ROOT, p), 'utf8');
 const CONVERTER = JS('converter.py');
 const PROXY_RS = JS('src-tauri/src/commands/proxy.rs');
 const LIB_RS = JS('src-tauri/src/lib.rs');
-const SETTINGS_JS = JS('src/settings.js');
-const INDEX_HTML = JS('index.html');
+const SETTINGS_TSX = JS('src/pages/SettingsPage.tsx');
+const ZH_CN = JS('src/i18n/zh-CN.ts');
 
 test('前置事实：内核支持 --host 且非回环无密钥时拒绝启动', () => {
   assert.ok(CONVERTER.includes('"--host"'), 'converter.py 缺少 --host 参数');
@@ -37,11 +43,11 @@ test('前置事实：内核支持 --host 且非回环无密钥时拒绝启动', 
 
 test('Rust 侧提供局域网 IPv4 探测命令', () => {
   assert.ok(
-    /fn lan_ipv4|fn local_ipv4|get_lan_ipv4/.test(PROXY_RS) || /fn lan_ipv4|fn local_ipv4|get_lan_ipv4/.test(JS('src-tauri/src/commands/shared.rs')),
-    '缺少局域网 IPv4 探测命令（无法向用户展示可连接的地址）'
+    /pub fn lan_ipv4/.test(PROXY_RS),
+    '缺少局域网 IPv4 探测命令 lan_ipv4（无法向用户展示可连接的地址）'
   );
   assert.ok(
-    LIB_RS.includes('lan_ipv4') || LIB_RS.includes('local_ipv4'),
+    LIB_RS.includes('commands::lan_ipv4'),
     '命令未注册到 invoke_handler'
   );
 });
@@ -87,39 +93,66 @@ test('proxy_start 透传 --host 并做安全守卫（非回环无密钥拒绝）
 });
 
 test('前端设置页提供局域网访问开关与地址展示', () => {
+  // 开关本体：checked={lanEnabled} 的 checkbox + onToggleLan
   assert.ok(
-    INDEX_HTML.includes('chk-lan-access') || INDEX_HTML.includes('lan-access'),
-    'index.html 缺少局域网访问开关'
+    SETTINGS_TSX.includes('checked={lanEnabled}'),
+    'SettingsPage 缺少局域网访问开关（checked={lanEnabled}）'
   );
   assert.ok(
-    INDEX_HTML.includes('lan-address') || INDEX_HTML.includes('lan-url'),
-    'index.html 缺少局域网地址展示位'
+    /const lanEnabled = form\.listenHost === '0\.0\.0\.0'/.test(SETTINGS_TSX),
+    '开关状态必须由 listenHost === 0.0.0.0 派生'
   );
-  // 风险警示必须在附近
-  const i = Math.max(INDEX_HTML.indexOf('chk-lan-access'), INDEX_HTML.indexOf('lan-access'));
-  const seg = INDEX_HTML.slice(Math.max(0, i - 1200), i + 1500);
+  // 地址展示：lanAddressText（含可复制的 http://<lan-ip>:<port>/v1）
   assert.ok(
-    /风险|暴露|安全/.test(seg),
-    '局域网开关附近需有风险警示（暴露到网络意味着他人可消耗账号额度）'
+    SETTINGS_TSX.includes('lanAddressText'),
+    'SettingsPage 缺少局域网地址展示（lanAddressText）'
+  );
+  assert.ok(
+    /`http:\/\/\$\{lanIp\}:\$\{form\.port\}\/v1`/.test(SETTINGS_TSX),
+    '地址展示必须拼出 http://<lan-ip>:<port>/v1'
+  );
+  // 地址来自 Rust lan_ipv4 探测命令
+  assert.ok(
+    SETTINGS_TSX.includes('lanIpv4'),
+    'SettingsPage 必须经 lanIpv4() 探测局域网地址'
+  );
+  assert.ok(
+    /const ip = await lanIpv4\(\)/.test(SETTINGS_TSX),
+    'probeLanIp 必须调用 lanIpv4()'
+  );
+  // 风险警示：t('settings.lanHint') 接在开关下方，词典文案必须点出风险与密钥要求
+  assert.ok(
+    SETTINGS_TSX.includes("t('settings.lanHint')"),
+    '开关附近必须渲染风险警示 t(\'settings.lanHint\')'
+  );
+  const hint = /'settings\.lanHint':\s*'((?:[^'\\]|\\.)*)'/.exec(ZH_CN)?.[1] || '';
+  assert.ok(hint, 'i18n 词典缺少 settings.lanHint');
+  assert.ok(
+    /风险/.test(hint) && /0\.0\.0\.0/.test(hint) && /密钥/.test(hint),
+    `lanHint 必须点出风险、0.0.0.0 与密钥要求（实际: ${hint.slice(0, 60)}…）`
   );
 });
 
 test('前端逻辑：无密钥时不允许开启局域网访问', () => {
+  // onToggleLan 开启前必须校验密钥（防止内核拒绝启动后用户一头雾水）
+  const start = SETTINGS_TSX.indexOf('const onToggleLan = async');
+  assert.ok(start > -1, '未找到 onToggleLan');
+  const seg = SETTINGS_TSX.slice(start, start + 900);
   assert.ok(
-    SETTINGS_JS.includes('listen_host'),
-    'settings.js 未读写 listen_host'
+    /if\s*\(checked\s*&&\s*!form\.apiKey\.trim\(\)\)/.test(seg),
+    '开启局域网访问前必须校验已设置密钥（无密钥时提前拦截）'
   );
-  // 开启前必须有密钥校验（防止内核 exit 1 后用户一头雾水）
-  const i = SETTINGS_JS.indexOf('listen_host');
-  const seg = SETTINGS_JS.slice(Math.max(0, i - 1500), i + 1500);
   assert.ok(
-    /api_key|apiKeyCache/.test(seg),
-    '开启局域网访问前必须校验已设置密钥（无密钥时内核会拒绝启动）'
+    seg.includes("t('settings.lanNeedApiKey')"),
+    '无密钥拦截必须给出引导提示 lanNeedApiKey'
   );
-  // buildSettingsPayload 必须带上（整对象覆盖写盘）
-  const fn = SETTINGS_JS.match(/const buildSettingsPayload[\s\S]{0,1200}/)?.[0] || '';
+  // listen_host 必须走 dirty patch 落盘（整对象覆盖写盘）
   assert.ok(
-    fn.includes('listen_host'),
-    'buildSettingsPayload 必须显式带上 listen_host，否则被 serde default 抹回 127.0.0.1'
+    /saveField\(\s*\{\s*listen_host:\s*host\s*\}/.test(seg),
+    'listen_host 必须以 saveField({ listen_host: host }) 显式声明 dirty 字段，否则被 serde default 抹回 127.0.0.1'
+  );
+  assert.ok(
+    /const host = checked \? '0\.0\.0\.0' : '127\.0\.0\.1'/.test(seg),
+    '开关必须映射为 0.0.0.0（开）/ 127.0.0.1（关）'
   );
 });

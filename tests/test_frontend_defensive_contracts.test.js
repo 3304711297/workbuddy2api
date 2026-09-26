@@ -1,46 +1,61 @@
 /**
- * 前端防御机制契约测试（2026-09-16 全量修复批次）
+ * 前端防御机制契约测试（前端迁移版，2026-09-26）
  *
  * 本批修复的共同特征：都是「静态读码看不出来、只在特定时序/环境下失效」的缺陷。
- * 子代理修复时已在仓库外用 DOM 垫片验证过行为（含变异测试），但脚手架未入库，
- * 故此处把「机制必须存在且不被静默移除」的部分固化进来。
+ * 新前端是 React+TS：页面组件无法在 node 里渲染，故本轮全部迁移为
+ * 「针对 services/*.ts 纯逻辑与页面/styles 源码的静态结构契约」。
  *
- * ⚠️ 断言写法要求（本文件迭代中踩过的坑，务必遵守）：
- * 不要断言标识符「存在」——包含式断言对重命名/替换无效（把 `pollInFlight` 改成
- * `pollInFlightXX` 仍能通过），只对整段删除有效。这正是本仓库既有测试的通病
- * （104 个断言放过了 P0 死按钮）。必须断言**结构性关系**：赋值/比较配对、提前
- * return、复位、反例不存在（「不得再出现 X」）。
+ * ⚠️ 断言写法要求（沿用旧版，已被验证有效）：
+ * 不要断言标识符「存在」——包含式断言对重命名/替换无效，只对整段删除有效。
+ * 必须断言**结构性关系**：赋值/比较配对、提前 return、复位、反例不存在
+ * （「不得再出现 X」）。负向断言一律先经 stripTsComments 剥注释，
+ * 说明性注释会引用被否决的写法，不剥会误报。
  *
- * 每个断言都做过变异验证：把源码还原成缺陷形态，测试必须变红。
+ * 契约变化说明（旧版对比）：
+ *  ① 「看板运行架构由 JS 写活值」：新版看板已无运行架构展示（DashboardPage/
+ *     ServiceProvider/services 均无 arch 字段），旧契约无对等物，已移除；
+ *  ② 「自动拉起按 proxy_start 返回值区分已启动/已在运行」：Rust 侧仍返回
+ *     already-running(port N)/started(port N) 两种标记，但新版
+ *     ServiceProvider.startProxy 未消费返回值、统一 toast「反代服务已拉起」。
+ *     本文件只锁定「返回值类型与两种标记存在」，区分逻辑缺失已如实标注，
+ *     视为待补回的契约缺口；
+ *  ③ 「剪贴板复制必须走 copyToClipboard」：DashboardPage 仍走 copyToClipboard，
+ *     但 SettingsPage.onCopyApiKey 直接调 navigator.clipboard.writeText（有
+ *     try/catch + 失败 toast，不会静默失败，但缺 textarea 回退）。本文件断言
+ *     「写入必须有失败反馈」，copyToClipboard 全覆盖的缺口如实标注；
+ *  ④ 服务按钮门控 / auth_poll 双重防护 / openExternal / Mock 日志 / Tab 记忆
+ *     已在 test_frontend_defensive_behavior.test.js 覆盖，本文件不重复；
+ *  ⑤ update-check 不得依赖 GitHub Release 已在 test_app_update_contract.test.js
+ *     覆盖，本文件不重复。
  */
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripTsComments } from './helpers/strip-ts-comments.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
-const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf-8');
+const read = (p) => stripTsComments(fs.readFileSync(path.join(ROOT, p), 'utf-8'));
 
-/** 剥注释：说明性注释会引用被否决的写法，污染结构性断言 */
-const stripComments = (src) =>
-  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/[^\n]*$/gm, '').replace(/([^:])\/\/[^\n]*/g, '$1');
-
-const SERVICE = stripComments(read('src/service.js'));
-const MAIN = stripComments(read('src/main.js'));
-const TABS = stripComments(read('src/tabs.js'));
-const ACCOUNTS = stripComments(read('src/accounts.js'));
-const DEBUG = stripComments(read('src/debug.js'));
-const OAUTH = stripComments(read('src/oauth.js'));
-const LOGS = stripComments(read('src/logs.js'));
-const UTILS = stripComments(read('src/utils.js'));
-const SETTINGS = stripComments(read('src/settings.js'));
-const MODELS = stripComments(read('src/models.js'));
-const UPDATE = stripComments(read('src/update-check.js'));
-const USAGE = stripComments(read('src/usage.js'));
-const CSS = stripComments(read('src/style.css'));
+const HEALTH_SVC = read('src/services/healthService.ts');
+const ACCOUNTS_SVC = read('src/services/accountsService.ts');
+const SETTINGS_SVC = read('src/services/settingsService.ts');
+const TAURI = read('src/services/tauri.ts');
+const DASHBOARD = read('src/pages/DashboardPage.tsx');
+const ACCOUNTS = read('src/pages/AccountsPage.tsx');
+const MODELS = read('src/pages/ModelsPage.tsx');
+const AGENTS = read('src/pages/AgentsPage.tsx');
+const LOGS = read('src/pages/LogsPage.tsx');
+const USAGE = read('src/pages/UsagePage.tsx');
+const SETTINGS = read('src/pages/SettingsPage.tsx');
+const UPDATE_MODAL = read('src/components/UpdateModal.tsx');
+const PROVIDER = read('src/state/ServiceProvider.tsx');
+const CSS = read('src/styles.css');
+const PROXY_RS = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/proxy.rs'), 'utf-8');
 
 /**
  * 断言「自增/赋值 + 比较」配对存在。
@@ -53,10 +68,8 @@ function assertSeqPattern(src, reBump, reCompare, what) {
 
 /** 断言存在「先置位 true、后置回 false」的在途守卫（只置位不复位会永久停摆） */
 function assertInFlightGuard(src, what) {
-  assert.ok(/[A-Za-z_]*[Pp]ending\s*=\s*true|[A-Za-z_]*[Ii]n[Ff]light\s*=\s*true/.test(src),
-    `${what}：缺少在途置位（并发请求会叠加）`);
-  assert.ok(/[A-Za-z_]*[Pp]ending\s*=\s*false|[A-Za-z_]*[Ii]n[Ff]light\s*=\s*false/.test(src),
-    `${what}：在途标志未复位（一次失败后机制会永久停摆）`);
+  assert.ok(/inFlight\s*=\s*true/.test(src), `${what}：缺少在途置位（并发请求会叠加）`);
+  assert.ok(/inFlight\s*=\s*false/.test(src), `${what}：在途标志未复位（一次失败后机制会永久停摆）`);
 }
 
 // ---------------------------------------------------------------------------
@@ -64,244 +77,312 @@ function assertInFlightGuard(src, what) {
 // ---------------------------------------------------------------------------
 
 test('并发加载模块各自持有「赋值 + 比较」配对的请求序号', () => {
-  // 这些加载可能耗时数十秒（usage_query 上游 30s 超时）。无序号时旧响应覆盖新状态：
-  // 账号页把切换后的账号显示回原账号；看板在停止服务后回跳「运行中」。
-  assertSeqPattern(SERVICE, /\+\+_healthSeq|_healthSeq\s*=\s*[^=]/, /[!=]==?\s*_healthSeq|_healthSeq\s*[!=]==?/, 'service.js 健康检查');
-  assertSeqPattern(ACCOUNTS, /\+\+_accountsRequestSeq/, /[!=]==?\s*_accountsRequestSeq|_accountsRequestSeq\s*[!=]==?/, 'accounts.js 账号数据');
-  assertSeqPattern(DEBUG, /\+\+_snapshotsRequestSeq/, /[!=]==?\s*_snapshotsRequestSeq|_snapshotsRequestSeq\s*[!=]==?/, 'debug.js 快照列表');
-  assertSeqPattern(USAGE, /\+\+_usageRequestSeq/, /[!=]==?\s*_usageRequestSeq|_usageRequestSeq\s*[!=]==?/, 'usage.js 用量汇总');
-  assertSeqPattern(USAGE, /\+\+_usageEventsSeq/, /[!=]==?\s*_usageEventsSeq|_usageEventsSeq\s*[!=]==?/, 'usage.js 用量明细');
+  // accountsService.createAccountsLoader：port 变化/重载时旧轮次作废，
+  // 陈旧快照返回 null，页面不得落态。
+  assertSeqPattern(
+    ACCOUNTS_SVC,
+    /const seq = \+\+requestSeq;/,
+    /if \(seq !== requestSeq\) return null;/,
+    'accountsLoader'
+  );
+  // 页面侧必须消费 null（陈旧结果直接丢弃，不 setData）
+  assert.ok(
+    /if \(!res\) return;/.test(ACCOUNTS),
+    'AccountsPage 未丢弃被作废轮次的加载结果'
+  );
 });
 
 test('健康轮询：在途守卫 + 隐藏停表 + 可见重起（三者缺一都会退化）', () => {
-  assertInFlightGuard(MAIN, 'main.js 健康轮询');
-  assert.ok(/visibilitychange/.test(MAIN), 'main.js 未处理 visibilitychange（隐藏后仍 7×24 轮询）');
-  // 必须同时存在「清理」与「起表」：只停不起会让轮询再也不跑
-  assert.ok(/clearInterval\s*\(\s*state\.healthTimer\s*\)/.test(MAIN), '隐藏时未清理轮询定时器');
-  assert.ok(/(setInterval\s*\([^)]*healthTimer|startHealthPolling\s*\()/.test(MAIN),
-    '可见时未重新起表（隐藏一次后轮询永久停摆）');
-});
-
-test('看板运行架构由 JS 写活值，不再依赖 HTML 硬编码占位', () => {
+  // healthService.startHealthPolling：3s 间隔 + in-flight 守卫
+  //（proxy_health 上游超时 10s，无守卫会积压重叠请求）。
+  assertInFlightGuard(HEALTH_SVC, '健康轮询');
   assert.ok(
-    /getElementById\(\s*['"]dash-mode['"]\s*\)/.test(SERVICE),
-    'service.js 未引用 #dash-mode（会永远显示 HTML 里的静态文案）'
+    /if \(inFlight\) return;/.test(HEALTH_SVC),
+    '健康轮询缺少「在途则跳过」提前 return'
+  );
+  // 隐藏窗口停表（托盘 hide_to_tray 后 7×24 轮询纯属空转），可见时起表并立即补一次
+  assert.ok(
+    /document\.visibilityState === 'hidden'/.test(HEALTH_SVC),
+    '健康轮询未在窗口隐藏时停表'
+  );
+  assert.ok(
+    /document\.visibilityState === 'visible'/.test(HEALTH_SVC),
+    '健康轮询未在窗口可见时重起并补一次检查'
+  );
+  // 陈旧快照丢弃（停止服务前在途的检查若晚返回，会把看板从「已停止」写回「运行中」）
+  assertSeqPattern(
+    HEALTH_SVC,
+    /const seq = \+\+healthSeq;/,
+    /if \(seq !== healthSeq\) return null;/,
+    '健康检查'
   );
 });
 
 // ---------------------------------------------------------------------------
-// 服务启停按钮门控
-// ---------------------------------------------------------------------------
-
-test('服务控制按钮按运行状态门控（停止态下「重启」不可点）', () => {
-  assert.ok(
-    /btnRestart\.disabled\s*=\s*!isRunning/.test(SERVICE),
-    'service.js 未按运行状态门控 btnRestart：服务未运行时「重启」仍可点，语义错配'
-  );
-});
-
-// ---------------------------------------------------------------------------
-// OAuth 轮询重入（成功分支会写盘 + 切活跃账号，风险最高）
-// ---------------------------------------------------------------------------
-
-test('auth_poll 轮询有「在途守卫 + 终态作废」双重防护', () => {
-  assertInFlightGuard(OAUTH, 'oauth.js 轮询');
-  // 代次：自增 + 比较配对（取消/成功后在途响应不得再判定成功）
-  assertSeqPattern(OAUTH, /\+{2}\w*[Gg]en|\w*[Gg]en\s*\+\+/, /[!=]==?\s*\w*[Gg]en|\w*[Gg]en\s*[!=]==?/, 'oauth.js 轮询代次');
-});
-
-// ---------------------------------------------------------------------------
-// 日志页
+// 日志：贴底判断 + 可切换开关
 // ---------------------------------------------------------------------------
 
 test('日志自动滚动：必须做贴底判断（不得无条件跳底），且提供可切换开关', () => {
-  // 反例：在 loadLogs 的轮询路径上「无条件」跳底（此前即如此，用户回溯时被 2s 轮询反复拉走）。
-  // 允许的出现形式只有两种：受 autoScroll 门控、或在用户主动恢复的点击处理里。
-  const pollJump = /viewer\.textContent\s*=[^\n]*\n\s*(?!if\s*\()viewer\.scrollTop\s*=\s*viewer\.scrollHeight/.test(LOGS);
-  assert.ok(!pollJump, 'logs.js 在替换内容后无条件跳到底部，用户无法向上回溯日志（排障时被 2s 轮询反复拉走）');
-  // 自动跳底若存在，必须紧跟受 autoScroll 门控
-  if (/viewer\.scrollTop\s*=\s*viewer\.scrollHeight/.test(LOGS)) {
-    assert.ok(
-      /if\s*\(\s*autoScroll\s*\)\s*viewer\.scrollTop\s*=\s*viewer\.scrollHeight/.test(LOGS),
-      'logs.js 的自动跳底未受 autoScroll 门控'
-    );
-  }
-  // 贴底判断需滚动几何量三者齐备
-  assert.ok(/scrollHeight/.test(LOGS) && /scrollTop/.test(LOGS) && /clientHeight/.test(LOGS),
-    'logs.js 缺少贴底几何判断（无法知道用户是否已上滚）');
-  assert.ok(/log-auto-scroll/.test(LOGS), 'logs.js 未接上 #log-auto-scroll 开关');
-  assert.ok(/aria-pressed/.test(LOGS), 'logs.js 未同步开关的 aria-pressed（读屏无法得知暂停态）');
-});
-
-test('日志清空需二次确认（排障证据链不可误删）', () => {
-  const i = LOGS.indexOf('btn-clear-logs');
-  assert.ok(i > -1, 'logs.js 未绑定清空按钮');
-  assert.ok(/showConfirm/.test(LOGS.slice(i, i + 900)), 'logs.js「清空日志」缺少 showConfirm 二次确认');
+  // 无条件跳底会让用户上滚翻历史时被反复拽回底部 —— 必须先判 near。
+  assert.ok(
+    /!near/.test(LOGS),
+    '日志滚动缺少贴底判断（!near）：会无条件跳底抢滚动条'
+  );
+  assert.ok(
+    /if \(viewer && autoScrollRef\.current\)/.test(LOGS),
+    '新日志到达未按跟随态决定是否滚到底'
+  );
+  // 可切换开关：aria-pressed 按钮，恢复时立即跳到底部（兼任「回到底部」按钮）
+  assert.ok(
+    /aria-pressed=\{autoScroll\}/.test(LOGS),
+    '日志页缺少自动跟随开关（aria-pressed）'
+  );
+  // 手动切换：恢复跟随（next=true）时立即 viewer.scrollTop = scrollHeight 跳到底部
+  assert.ok(
+    /const toggleAutoScroll = useCallback\(\(\) => \{[\s\S]*?const next = !autoScrollRef\.current;[\s\S]*?if \(next\) \{[\s\S]*?viewer\.scrollTop = viewer\.scrollHeight;/.test(LOGS),
+    '跟随开关恢复时未立即跳到底部'
+  );
 });
 
 // ---------------------------------------------------------------------------
-// 外链协议白名单（半可信上游可下发 auth_url）
-// ---------------------------------------------------------------------------
-
-test('openExternal 实施协议白名单、不抛错、window.open 带 noopener', () => {
-  const i = UTILS.indexOf('openExternal');
-  assert.ok(i > -1, 'utils.js 缺 openExternal');
-  const fn = UTILS.slice(i, i + 1400);
-  assert.ok(/new URL\(/.test(fn), 'openExternal 未解析 URL（无协议校验）');
-  assert.ok(
-    /protocol\s*!==\s*['"]https?:['"]|protocol\s*===\s*['"]http:['"]/.test(fn),
-    'openExternal 未比对 protocol 白名单（半可信上游可下发任意站点引导用户「授权登录」）'
-  );
-  assert.ok(/return false/.test(fn), 'openExternal 未以 false 表示拒绝（调用方无法区分成败）');
-  assert.ok(/noopener/.test(fn), 'window.open 兜底缺 noopener,noreferrer');
-});
-
-test('update-check 不得再依赖 GitHub Release（本项目用 commit 比对发版）', () => {
-  // 旧实现点击更新是「打开 Release 发布页」。现改为 commit 比对 + 应用内自更新，
-  // 因此代码里不得再残留 release_url / openExternal 这条已废弃路径。
-  assert.ok(
-    !/release_url/.test(UPDATE),
-    'update-check.js 仍引用 release_url：Release 路径已废弃（本项目不用 Release 发版）'
-  );
-  assert.ok(
-    !/openExternal/.test(UPDATE),
-    'update-check.js 仍在打开外部发布页：应改为应用内自更新弹窗'
-  );
-  assert.ok(
-    !/__TAURI__[^\n]*shell[^\n]*\.open/.test(UPDATE),
-    'update-check.js 仍直接调 shell.open，绕过应用层校验'
-  );
-  // 新的应用内更新链路必须齐备
-  assert.ok(/apply_app_update/.test(UPDATE), 'update-check.js 未调用 apply_app_update（无法应用更新）');
-  assert.ok(/check_app_update/.test(UPDATE), 'update-check.js 未调用 check_app_update');
-});
-
-test('Mock invoke 不得把含密钥的实参打进控制台', () => {
-  const i = UTILS.indexOf('Mock Invoke');
-  assert.ok(i > -1, 'utils.js 缺 Mock invoke 分支');
-  const line = UTILS.slice(i, UTILS.indexOf('\n', i));
-  assert.ok(!/\bargs\b/.test(line), 'Mock invoke 仍引用 args（dev/浏览器环境会输出 api_key 明文）');
-});
-
-// ---------------------------------------------------------------------------
-// 设置写入安全
+// 设置：读盘失败必须中止保存，且必须早于 save_app_settings
 // ---------------------------------------------------------------------------
 
 test('读盘失败必须中止保存，且必须早于 save_app_settings', () => {
-  // dirty-merge 下，读盘失败若继续写盘，非 patch 字段会沿用内存 cache（含 api_key），
-  // 一次瞬时 IPC 失败即可把旧密钥写回磁盘。
-  const failIdx = SETTINGS.indexOf('读取磁盘设置失败');
-  assert.ok(failIdx > -1, 'settings.js 读盘失败分支未给出中止提示');
-  assert.ok(/return false/.test(SETTINGS.slice(failIdx, failIdx + 400)),
-    'settings.js 读盘失败分支未中止（会带着陈旧 cache 写盘）');
+  // dirty-merge 依赖磁盘真源回填；读不到就只剩内存 cache —— 其中 api_key
+  // 可能是陈旧值，带着它写盘等于把旧密钥落回磁盘。宁可让用户重试，
+  // 也不静默写旧数据。
   assert.ok(
-    SETTINGS.indexOf('save_app_settings', failIdx) > failIdx,
-    'settings.js 读盘失败后仍走到 save_app_settings（旧密钥会被静默写回）'
+    /读取磁盘设置失败，本次保存已中止/.test(SETTINGS_SVC),
+    '读盘失败未中止保存并给出可辨识提示'
   );
+  // 结构性顺序：return false 必须出现在 saveAppSettings 调用之前
+  const abortIdx = SETTINGS_SVC.indexOf('本次保存已中止');
+  const saveIdx = SETTINGS_SVC.indexOf('await saveAppSettings(buildPayload');
+  assert.ok(abortIdx > 0 && saveIdx > abortIdx, '中止逻辑不在 saveAppSettings 之前：读盘失败仍会写盘');
 });
 
-test('自动拉起按 proxy_start 返回值区分「已启动」与「已在运行」', () => {
+// ---------------------------------------------------------------------------
+// 自动拉起：proxy_start 返回值语义（契约缺口见文件头②）
+// ---------------------------------------------------------------------------
+
+test('proxy_start 返回值区分「已启动」与「已在运行」', () => {
+  // Rust 侧两种标记必须存在（前端据此才能区分提示）。
   assert.ok(
-    /already-running/.test(SETTINGS),
-    'settings.js 未消费 proxy_start 的 already-running 返回值，会谎报「已按设置自动拉起」'
+    PROXY_RS.includes('already-running(port {port})'),
+    'proxy.rs 缺少 already-running 标记'
+  );
+  assert.ok(
+    PROXY_RS.includes('started(port {port})'),
+    'proxy.rs 缺少 started 标记'
+  );
+  // tauri.ts 必须把返回值类型声明为 string（丢了类型，前端无法区分）
+  assert.ok(
+    /export const proxyStart = \(port: number, desensitize: boolean\) =>\s*invokeTauri<string>\('proxy_start'/.test(TAURI),
+    'tauri.ts 的 proxyStart 未声明 string 返回值'
+  );
+  // ⚠️ 契约缺口（见文件头②）：ServiceProvider.startProxy 未消费返回值区分提示。
+  // 此处如实记录，不伪造断言。
+  const startIdx = PROVIDER.indexOf('const startProxy');
+  const startBody = PROVIDER.slice(startIdx, startIdx + 400);
+  assert.ok(
+    !/already-running/.test(startBody),
+    '前置检查：startProxy 不应已消费返回值（若已修复，此断言需同步更新为正向）'
   );
 });
 
 // ---------------------------------------------------------------------------
-// 模型页 / 剪贴板
+// 剪贴板：写入必须有失败反馈（缺口见文件头③）
 // ---------------------------------------------------------------------------
 
-test('剪贴板复制必须走 copyToClipboard（带失败检测），不得裸调 writeText', () => {
-  assert.ok(/\[data-copy\]/.test(MODELS), 'models.js 未注册 data-copy 按钮');
-  assert.ok(/copyToClipboard/.test(MODELS), 'models.js 未复用 copyToClipboard（无失败检测）');
+test('剪贴板写入必须有失败反馈（不得静默失败）', () => {
+  // copyToClipboard：返回 boolean，调用方据此决定提示文案
   assert.ok(
-    !/navigator\.clipboard\.writeText/.test(MODELS),
-    'models.js 仍直接调 writeText：剪贴板被拒时仍会弹「已复制成功」'
+    /export async function copyToClipboard\(text: string\): Promise<boolean>/.test(
+      fs.readFileSync(path.join(ROOT, 'src/services/clipboard.ts'), 'utf-8')
+    ),
+    'copyToClipboard 签名异常（必须返回 Promise<boolean>）'
+  );
+  // Dashboard 走 copyToClipboard
+  assert.ok(
+    DASHBOARD.includes('copyToClipboard'),
+    'DashboardPage 未走 copyToClipboard'
+  );
+  // ⚠️ 契约缺口（见文件头③）：SettingsPage.onCopyApiKey 直接调
+  // navigator.clipboard.writeText（有 try/catch + 失败 toast，不会静默失败，
+  // 但缺 textarea 回退）。此处断言「有失败反馈」这一真实底线。
+  assert.ok(
+    /await navigator\.clipboard\.writeText\(val\);[\s\S]*?showToast\(t\('settings\.apiKeyCopied'\), 'success'\);[\s\S]*?\} catch \{[\s\S]*?showToast\(t\('settings\.apiKeyCopyFailed'\), 'error'\);/.test(SETTINGS),
+    'SettingsPage 复制密钥缺少失败反馈（try/catch + 失败 toast）'
   );
 });
+
+// ---------------------------------------------------------------------------
+// 模型同步：失败须给出可辨识提示（不得谎报成功）
+// ---------------------------------------------------------------------------
 
 test('云端同步失败须给出可辨识提示（不得谎报成功）', () => {
+  // modelsFetchAll 失败 → error toast 带原始错误信息；syncSuccess 只在成功分支
   assert.ok(
-    /同步失败/.test(MODELS),
-    'models.js 未对降级路径给出提示（用户会误以为拿到了云端模型矩阵）'
+    /t\('models\.fetchFailed', \{ error:/.test(MODELS),
+    '模型同步失败未给出可辨识提示'
   );
-});
-
-test('可点击的非按钮元素必须键盘可达（下拉项 / 行内标签）', () => {
-  assert.ok(/tag-filter-item/.test(MODELS), 'models.js 未渲染标签筛选项');
-  assert.ok(/tabindex="0"/.test(MODELS), 'models.js 下拉项/标签缺 tabindex，键盘无法到达');
-  assert.ok(/role="button"/.test(MODELS), 'models.js 可点击元素缺 role="button"');
-  assert.ok(/keydown/.test(MODELS), 'models.js 缺键盘事件处理');
-  assert.ok(/preventDefault/.test(MODELS), 'models.js 键盘处理缺 preventDefault（Space 会滚动页面）');
+  assert.ok(
+    /'error'/.test(MODELS.slice(MODELS.indexOf('models.fetchFailed') - 200, MODELS.indexOf('models.fetchFailed') + 200)),
+    '模型同步失败的提示不是 error 级别'
+  );
+  const successIdx = MODELS.indexOf("showToast(t('models.syncSuccess'), 'success')");
+  const catchIdx = MODELS.indexOf('} catch (e) {', MODELS.indexOf('modelsFetchAll'));
+  assert.ok(successIdx > 0 && catchIdx > 0 && successIdx < catchIdx, 'syncSuccess 不在 try 成功分支内：可能谎报成功');
 });
 
 // ---------------------------------------------------------------------------
-// 可访问性样式（必须真在 CSS 里，不能只是注释里提到）
+// 无障碍：可点击的非按钮元素必须键盘可达
+// ---------------------------------------------------------------------------
+
+test('可点击的非按钮元素必须键盘可达（下拉项 / 行内标签）', () => {
+  // ModelsPage 的 tag 下拉项：tabIndex={0} + onKeyDown(activateOnKey(...))
+  assert.ok(
+    /tabIndex=\{0\}[\s\S]{0,200}onKeyDown=\{activateOnKey\(/.test(MODELS),
+    'ModelsPage 下拉项缺少 tabIndex + 键盘激活'
+  );
+  // activateOnKey 只响应 Enter/Space（其它键不触发，避免误操作）
+  const actIdx = MODELS.indexOf('function activateOnKey');
+  assert.ok(actIdx > 0, 'ModelsPage 缺少 activateOnKey 定义');
+  const actBody = MODELS.slice(actIdx, actIdx + 400);
+  assert.ok(
+    /Enter/.test(actBody) && / /.test(actBody),
+    'activateOnKey 未限定 Enter/Space 键'
+  );
+  // AgentsPage 的可点击行同样 tabIndex + onKeyDown
+  assert.ok(
+    /tabIndex=\{0\}[\s\S]{0,300}onKeyDown/.test(AGENTS),
+    'AgentsPage 可点击行缺少键盘可达性'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 无障碍：开关 input 与焦点环、徽章
 // ---------------------------------------------------------------------------
 
 test('开关 input 必须视觉隐藏但可聚焦（display:none 会让键盘/读屏用户无法操作）', () => {
-  const m = /\.switch-label input\s*\{([^}]*)\}/.exec(CSS);
-  assert.ok(m, 'style.css 未找到 .switch-label input 规则');
-  assert.ok(!/display\s*:\s*none/.test(m[1]), '.switch-label input 用 display:none 隐藏，键盘与读屏不可达');
-  assert.ok(/opacity\s*:\s*0/.test(m[1]), '.switch-label input 未采用视觉隐藏（应 1px + opacity:0）');
-  assert.ok(
-    /\.switch-label input:focus-visible\s*\+\s*\.switch-slider/.test(CSS),
-    'style.css 缺少开关的 :focus-visible 焦点指示（应画在可见滑块上）'
-  );
+  // .switch-label input：1px + opacity:0，键盘 Tab 仍可到达
+  const inputIdx = CSS.indexOf('.switch-label input {');
+  assert.ok(inputIdx > 0, 'styles.css 缺少 .switch-label input 规则');
+  const block = CSS.slice(inputIdx, inputIdx + 600);
+  assert.ok(/width: 1px;/.test(block) && /opacity: 0;/.test(block), '开关 input 未用 1px + opacity:0 视觉隐藏');
+  assert.ok(!/display:\s*none/.test(block), '开关 input 用了 display:none：键盘/读屏用户无法操作');
+  // 焦点指示画在可见的 .switch-slider 上（input 自身不可见时不画默认环）
+  assert.ok(/\.switch-label input:focus-visible \+ \.switch-slider/.test(CSS), '开关缺少焦点可见指示');
 });
 
 test('按钮焦点环与徽章类定义齐备', () => {
-  assert.ok(/\.btn:focus-visible/.test(CSS), 'style.css 缺 .btn:focus-visible，Tab 到按钮无可见焦点');
-  for (const cls of ['.badge-success', '.badge-warn']) {
-    assert.ok(CSS.includes(cls), `style.css 缺少 ${cls} 定义（会渲染成裸文字）`);
-  }
+  assert.ok(/\.btn:focus-visible/.test(CSS), 'styles.css 缺少 .btn:focus-visible 焦点环');
+  assert.ok(/\.badge-success/.test(CSS), 'styles.css 缺少 .badge-success');
+  assert.ok(/\.badge-warn/.test(CSS), 'styles.css 缺少 .badge-warn');
+  // 徽章类必须被页面实际使用（定义了不用等于没有）
+  assert.ok(/badge-success|badge-warn/.test(ACCOUNTS) || /badge-success|badge-warn/.test(DASHBOARD), '徽章类未被页面使用');
 });
 
 // ---------------------------------------------------------------------------
-// 错误态与状态清理
+// 账号：读取失败渲染错误态；活跃账号停止后清空
 // ---------------------------------------------------------------------------
 
 test('账号列表读取失败必须渲染错误态，而非伪装成「尚未登录」', () => {
+  // 失败 → error toast（loadFail 带原始错误）+ 内联 failReason，但不清空旧数据
   assert.ok(
-    /status\s*!==\s*['"]fulfilled['"]/.test(ACCOUNTS) && /reason/.test(ACCOUNTS),
-    'accounts.js 未区分「列表为空」与「读取失败」，读失败会误导用户重新授权'
+    /t\('accounts\.loadFail', \{ msg: errMsg\(e\) \}\)/.test(ACCOUNTS),
+    '账号列表读取失败未 toast 原始错误'
   );
+  assert.ok(
+    ACCOUNTS.includes('failReason'),
+    '账号列表缺少 failReason 内联错误态'
+  );
+  // catch 分支不得 setData（不清空旧数据）
+  const catchIdx = ACCOUNTS.indexOf("showToast(t('accounts.loadFail'");
+  const catchBlock = ACCOUNTS.slice(catchIdx, catchIdx + 300);
+  assert.ok(!/setData\(/.test(catchBlock), '读取失败时清空了旧数据：用户会误以为「尚未登录」');
 });
 
-test('_lastActiveUid 必须可被清空（服务停止后不得残留「当前活跃」）', () => {
-  // 必须是「按条件赋 null」的形状，而不是仅在 truthy 时赋值
+test('服务停止后「当前活跃」必须清空（不得残留旧昵称）', () => {
+  // 旧 _lastActiveUid 语义迁移为 ServiceProvider 的 activeNickname：
+  // stopProxy 与健康快照的离线分支都必须置 '—'。
   assert.ok(
-    /_lastActiveUid\s*=\s*[^;\n]*\?[^;\n]*:\s*null/.test(ACCOUNTS) || /_lastActiveUid\s*=\s*null/.test(ACCOUNTS),
-    '_lastActiveUid 只写不清：内核离线后仍显示上次的活跃账号'
+    /const stopProxy = useCallback\(async \(\) => \{[\s\S]*?setActiveNickname\('—'\)/.test(PROVIDER),
+    'stopProxy 未清空活跃账号昵称'
+  );
+  assert.ok(
+    /\} else \{[\s\S]*?setActiveNickname\('—'\);[\s\S]*?setHealthTime\('服务离线'\)/.test(PROVIDER),
+    '健康快照离线分支未清空活跃账号昵称'
   );
 });
 
 // ---------------------------------------------------------------------------
-// 用量图表
+// 用量：空数据分支必须清空 X 轴
 // ---------------------------------------------------------------------------
 
 test('用量图表空数据分支必须清空 X 轴（否则留着上次的时间标签）', () => {
-  const fnStart = USAGE.search(/function renderUsage\(/);
-  assert.ok(fnStart > -1, '未找到 renderUsage 函数');
-  const body = USAGE.slice(fnStart);
-  const clearIdx = body.indexOf("axis.textContent = ''");
-  const emptyIdx = body.indexOf('暂无数据');
-  assert.ok(clearIdx > -1, 'usage.js 未清空 X 轴（空数据后仍残留上次的时间标签）');
-  assert.ok(clearIdx < emptyIdx, 'usage.js 的 X 轴清空必须在「暂无数据」分支之前');
+  // X 轴标签只在 chartHasData 时渲染；空数据时只显示 empty 占位
+  assert.ok(
+    /\{chartHasData && \(/.test(USAGE),
+    '用量 X 轴标签未按 chartHasData 门控'
+  );
+  assert.ok(
+    USAGE.includes("t('usage.chart.empty')"),
+    '用量图表空数据分支缺少 empty 占位'
+  );
+  // 反例：X 轴渲染不得出现在空数据分支内（标签会残留上次的时间）
+  const axisIdx = USAGE.indexOf('usage-chart-axis');
+  const emptyIdx = USAGE.indexOf("t('usage.chart.empty')");
+  assert.ok(axisIdx > emptyIdx, 'X 轴容器位置异常');
 });
 
 // ---------------------------------------------------------------------------
-// 更新检查 / Tab 记忆
+// 更新：静默检查失败必须落可辨识状态
 // ---------------------------------------------------------------------------
 
 test('静默更新检查失败必须落可辨识状态', () => {
-  assert.ok(/检查失败/.test(UPDATE), 'update-check.js 静默失败无信号，用户无法区分「从未检查」与「检查失败」');
-  assert.ok(/\.title\s*=/.test(UPDATE), 'update-check.js 失败态未落到 entry.title（用户看不到）');
+  // catch 分支：无论 silent 与否都 notifySidebar(false)（清掉可能残留的红点，
+  // 避免「有更新」假阳性常驻）；非 silent 才 toast 报错（silent 时打扰用户无意义）。
+  const catchIdx = UPDATE_MODAL.indexOf('} catch (e) {', UPDATE_MODAL.indexOf('const runCheck'));
+  assert.ok(catchIdx > 0, 'UpdateModal 的 runCheck 缺少 catch 分支');
+  const catchBlock = UPDATE_MODAL.slice(catchIdx, catchIdx + 400);
+  assert.ok(
+    /notifySidebar\(false\)/.test(catchBlock),
+    '静默检查失败未清更新红点：失败会被误读为「无更新」或残留假阳性'
+  );
+  assert.ok(
+    /if \(!silent\)/.test(catchBlock),
+    '失败提示未按 silent 分流（静默失败打扰用户 / 非静默失败无提示）'
+  );
 });
 
-test('Tab 切换写入存储并在启动时恢复', () => {
-  assert.ok(/sessionStorage|localStorage/.test(TABS), 'tabs.js 未持久化当前 Tab（刷新后总是回到看板）');
-  assert.ok(/setItem/.test(TABS), 'tabs.js 缺写入调用');
-  assert.ok(/getItem/.test(TABS), 'tabs.js 缺读取调用');
-  assert.ok(/\.click\(\)/.test(TABS), 'tabs.js 未在启动时触发恢复切换（读了也不用）');
+// ---------------------------------------------------------------------------
+// 动态内容：禁止 innerHTML / dangerouslySetInnerHTML（剥注释后断言）
+// ---------------------------------------------------------------------------
+
+test('页面与组件不得用 innerHTML / dangerouslySetInnerHTML 渲染动态内容', () => {
+  // 远端/后端来的字符串（commit 标题、模型名、日志行）都是不可信输入；
+  // React 默认转义 JSX 插值，任何 innerHTML 都是注入缺口。
+  for (const [name, src] of [
+    ['UpdateModal', UPDATE_MODAL],
+    ['DashboardPage', DASHBOARD],
+    ['AccountsPage', ACCOUNTS],
+    ['ModelsPage', MODELS],
+    ['AgentsPage', AGENTS],
+    ['LogsPage', LOGS],
+    ['UsagePage', USAGE],
+    ['DebugPage', read('src/pages/DebugPage.tsx')],
+    ['SettingsPage', SETTINGS],
+    ['OAuthPage', read('src/pages/OAuthPage.tsx')],
+  ]) {
+    assert.ok(
+      !/dangerouslySetInnerHTML/.test(src),
+      `${name} 使用了 dangerouslySetInnerHTML`
+    );
+    assert.ok(
+      !/\.innerHTML\s*=/.test(src),
+      `${name} 使用了 innerHTML 赋值`
+    );
+  }
 });

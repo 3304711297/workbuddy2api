@@ -5,11 +5,20 @@
 //   ② 仅当 tip 不同才走 compare 端点取 ahead_by（= 落后数）与 commit 列表；
 //   ③ 应用更新是「退出 GUI → 独立脚本 git 快进 + 重建 → 自动拉起」。
 //
+// 前端迁移说明（2026-09-26）：旧前端（src/update-check.js、src/commit-changelog.js、
+// index.html 弹窗）已迁移为 React+TS：
+//   src/update-check.js      → src/services/updateService.ts（检测/轮询/接续逻辑）
+//                            + src/components/UpdateModal.tsx（弹窗三视图）
+//   src/commit-changelog.js  → src/services/commitChangelog.ts
+//   index.html 弹窗结构       → src/components/UpdateModal.tsx（className 视图）
+//   版本指纹显示             → src/components/Sidebar.tsx
+// 本文件的 Rust / PowerShell / build.rs / vite.config.js 断言保持原样（后端未迁移）。
+//
 // 本测试锁定四件事：
 //   1. Rust 侧不再引用 Release API（防止有人「顺手改回去」）；
 //   2. 检测判据必须是 commit sha 比对，且 ahead_by==0 判为「无更新」（本地领先防误报）；
 //   3. 更新走交接式脚本，脚本必须包含 --ff-only、tauri build 与产物校验；
-//   4. 前端弹窗结构与 Rust 序列化字段名一致（snake_case），且 JSON 走 textContent。
+//   4. 前端弹窗结构与 Rust 序列化字段名一致（snake_case），且 commit 标题走文本节点。
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -23,9 +32,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const updateRs = readFileSync(join(root, 'src-tauri', 'src', 'commands', 'update.rs'), 'utf8');
 const libRs = readFileSync(join(root, 'src-tauri', 'src', 'lib.rs'), 'utf8');
-const updateJs = readFileSync(join(root, 'src', 'update-check.js'), 'utf8');
-const changelogJs = readFileSync(join(root, 'src', 'commit-changelog.js'), 'utf8');
-const html = readFileSync(join(root, 'index.html'), 'utf8');
+const updateServiceTs = readFileSync(join(root, 'src', 'services', 'updateService.ts'), 'utf8');
+const updateModalTsx = readFileSync(join(root, 'src', 'components', 'UpdateModal.tsx'), 'utf8');
+const changelogTs = readFileSync(join(root, 'src', 'services', 'commitChangelog.ts'), 'utf8');
+const sidebarTsx = readFileSync(join(root, 'src', 'components', 'Sidebar.tsx'), 'utf8');
+const tauriTs = readFileSync(join(root, 'src', 'services', 'tauri.ts'), 'utf8');
+const zhCn = readFileSync(join(root, 'src', 'i18n', 'zh-CN.ts'), 'utf8');
 const handoff = readFileSync(join(root, 'scripts', 'app-update', 'windows.ps1'), 'utf8');
 
 // Rust 注释里提到 Release 是在解释「为何不用它」，断言需剥离注释后再看代码。
@@ -129,23 +141,32 @@ test('「无更新」缓存必须短于「有更新」（键里没有远端 tip�
 test('「检查更新」入口点击必须绕过缓存实时实查（force: true）', () => {
   // 入口点击的用户语义是「现在去 GitHub 问一次」。若传 force: false，
   // 会命中 Rust 侧磁盘缓存，远端推新后仍显示「已是最新」且毫无反应（真实踩到）。
-  // 锚点用绑定处的独特注释（runCheck 函数体内也出现 el('update-entry')，
-  // 不能作锚点）；锁定的是 init 里入口的 onClick。
-  const anchor = updateJs.indexOf('入口点击：一律打开弹窗并**强制实时**检查');
-  assert.ok(anchor > -1, '未找到入口点击绑定处的注释锚点（init 的 onClick 可能被改动）');
-  const section = updateJs.slice(anchor, anchor + 400);
+  // 新实现：UpdateModal 的开窗 effect（用户点击入口 → 打开弹窗）在开窗瞬间
+  // 调用 runCheck，必须传 force: true；「重新检查」按钮（handleCheckNow）同理。
+  const forceChecks = [...updateModalTsx.matchAll(/runCheck\(\{\s*silent:\s*false,\s*force:\s*true\s*\}\)/g)];
   assert.ok(
-    /runCheck\(\{\s*silent:\s*false,\s*force:\s*true\s*\}\)/.test(section),
-    '入口点击未传 force: true：会吃到磁盘缓存，远端推新后显示「已是最新」'
+    forceChecks.length >= 2,
+    `UpdateModal 里 force: true 的非静默检查调用不足（找到 ${forceChecks.length} 处，` +
+      '开窗 effect 与 handleCheckNow 各需一处）'
   );
-  // 兜底：runCheck 定义处默认值必须是 force: false（静默检查不吃 API 额度）
-  const defIdx = updateJs.indexOf('async function runCheck(');
-  const defSection = updateJs.slice(defIdx, defIdx + 120);
+  // 兜底：runCheck 的 force 默认值必须是 false（静默检查不吃 API 额度）
+  const rcIdx = updateModalTsx.indexOf('const runCheck = useCallback(');
+  assert.ok(rcIdx > -1, '未找到 UpdateModal 的 runCheck');
+  const rcBody = updateModalTsx.slice(rcIdx, rcIdx + 500);
   assert.ok(
-    /force\s*=\s*false/.test(defSection),
-    'runCheck 默认值不是 force: false：启动静默检查会绕过缓存打 API'
+    /force\s*=\s*false/.test(rcBody),
+    'runCheck 的 force 默认值不是 false：启动静默检查会绕过缓存打 API'
   );
-  // 启动静默检查保持走缓存（避免每次启动都打 GitHub API），不在此断言范围内。
+  // 服务层 runUpdateCheck 不得编造默认值：透传 opts.force，缺省为 false
+  assert.ok(
+    /checkAppUpdate\(opts\.force \?\? false\)/.test(updateServiceTs),
+    'updateService.runUpdateCheck 未把 force 透传给 check_app_update（缺省应为 false）'
+  );
+  // 启动静默检查（1500ms）保持走缓存（避免每次启动都打 GitHub API）
+  assert.ok(
+    /setTimeout\(\(\)\s*=>\s*void runCheck\(\{\s*silent:\s*true\s*\}\)/.test(updateModalTsx),
+    '启动静默检查未走缓存路径：应为 silent:true 且不强制 force:true'
+  );
 });
 
 test('apply_app_update 已注册到 Tauri 命令表', () => {
@@ -283,15 +304,16 @@ test('脚本必须写阶段状态文件供 GUI 轮询（不留黑屏）', () => 
   for (const p of phases) {
     assert.ok(new RegExp(`-Phase '${p}'`).test(handoff), `脚本未上报 ${p} 阶段`);
     assert.ok(
-      new RegExp(`'${p}'`).test(updateJs),
+      new RegExp(`'${p}'`).test(updateServiceTs),
       `前端 UPDATE_PHASES 缺少 ${p}`
     );
   }
 
-  // 前端弹窗必须包含 Hermes 原生 4-view 结构（检测状态、可用更新、交接中视图）
-  assert.ok(html.includes('id="update-status-view"'), 'index.html 缺少 #update-status-view');
-  assert.ok(html.includes('id="update-available-view"'), 'index.html 缺少 #update-available-view');
-  assert.ok(html.includes('id="update-applying-view"'), 'index.html 缺少 #update-applying-view');
+  // 前端弹窗必须包含 Hermes 原生 4-view 结构（检测状态、可用更新、交接中视图）。
+  // 新实现中视图由 UpdateModal.tsx 的 className 承载（React 组件，不再是 index.html 里的 id）。
+  assert.ok(updateModalTsx.includes('update-status-view'), 'UpdateModal 缺少 update-status-view');
+  assert.ok(updateModalTsx.includes('update-available-view'), 'UpdateModal 缺少 update-available-view');
+  assert.ok(updateModalTsx.includes('update-applying-view'), 'UpdateModal 缺少 update-applying-view');
 });
 
 test('失败分类必须在脚本、Rust 契约与前端提示三处对齐', () => {
@@ -307,14 +329,14 @@ test('失败分类必须在脚本、Rust 契约与前端提示三处对齐', () 
       `脚本未产出失败分类 ${k}`
     );
     assert.ok(
-      new RegExp(`['"]?${k}['"]?\\s*:`).test(updateJs),
+      new RegExp(`['"]?${k}['"]?\\s*:`).test(updateServiceTs),
       `前端 FAILURE_HINTS 缺少 ${k}（用户只能看到笼统的「更新失败」）`
     );
   }
   // 分级必须落到状态文件字段上
   assert.ok(/failureKind/.test(handoff), '脚本未把失败分类写进状态文件');
   assert.ok(/failure_kind/.test(updateRs), 'Rust 未解析 failureKind → failure_kind');
-  assert.ok(/state\.failure_kind/.test(updateJs), '前端未消费 failure_kind 字段');
+  assert.ok(/state\.failure_kind/.test(updateServiceTs), '前端未消费 failure_kind 字段');
 });
 
 test('app_update_state 命令已注册且容忍文件缺失/半截 JSON', () => {
@@ -355,11 +377,33 @@ test('apply_app_update 发起前必须清理上一次的状态残留', () => {
 });
 
 test('前端必须支持接续进行中的更新（重开应用后继续显示进度）', () => {
-  assert.ok(/resumeInFlightUpdate/.test(updateJs), '缺少接续逻辑：重开应用后进度丢失，用户会重复点击');
-  assert.ok(/rolling-back/.test(updateJs), '进行中阶段白名单缺少 rolling-back');
+  // 新实现：updateService.resumeInFlightUpdate 调用 app_update_resume（Rust 侧核实
+  // updater 进程仍存活）；UpdateModal 的接续 effect 在 800ms 后先问存活，
+  // 拿到可接续 state 才切 applying 视图并发开窗通知。
+  assert.ok(/export async function resumeInFlightUpdate/.test(updateServiceTs), 'updateService 缺少 resumeInFlightUpdate');
+  assert.ok(
+    /appUpdateResume\(\)/.test(updateServiceTs),
+    'resumeInFlightUpdate 未调用 app_update_resume：脚本已死时会弹「正在更新」且用户关不掉'
+  );
+  assert.ok(/'rolling-back'/.test(updateServiceTs), '可接续阶段白名单缺少 rolling-back');
+
+  // 必须「先问再开窗」：接续 effect 里 await resumeInFlightUpdate() 必须出现在
+  // setView('applying') 与开窗通知（wb-open-update-modal）之前
+  const resumeIdx = updateModalTsx.indexOf('await resumeInFlightUpdate()');
+  assert.ok(resumeIdx > -1, 'UpdateModal 接续 effect 未调用 resumeInFlightUpdate');
+  const applyIdx = updateModalTsx.indexOf("setView('applying')", resumeIdx);
+  const openIdx = updateModalTsx.indexOf("'wb-open-update-modal'", resumeIdx);
+  assert.ok(applyIdx > resumeIdx, '接续 effect 未先问存活就切视图');
+  assert.ok(openIdx > applyIdx, '开窗通知必须在问完存活、切到 applying 视图之后发出');
+
   // 轮询必须能停止，否则离开视图后仍在后台打 IPC
-  assert.ok(/function stopUpdatePolling/.test(updateJs), '缺少停止轮询的函数');
-  assert.ok(/clearInterval/.test(updateJs), '未真正清除定时器');
+  assert.ok(/export function startUpdatePolling/.test(updateServiceTs), '缺少 startUpdatePolling');
+  assert.ok(/clearInterval/.test(updateServiceTs), 'startUpdatePolling 未真正清除定时器');
+  // 离开 applying 视图时停掉轮询（UpdateModal 的 stopPolling）
+  assert.ok(
+    /stopPolling\(\)/.test(updateModalTsx) && /pollerRef\.current\?\.stop\(\)/.test(updateModalTsx),
+    'UpdateModal 未在切换视图/卸载时停止轮询：会离开视图后仍在后台打 IPC'
+  );
 });
 
 
@@ -428,15 +472,16 @@ test('版本指纹只含版本与提交（与 Hermes 形态一致，不含日期
     !/buildDate|BUILD_DATE/.test(vite),
     '指纹仍含构建日期：日期无可行动信息且随每次构建漂移，会让人误以为内容变了'
   );
-  // 界面必须直接显示「版本 + 提交」，而不是只显示版本号
+  // 界面必须直接显示「版本 + 提交」，而不是只显示版本号（新实现在 Sidebar 品牌区）。
+  // 注意 Sidebar 读的是构建期注入的 __APP_VERSION__ / __GIT_HASH__ / __BUILD_FINGERPRINT__
+  // 全局常量（index.html 不再由 JS 回填 textContent）。
   assert.ok(
-    /verEl\.textContent = hash \? `v\$\{ver\} \$\{hash\}`/.test(updateJs),
+    /v\{appVer\}\{gitHash \? ` \$\{gitHash\}` : ''\}/.test(sidebarTsx),
     '版本标识未显示构建提交：无法一眼判断界面对应的产物是哪个提交'
   );
-  assert.ok(
-    /__GIT_HASH__/.test(updateJs),
-    '前端未读取 __GIT_HASH__'
-  );
+  assert.ok(/__GIT_HASH__/.test(sidebarTsx), '前端未读取 __GIT_HASH__');
+  assert.ok(/__APP_VERSION__/.test(sidebarTsx), '前端未读取 __APP_VERSION__');
+  assert.ok(/id="app-ver"/.test(sidebarTsx), '版本标识缺少稳定 id（app-ver）');
 });
 
 test('健康检查端口必须来自配置，不得在更新链路写死 8787', () => {
@@ -612,20 +657,73 @@ test('探活端点必须免鉴权（/health 而非 /v1/models）', () => {
 });
 
 test('弹窗包含 Hermes 同款结构：变更列表 + 立即更新 + 稍后再说', () => {
-  for (const id of [
-    'update-overlay',
+  // 新实现中弹窗结构由 UpdateModal.tsx 的 className 承载（React 组件）。
+  for (const cls of [
     'update-status-view',
     'update-available-view',
     'update-applying-view',
     'update-changelog',
-    'update-now',
-    'update-later',
+    'update-group-list',
   ]) {
-    assert.ok(html.includes(`id="${id}"`), `index.html 缺少 #${id}（弹窗结构不完整）`);
+    assert.ok(updateModalTsx.includes(cls), `UpdateModal 缺少 .${cls}（弹窗结构不完整）`);
   }
-  assert.ok(html.includes('立即更新'), 'index.html 缺少「立即更新」按钮文案');
-  assert.ok(html.includes('稍后再说'), 'index.html 缺少「稍后再说」按钮文案');
-  assert.ok(html.includes('有可用更新'), 'index.html 缺少「有可用更新」标题');
+  // 按钮与标题文案走 i18n 键；zh-CN 落到中文（「立即更新」/「稍后」/「发现新版本」）
+  assert.ok(/t\('update\.applyNow'\)/.test(updateModalTsx), 'UpdateModal 缺「立即更新」按钮');
+  assert.ok(/t\('update\.later'\)/.test(updateModalTsx), 'UpdateModal 缺「稍后」按钮');
+  assert.ok(/t\('update\.available/.test(updateModalTsx), 'UpdateModal 缺「发现新版本」标题分支');
+  assert.ok(zhCn.includes(`'update.applyNow': '立即更新'`), 'zh-CN 缺少「立即更新」按钮文案');
+  assert.ok(zhCn.includes(`'update.later': '稍后'`), 'zh-CN 缺少「稍后」按钮文案');
+  assert.ok(
+    zhCn.includes(`'update.availableUnknownBehind': '发现新版本（落后数量未知）'`),
+    'zh-CN 缺少「发现新版本（落后数量未知）」标题'
+  );
+});
+
+test('behind==null 必须显示「数量未知」，绝不得 ?? 0 抹成「无更新」', () => {
+  // 最危险的谎报：compare 失败（限流/404）时 Rust 侧 behind=None（未知）；
+  // 若前端写 behind ?? 0，标题会显示「落后 0 个提交」，诱导用户以为已是最新。
+  assert.ok(
+    !/behind\s*\?\?\s*0/.test(updateModalTsx),
+    'UpdateModal 用 behind ?? 0：数量未知会被抹成「落后 0 个提交」'
+  );
+  assert.ok(
+    /const behind:\s*number \| null\s*=\s*info\?\.behind \?\? null/.test(updateModalTsx),
+    'behind 未显式声明为 number | null：类型上丢掉了「未知」语义'
+  );
+  assert.ok(
+    /behind === null\s*\?\s*t\('update\.availableUnknownBehind'\)/.test(updateModalTsx),
+    'behind==null 时未渲染「数量未知」标题'
+  );
+  assert.ok(
+    /behind > 0\s*\?\s*t\('update\.availableWithBehind'/.test(updateModalTsx),
+    'behind>0 时未显示真实落后数'
+  );
+});
+
+test('前端更新链路不得再依赖 GitHub Release（本项目用 commit 比对发版）', () => {
+  // 旧实现点击更新是「打开 Release 发布页」。现改为 commit 比对 + 应用内自更新，
+  // 因此新前端代码里不得再残留 Release 路径。
+  for (const [name, src] of [
+    ['updateService.ts', updateServiceTs],
+    ['UpdateModal.tsx', updateModalTsx],
+    ['tauri.ts', tauriTs],
+  ]) {
+    assert.ok(!/releases\/latest/.test(src), `${name} 仍请求 releases/latest：Release 路径已废弃（改用 commit 比对）`);
+    assert.ok(!/release_url/.test(src), `${name} 仍引用 release_url：前端已不再消费它`);
+    assert.ok(!/tag_name/.test(src), `${name} 仍在解析 tag_name：语义已改为 commit sha 比对`);
+  }
+  // 更新走交接式脚本，不再开外部发布页：前端不得直调 shell.open
+  assert.ok(!/plugin-shell/.test(updateServiceTs), 'updateService 直调 shell.open：更新应走 apply_app_update');
+  assert.ok(!/plugin-shell/.test(updateModalTsx), 'UpdateModal 直调 shell.open：更新应走 apply_app_update');
+  // 新的应用内更新链路必须齐备
+  assert.ok(
+    /checkAppUpdate/.test(updateServiceTs) && /applyAppUpdate/.test(updateServiceTs),
+    'updateService 未封装 check/apply 更新命令（无法应用更新）'
+  );
+  assert.ok(
+    /'check_app_update'/.test(tauriTs) && /'apply_app_update'/.test(tauriTs),
+    'tauri.ts 未收口 check_app_update / apply_app_update 命令'
+  );
 });
 
 test('更新字段走 snake_case，与 Rust 序列化结果一致', () => {
@@ -634,31 +732,42 @@ test('更新字段走 snake_case，与 Rust 序列化结果一致', () => {
   assert.ok(/pub update_available: bool/.test(updateRs), 'Rust 侧应有 update_available 字段');
   assert.ok(/pub current_sha: String/.test(updateRs), 'Rust 侧应有 current_sha 字段');
   assert.ok(/pub target_sha: Option<String>/.test(updateRs), 'Rust 侧应有 target_sha 字段');
-  assert.ok(/info\.update_available/.test(updateJs), '前端必须读 snake_case 的 update_available');
-  assert.ok(!/info\.updateAvailable/.test(updateJs), '前端不得读 camelCase（会静默 undefined）');
-  assert.ok(/info\.current_sha/.test(updateJs), '前端必须读 snake_case 的 current_sha');
+  // 前端（UpdateModal）必须读 snake_case 的检测结果字段
+  assert.ok(/result\.update_available/.test(updateModalTsx), '前端必须读 snake_case 的 update_available');
+  assert.ok(!/result\.updateAvailable/.test(updateModalTsx), '前端不得读 camelCase（会静默 undefined）');
+  assert.ok(/result\.current_sha/.test(updateModalTsx), '前端必须读 snake_case 的 current_sha');
+  assert.ok(!/result\.currentSha/.test(updateModalTsx), '前端不得读 camelCase 的 currentSha');
+  // tauri.ts 的 UpdateCheckResult 类型必须与 Rust 序列化逐项对齐（snake_case）
+  assert.ok(/update_available: boolean/.test(tauriTs), 'tauri.ts 的 UpdateCheckResult 缺 update_available');
+  assert.ok(/current_sha: string/.test(tauriTs), 'tauri.ts 的 UpdateCheckResult 缺 current_sha');
+  assert.ok(/failure_kind: string/.test(tauriTs), 'tauri.ts 的 AppUpdateState 缺 failure_kind');
 });
 
-test('远端 commit 标题必须以 textContent 渲染（不得当 HTML 注入）', () => {
-  // commit summary 来自远端仓库，对本应用是不可信输入
-  const idx = updateJs.indexOf('update-group-list');
-  assert.ok(idx > -1, 'update-check.js 未渲染变更列表');
-  const body = updateJs.slice(idx, idx + 500);
+test('远端 commit 标题必须用文本节点渲染（不得当 HTML 注入）', () => {
+  // commit summary 来自远端仓库，对本应用是不可信输入。
+  // React 默认转义 JSX 插值，故变更条目必须以 {item} 文本节点渲染，
+  // 禁止 innerHTML / dangerouslySetInnerHTML（旧实现用 textContent 的同等语义）。
+  assert.ok(updateModalTsx.includes('update-group-list'), 'UpdateModal 未渲染变更列表');
   assert.ok(
-    /\.textContent\s*=\s*item/.test(body),
-    '变更条目未用 textContent 填充：远端 commit 标题可注入 HTML'
+    /<span>\{item\}<\/span>/.test(updateModalTsx),
+    '变更条目未用文本节点渲染：远端 commit 标题可注入 HTML'
   );
-  assert.ok(!/innerHTML/.test(updateJs), 'update-check.js 使用了 innerHTML');
+  assert.ok(!/dangerouslySetInnerHTML/.test(updateModalTsx), 'UpdateModal 使用了 dangerouslySetInnerHTML');
+  assert.ok(!/innerHTML/.test(updateModalTsx), 'UpdateModal 使用了 innerHTML');
 });
 
 test('changelog 分组过滤内部噪音类型且永不返回空列表', () => {
   // 工程内部事务（chore/ci/docs/test…）对用户无意义；全被过滤时要退化为占位而不是空弹窗
-  assert.ok(/HIDDEN_TYPES/.test(changelogJs), '缺少 HIDDEN_TYPES 过滤集');
+  assert.ok(/HIDDEN_TYPES/.test(changelogTs), '缺少 HIDDEN_TYPES 过滤集');
   for (const t of ['chore', 'ci', 'docs', 'test']) {
-    assert.ok(new RegExp(`'${t}'`).test(changelogJs), `HIDDEN_TYPES 未包含 ${t}`);
+    assert.ok(new RegExp(`'${t}'`).test(changelogTs), `HIDDEN_TYPES 未包含 ${t}`);
   }
-  assert.ok(/FALLBACK_GROUP/.test(changelogJs), '缺少兜底分组（全部被过滤会渲染空弹窗）');
-  assert.ok(/result\.length === 0/.test(changelogJs), '未对空结果做兜底判断');
+  assert.ok(/FALLBACK_GROUP/.test(changelogTs), '缺少兜底分组（全部被过滤会渲染空弹窗）');
+  assert.ok(/result\.length === 0/.test(changelogTs), '未对空结果做兜底判断');
+  assert.ok(
+    /export function buildCommitChangelog/.test(changelogTs) && /export function totalItems/.test(changelogTs),
+    'commitChangelog 未导出 buildCommitChangelog / totalItems（UpdateModal 无法渲染变更清单）'
+  );
 });
 
 test('更新脚本必须带 UTF-8 BOM（PS 5.1 无 BOM 按 GBK 读 → 解析即死）', () => {
@@ -714,7 +823,7 @@ test('更新流程包含 handoff-ready 握手以保护主程序不闪退（Fail-
   // 必须等待脚本上报 handoff-ready 信号后才 exit，超时则 Fail-Closed 保持主程序存活。
   assert.ok(/handoff-ready/.test(handoff), '更新脚本未产生 handoff-ready 握手信号');
   assert.ok(/handoff-ready/.test(updateRs), 'Rust update.rs 未检查 handoff-ready 信号');
-  assert.ok(/handoff-ready/.test(updateJs), '前端 update-check.js 未识别 handoff-ready 阶段');
+  assert.ok(/handoff-ready/.test(updateServiceTs), '前端 updateService 未识别 handoff-ready 阶段');
 
   // P0 契约更新（2026-09-20）：界面不可用时**回退**而非中止更新。
   // 旧契约要求 Start-ProgressWindow 在缺 ui.html / 缺浏览器时 exit 1（fail-closed）。
@@ -1133,25 +1242,30 @@ test('resume 进行中的更新前必须核实更新进程仍存活（防卡在�
   // 正解：让 Rust 侧核实 state.updater_pid 指向的进程是否还活着，前端只认它的结论。
   // 进程已死 ⇒ 更新不可能再推进 ⇒ 不接续进度视图。
 
-  // ① 前端必须改走 app_update_resume（而不是自己只看 phase 就 openOverlay）
-  const resumeStart = updateJs.indexOf('async function resumeInFlightUpdate');
-  assert.ok(resumeStart > 0, '未找到 resumeInFlightUpdate 定义');
-  const resumeBody = updateJs.slice(resumeStart, resumeStart + 2200)
+  // ① 前端必须改走 app_update_resume（而不是自己只看 phase 就 openOverlay）。
+  // 新实现：updateService.resumeInFlightUpdate 调用 app_update_resume；
+  // UpdateModal 的接续 effect 拿到可接续 state 后才切 applying 视图并发开窗通知。
+  const svcIdx = updateServiceTs.indexOf('export async function resumeInFlightUpdate');
+  assert.ok(svcIdx > 0, '未找到 resumeInFlightUpdate 定义');
+  const svcBody = updateServiceTs.slice(svcIdx, svcIdx + 900)
     .split('\n')
     .filter((line) => !line.trimStart().startsWith('//'))
     .join('\n');
   assert.ok(
-    /app_update_resume/.test(resumeBody),
+    /appUpdateResume\(\)/.test(svcBody),
     'resumeInFlightUpdate 未调用 app_update_resume：脚本已死时会弹「正在更新」且用户关不掉'
   );
-  // 必须「先问再开窗」——先 openOverlay 再问等于没问
-  const callIdx = resumeBody.indexOf('app_update_resume');
-  const openIdx = resumeBody.indexOf('openOverlay()');
-  assert.ok(openIdx > 0, 'resumeInFlightUpdate 未调用 openOverlay（提取逻辑或结构已变）');
   assert.ok(
-    callIdx < openIdx,
-    'resumeInFlightUpdate 先 openOverlay 再问存活：顺序反了，弹窗已经开了'
+    /RESUMABLE_PHASES/.test(svcBody),
+    'resumeInFlightUpdate 未用可接续阶段白名单过滤：终态会被当成「仍在推进」而接续弹窗'
   );
+  // 必须「先问再开窗」——先开窗再问等于没问
+  const resumeIdx = updateModalTsx.indexOf('await resumeInFlightUpdate()');
+  assert.ok(resumeIdx > 0, 'UpdateModal 接续 effect 未调用 resumeInFlightUpdate（提取逻辑或结构已变）');
+  const applyIdx = updateModalTsx.indexOf("setView('applying')", resumeIdx);
+  const openIdx = updateModalTsx.indexOf("'wb-open-update-modal'", resumeIdx);
+  assert.ok(applyIdx > resumeIdx, '接续 effect 未先问存活就切视图');
+  assert.ok(openIdx > applyIdx, '开窗通知必须在问完存活、切到 applying 视图之后发出');
 
   // ② Rust 侧必须真的实现这两个函数
   const code = stripRustComments(updateRs);
@@ -1206,9 +1320,9 @@ test('Rust 侧写入的每个 failureKind 都必须在前端 FAILURE_HINTS 里�
     '未从 Rust 源码提取到任何 failureKind 字面量：提取逻辑或写法已变（本测试会空过）'
   );
 
-  const hintsIdx = updateJs.indexOf('const FAILURE_HINTS');
+  const hintsIdx = updateServiceTs.indexOf('export const FAILURE_HINTS');
   assert.ok(hintsIdx > 0, '未找到 FAILURE_HINTS');
-  const hintsBlock = updateJs.slice(hintsIdx, updateJs.indexOf('};', hintsIdx) + 2);
+  const hintsBlock = updateServiceTs.slice(hintsIdx, updateServiceTs.indexOf('};', hintsIdx) + 2);
   const missing = [...produced].filter((k) => !new RegExp(`['"]?${k}['"]?\\s*:`).test(hintsBlock));
 
   assert.deepStrictEqual(
@@ -1220,38 +1334,31 @@ test('Rust 侧写入的每个 failureKind 都必须在前端 FAILURE_HINTS 里�
 
 test('「更新完成」状态必须恢复关闭按钮（否则弹窗关不掉）', () => {
   // 2026-09-20 用户实测：更新完成后自动拉起的应用弹出「更新完成」弹窗，无法关闭。
-  // 根因：showView('applying') 会隐藏关闭按钮（「正在更新」视图不允许关闭，设计如此），
-  // 但 done 分支只改标题、去掉转圈动画，**没有把关闭按钮恢复** —— 于是弹窗永久卡住。
-  // 这条对所有终态都适用：done 要能关，failed/rolled-back 由既有代码处理（也要能关）。
-  const doneIdx = updateJs.indexOf("phase === 'done'");
-  assert.ok(doneIdx > 0, "未找到 phase === 'done' 分支");
-  // ⚠️ 必须精确定位分支体（到该分支的 return 或收尾 `}` 为止）。
-  // 曾经用「固定 900 字符窗口」导致假阴性：删掉分支里的恢复代码后，窗口仍覆盖到
-  // 函数外的其它 update-close 代码，断言照样通过（变异验证当场抓到）。
-  const tail = updateJs.slice(doneIdx);
-  const tailLines = tail.split(/\r?\n/);
-  const endIdx = tailLines.findIndex((line, i) => i > 0 && /^\s*\}\s*$/.test(line));
-  assert.ok(endIdx > 0, 'done 分支体边界未定位到');
-  const doneBody = tailLines.slice(1, endIdx)
-    .filter((line) => !line.trimStart().startsWith('//'))
-    .join('\n');
-  // 反向自检：分支体必须短且确实只含 done 逻辑（防止边界失控使断言失效）
+  // 新实现：canClose 判据 = view !== 'applying' || applyingFailed || applyingTitle === t('update.applyDone')；
+  // 「正在更新」视图（未完成/未失败）不允许关闭，done/failed 后必须恢复。
   assert.ok(
-    doneBody.includes('更新完成') && doneBody.length < 700,
-    `done 分支体切片异常（长度 ${doneBody.length}）：边界定位不可信，后续断言等于没验证`
+    /const canClose\s*=\s*view !== 'applying'\s*\|\|\s*applyingFailed\s*\|\|\s*applyingTitle === t\('update\.applyDone'\)/.test(updateModalTsx),
+    'canClose 判据丢失：applying 视图必须禁止关闭，done/failed 必须恢复关闭按钮'
   );
-
+  // 关闭按钮按 canClose 条件渲染（不挂 hidden，而是直接不渲染）
   assert.ok(
-    /update-close/.test(doneBody),
-    'done 分支未恢复关闭按钮（#update-close 的 hidden 仍为 true）—— 用户无法关闭「更新完成」弹窗'
+    /\{\s*canClose &&\s*\(\s*\n?\s*<button/.test(updateModalTsx),
+    '关闭按钮未按 canClose 条件渲染'
   );
+  // 完成回调必须把标题置为「更新完成」，否则 canClose 永远打不开
   assert.ok(
-    /hidden\s*=\s*false/.test(doneBody),
-    'done 分支未把关闭按钮的 hidden 置为 false'
+    /setApplyingTitle\(t\('update\.applyDone'\)\)/.test(updateModalTsx),
+    'onDone 未把标题置为「更新完成」：用户无法关闭「更新完成」弹窗'
   );
+  // 完成态必须给明确提示（applyDoneHint），用户知道该做什么
   assert.ok(
-    /可关闭/.test(doneBody),
-    'done 分支未提示可关闭，用户不知道该点哪里'
+    /setApplyingHint\(t\('update\.applyDoneHint'\)\)/.test(updateModalTsx),
+    'done 分支未给出完成态提示（用户不知道该点哪里）'
+  );
+  // Escape 也必须经 handleClose（applying 期间同样禁关）
+  assert.ok(
+    /'Escape'/.test(updateModalTsx) && /handleClose/.test(updateModalTsx),
+    'Escape 关闭未接入 handleClose 的 canClose 门控'
   );
 });
 
