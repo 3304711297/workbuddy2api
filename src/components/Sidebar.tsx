@@ -5,7 +5,7 @@ import React, { useEffect, useState } from 'react';
 import {
   LayoutDashboard, Users, Bot, TerminalSquare, QrCode,
   Settings as SettingsIcon, ScrollText, BarChart3, Bug,
-  Sun, Moon, MonitorSmartphone,
+  Sun, Moon, MonitorSmartphone, Sparkles,
 } from 'lucide-react';
 import { useApp, TABS, type TabId } from '../state/ServiceProvider';
 import { useI18n } from '../i18n';
@@ -72,25 +72,32 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
 
   return (
     <aside className="sidebar">
-      <div className="brand">
-        <span className="brand-title">WorkBuddy2API</span>
-        <span className="brand-subtitle">
-          OpenAI / Anthropic{' '}
-          <small
-            id="app-ver"
-            title={t('app.versionTitle', { fp: buildFp })}
-            style={{ cursor: 'pointer' }}
-            onClick={handleVerClick}
-          >
-            v{appVer}{gitHash ? ` ${gitHash}` : ''}
-          </small>
-        </span>
+      <div className="sidebar-brand brand">
+        <div className="sidebar-brand-icon brand-logo">
+          <Sparkles size={22} />
+        </div>
+        <div className="sidebar-brand-info">
+          <span className="brand-title">WorkBuddy2API</span>
+          <span className="brand-subtitle">
+            OpenAI / Anthropic{' '}
+            <small
+              id="app-ver"
+              title={t('app.versionTitle', { fp: buildFp })}
+              style={{ cursor: 'pointer' }}
+              onClick={handleVerClick}
+            >
+              v{appVer}{gitHash ? ` ${gitHash}` : ''}
+            </small>
+          </span>
+        </div>
       </div>
 
-      <div className="side-status">
-        <span className={`dot ${running ? 'dot-running' : 'dot-stopped'}`} />
-        <span className="side-status-text">{running ? t('status.running') : t('status.stopped')}</span>
-        <div className="side-meta">
+      <div className="sidebar-status-card side-status">
+        <div className="status-indicator">
+          <span className={`dot ${running ? 'dot-running' : 'dot-stopped'}`} />
+          <span className="side-status-text">{running ? t('status.running') : t('status.stopped')}</span>
+        </div>
+        <div className="status-details side-meta">
           <span className="mono">:{port}</span>
           <span className="truncate">{running ? activeNickname : t('status.offline')}</span>
         </div>
@@ -116,35 +123,67 @@ export function Sidebar({ onOpenUpdate }: { onOpenUpdate: () => void }) {
         })}
       </nav>
 
-      <div className="theme-toggle" role="group" aria-label={t('theme.label')}>
-        <button
-          type="button"
-          className="theme-btn"
-          onClick={cycle}
-          title={t('theme.cycleTitle')}
-          aria-label={t('theme.cycleTitle')}
-        >
-          <ThemeIcon size={18} />
-        </button>
-        <span className="theme-name">{t(`theme.${theme}`)}</span>
-      </div>
+      <div className="sidebar-bottom">
+        <div className="sidebar-theme-selector" role="group" aria-label={t('theme.label')}>
+          <button
+            type="button"
+            className={`theme-btn-segment${theme === 'light' ? ' active' : ''}`}
+            onClick={() => applyTheme('light')}
+            title={t('theme.light')}
+            aria-label={t('theme.light')}
+          >
+            <Sun size={14} />
+          </button>
+          <button
+            type="button"
+            className={`theme-btn-segment${theme === 'dark' ? ' active' : ''}`}
+            onClick={() => applyTheme('dark')}
+            title={t('theme.dark')}
+            aria-label={t('theme.dark')}
+          >
+            <Moon size={14} />
+          </button>
+          <button
+            type="button"
+            className={`theme-btn-segment${theme === 'system' ? ' active' : ''}`}
+            onClick={() => applyTheme('system')}
+            title={t('theme.system')}
+            aria-label={t('theme.system')}
+          >
+            <MonitorSmartphone size={14} />
+          </button>
+        </div>
 
-      <div
-        id="update-entry"
-        className="update-entry"
-        role="button"
-        tabIndex={0}
-        title={t('update.check')}
-        onClick={onOpenUpdate}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onOpenUpdate();
-          }
-        }}
-      >
-        <span className="update-dot" hidden={!updateAvailable} />
-        <span>{t('update.check')}</span>
+        <div className="theme-toggle" role="group" aria-label={t('theme.label')}>
+          <button
+            type="button"
+            className="theme-btn"
+            onClick={cycle}
+            title={t('theme.cycleTitle')}
+            aria-label={t('theme.cycleTitle')}
+          >
+            <ThemeIcon size={16} />
+          </button>
+          <span className="theme-name">{t(`theme.${theme}`)}</span>
+        </div>
+
+        <div
+          id="update-entry"
+          className="update-entry"
+          role="button"
+          tabIndex={0}
+          title={t('update.check')}
+          onClick={onOpenUpdate}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onOpenUpdate();
+            }
+          }}
+        >
+          <span className="update-dot" hidden={!updateAvailable} />
+          <span>{t('update.check')}</span>
+        </div>
       </div>
     </aside>
   );

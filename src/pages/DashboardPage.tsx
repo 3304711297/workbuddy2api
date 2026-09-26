@@ -147,81 +147,76 @@ export function DashboardPage() {
 
   return (
     <div className="panel-page active">
-      <div className="dashboard-hero-grid">
-        {/* 左列：运行状态卡 */}
-        <div className="card status-card">
-          <div className="card-header-flex">
-            <div>
-              <h3 className="card-title">{t('dashboard.statusTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>
-                {t('dashboard.statusDesc')}
-              </p>
-            </div>
+      {/* 顶部状态条：4 个核心指标卡片 (对标 EasyCLIProxyAPI .status-strip) */}
+      <div className="status-strip">
+        <div className="status-card">
+          <div className="status-card-header">
+            <span>{t('dashboard.statusTitle')}</span>
             <div className={`state-pill ${running ? 'running' : 'stopped'}`}>
               <span className={`dot ${running ? 'dot-running' : 'dot-stopped'}`}></span>
               <span className={statusBadgeClass}>{statusBadgeText}</span>
             </div>
           </div>
-
-          <dl className="panel-detail-grid">
-            <div className="panel-detail-row">
-              <dt>{t('dashboard.port')}</dt>
-              <dd>
-                <span className="metric-value mono">{port}</span>
-              </dd>
-            </div>
-            <div className="panel-detail-row">
-              <dt>{t('dashboard.mode')}</dt>
-              <dd>
-                <span className="metric-value mono">
-                  {running ? t('dashboard.modeDirect') : t('dashboard.modeDetecting')}
-                </span>
-              </dd>
-            </div>
-            <div className="panel-detail-row">
-              <dt>{t('dashboard.desensitize')}</dt>
-              <dd>
-                <span className={`metric-value ${desensitize ? 'text-success' : ''}`}>
-                  {desensitize ? t('dashboard.desensitizeOn') : t('dashboard.desensitizeOff')}
-                </span>
-              </dd>
-            </div>
-            <div className="panel-detail-row">
-              <dt>{t('dashboard.activeAccount')}</dt>
-              <dd>
-                <span className="truncate font-medium">{activeNickname}</span>
-              </dd>
-            </div>
-          </dl>
-
-          <div className="divider"></div>
-          <div className="card-footer-info">
-            <span>
-              {t('dashboard.protocols')}
-              <strong className="badge badge-info">{protocolBadge}</strong>
-            </span>
-            <span className="muted">{healthTime}</span>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <button className="btn btn-primary btn-sm" onClick={() => setTab('oauth')}>
-              {t('dashboard.gotoOauth')}
-            </button>
+          <div className="status-card-value">:{port}</div>
+          <div className="status-card-desc">
+            {running ? t('dashboard.modeDirect') : t('dashboard.modeDetecting')}
           </div>
         </div>
 
-        {/* 右列：API 端点快速接入卡片组 */}
-        <div className="card">
-          <div className="card-header-flex">
-            <div>
-              <h3 className="card-title">{t('dashboard.endpointsTitle')}</h3>
-              <p className="card-desc" style={{ marginBottom: 0 }}>
-                {t('dashboard.endpointsDesc')}
-              </p>
-            </div>
+        <div className="status-card">
+          <div className="status-card-header">
+            <span>{t('dashboard.activeAccount')}</span>
+            <span className={`badge ${running ? 'badge-success' : 'badge-warn'}`}>
+              {running ? '在线' : '离线'}
+            </span>
           </div>
+          <div className="status-card-value truncate" style={{ fontSize: 16 }}>
+            {activeNickname}
+          </div>
+          <div className="status-card-desc">{healthTime}</div>
+        </div>
 
-          <div className="copy-input-group" style={{ marginTop: 4 }}>
+        <div className="status-card">
+          <div className="status-card-header">
+            <span>{t('dashboard.protocols')}</span>
+            <strong className="badge badge-info">{protocolBadge}</strong>
+          </div>
+          <div className="status-card-value">3 协议就绪</div>
+          <div className="status-card-desc">Chat / Messages / Responses</div>
+        </div>
+
+        <div className="status-card">
+          <div className="status-card-header">
+            <span>{t('dashboard.desensitize')}</span>
+            <span className={`badge ${desensitize ? 'badge-success' : 'badge-warn'}`}>
+              {desensitize ? t('dashboard.desensitizeOn') : t('dashboard.desensitizeOff')}
+            </span>
+          </div>
+          <div className="status-card-value" style={{ fontSize: 16 }}>
+            {desensitize ? '脱敏激活' : '未开启'}
+          </div>
+          <div className="status-card-desc">API Key 仅内存隔离流转</div>
+        </div>
+      </div>
+
+      {/* 本地接入端点面板 (对标 ECPA .panel) */}
+      <div className="panel client-api-panel">
+        <div className="panel-heading">
+          <div>
+            <h3 className="card-title" style={{ fontSize: 16, margin: 0 }}>
+              {t('dashboard.endpointsTitle')}
+            </h3>
+            <p className="card-desc" style={{ margin: '4px 0 0' }}>
+              {t('dashboard.endpointsDesc')}
+            </p>
+          </div>
+          <button className="btn btn-primary btn-sm" onClick={() => setTab('oauth')}>
+            {t('dashboard.gotoOauth')}
+          </button>
+        </div>
+
+        <div className="grid-2" style={{ marginBottom: 16 }}>
+          <div className="copy-input-group">
             <label className="field-label">Base URL</label>
             <div className="input-with-btn">
               <input className="input mono" type="text" readOnly value={baseUrl} />
@@ -230,47 +225,50 @@ export function DashboardPage() {
               </button>
             </div>
           </div>
-          <div className="copy-input-group" style={{ marginTop: 10 }}>
+          <div className="copy-input-group">
             <label className="field-label">{t('dashboard.apiKey')}</label>
             <div className="input-with-btn">
-              {/* 字面量占位符：客户端鉴权密钥以 'local' 直连即可 */}
               <input className="input mono" type="text" readOnly value="local" />
               <button className="btn btn-sm btn-copy" onClick={() => void handleCopy('local')}>
                 {t('dashboard.copy')}
               </button>
             </div>
           </div>
+        </div>
 
-          <div className="endpoint-grid">
-            {PROTOCOLS.map((p) => {
-              const fullUrl = `${baseUrl}${p.path}`;
-              return (
-                <div className="endpoint-card" key={p.id}>
-                  <div className="endpoint-header">
-                    <span className="endpoint-title">{t(p.labelKey)}</span>
-                    <span className="endpoint-tag">POST</span>
-                  </div>
-                  <div className="endpoint-path">{fullUrl}</div>
-                  <button
-                    className="btn btn-sm btn-secondary"
-                    style={{ width: '100%', fontSize: 11 }}
-                    onClick={() => void handleCopy(fullUrl)}
-                  >
-                    {t('dashboard.copyFullEndpoint')}
-                  </button>
+        <div className="endpoint-grid">
+          {PROTOCOLS.map((p) => {
+            const fullUrl = `${baseUrl}${p.path}`;
+            return (
+              <div className="endpoint-card" key={p.id}>
+                <div className="endpoint-header">
+                  <span className="endpoint-title">{t(p.labelKey)}</span>
+                  <span className="endpoint-tag">POST</span>
                 </div>
-              );
-            })}
-          </div>
+                <div className="endpoint-path">{fullUrl}</div>
+                <button
+                  className="btn btn-sm btn-secondary"
+                  style={{ width: '100%', fontSize: 11 }}
+                  onClick={() => void handleCopy(fullUrl)}
+                >
+                  {t('dashboard.copyFullEndpoint')}
+                </button>
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* 连通性实时测试卡片 */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header-flex">
+      {/* 连通性实时测试卡片 (对标 ECPA .panel) */}
+      <div className="panel diagnostic-test-panel">
+        <div className="panel-heading">
           <div>
-            <h3 className="card-title">{t('dashboard.testTitle')}</h3>
-            <p className="card-desc">{t('dashboard.testDesc')}</p>
+            <h3 className="card-title" style={{ fontSize: 16, margin: 0 }}>
+              {t('dashboard.testTitle')}
+            </h3>
+            <p className="card-desc" style={{ margin: '4px 0 0' }}>
+              {t('dashboard.testDesc')}
+            </p>
           </div>
           <div className="actions" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <select
@@ -288,7 +286,7 @@ export function DashboardPage() {
               ))}
             </select>
             <button
-              className="btn btn-secondary"
+              className="btn btn-primary"
               onClick={() => void runTest()}
               disabled={result.phase === 'running'}
             >

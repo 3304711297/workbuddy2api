@@ -33,11 +33,11 @@ export function App() {
   }, []);
 
   return (
-    <div className="app-layout">
+    <div className="app-shell app-layout">
       <Sidebar onOpenUpdate={openUpdate} />
-      <main className="main-content">
+      <div className="workspace main-content">
         <Header />
-        <div className="page-container">
+        <main className="content page-container">
           {tab === 'dashboard' && <DashboardPage />}
           {tab === 'accounts' && <AccountsPage />}
           {tab === 'agents' && <AgentsPage />}
@@ -47,8 +47,8 @@ export function App() {
           {tab === 'logs' && <LogsPage />}
           {tab === 'usage' && <UsagePage />}
           {tab === 'debug' && <DebugPage />}
-        </div>
-      </main>
+        </main>
+      </div>
       <UpdateModal open={updateOpen} onClose={closeUpdate} />
     </div>
   );
