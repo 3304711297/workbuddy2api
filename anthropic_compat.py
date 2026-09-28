@@ -42,6 +42,9 @@ _CLIENT_USAGE_HINT_RES = [
     re.compile(_TOTAL_TOKENS_COUNTDOWN, re.IGNORECASE),
 ]
 
+# 采纳自 orangeboyChen/codebuddy2api #196：Claude Code 在无内容用户轮次时的同款回退占位符
+EMPTY_USER_TURN_CONTENT = "(no content)"
+
 
 def _strip_client_usage_hints(text: str) -> str:
     """剥离 Claude Code 注入的客户端用量提示，返回剥离后的文本。
@@ -285,11 +288,11 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                 if user_blocks:
                     has_images = any(b.get("type") == "image" for b in user_blocks)
                     if not has_images:
-                        texts = [_strip_client_usage_hints(b.get("text", ""))
-                                 for b in user_blocks if b.get("type") == "text"]
+                        raw_texts = [b.get("text", "") for b in user_blocks if b.get("type") == "text"]
+                        texts = [_strip_client_usage_hints(t) for t in raw_texts]
                         joined = "\n".join(t for t in texts if t.strip())
                         # 整条只是客户端用量提示 → 丢弃这条元消息，不留空 user
-                        if joined.strip() or all(not t.strip() for t in texts):
+                        if joined.strip() or all(not raw_t.strip() for raw_t in raw_texts):
                             openai_msgs.append({"role": "user", "content": joined})
                     else:
                         parts = [_translate_content_part(b) for b in user_blocks]
@@ -307,6 +310,17 @@ def _translate_anthropic_messages(messages: List[dict]) -> List[dict]:
                 sys_text = _extract_system_prompt(content)
                 if sys_text:
                     openai_msgs.append({"role": "system", "content": sys_text})
+
+    # 采纳自 orangeboyChen/codebuddy2api #196：
+    # 客户端在会话尾部追加的用量提示/账目元消息（如 Claude Code 的 total_tokens 倒计时）
+    # 剥离后若整条被丢弃，若原输入末尾是 user 轮次，会导致发往上游的消息列表以 assistant 结尾。
+    # 上游会将其误读为 assistant prefill（续写前文回答），导致模型复读或偏离对话。
+    # 因此若原始消息末尾是 user，但转换后末尾不是 user/tool（以 assistant 结尾或全空），
+    # 必须补回带有 Claude Code 兜底占位符 "(no content)" 的 user 轮次；
+    # 客户端刻意发送的 assistant prefill 则原样保留。
+    if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "user":
+        if not openai_msgs or openai_msgs[-1].get("role") not in ("user", "tool"):
+            openai_msgs.append({"role": "user", "content": EMPTY_USER_TURN_CONTENT})
 
     return openai_msgs
 

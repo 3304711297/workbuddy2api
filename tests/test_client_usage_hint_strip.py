@@ -180,3 +180,72 @@ def test_attribution_and_hint_stripped_together():
     assert "billing-header" not in sys_msg["content"]
     assert "total_tokens>" not in sys_msg["content"]
     assert "You are helpful." in sys_msg["content"]
+
+
+# ───────────────────── ④ 尾部保护：末尾 user 轮次剥离后不得使请求落到 assistant ─────────────────────
+
+def test_trailing_user_turn_kept_when_hint_stripped_after_assistant():
+    """采纳自 orangeboyChen/codebuddy2api #196：
+    尾部仅含用量提示的 user 轮次剥离后，必须兜底保留 (no content) user 轮次，
+    防止整体请求以 assistant 结尾被上游误当 prefill 续写。
+    """
+    msgs = _messages([
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "the previous answer"},
+        {"role": "user", "content": "<total_tokens>15000000 tokens left</total_tokens>"},
+    ])
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+    assert msgs[-1]["content"] == anthropic_compat.EMPTY_USER_TURN_CONTENT
+    assert "total_tokens>" not in json.dumps(msgs, ensure_ascii=False)
+
+
+def test_trailing_user_turn_kept_when_block_hint_stripped_after_assistant():
+    """content 为 blocks 结构且仅含用量提示时，尾部同样保留 (no content) user 轮次。"""
+    msgs = _messages([
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "the previous answer"},
+        {"role": "user", "content": [{"type": "text", "text": "<total_tokens>15000000 tokens left</total_tokens>"}]},
+    ])
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+    assert msgs[-1]["content"] == anthropic_compat.EMPTY_USER_TURN_CONTENT
+
+
+def test_trailing_user_turn_only_hint_in_whole_conversation():
+    """全会话仅有一条 user 用量提示时，不输出空数组，保留兜底 (no content) user 轮次。"""
+    msgs = _messages([
+        {"role": "user", "content": "<total_tokens>15000000 tokens left</total_tokens>"},
+    ])
+    assert [m["role"] for m in msgs] == ["user"]
+    assert msgs[-1]["content"] == anthropic_compat.EMPTY_USER_TURN_CONTENT
+
+
+def test_assistant_prefill_at_end_is_preserved_as_prefill():
+    """客户端故意发送的 assistant prefill（以 assistant 结尾）原样保留，不得误追加 user 轮次。"""
+    msgs = _messages([
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "I will answer: "},
+    ])
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[-1]["content"] == "I will answer:"
+
+
+def test_mid_conversation_user_meta_message_still_dropped():
+    """会话中间的 user 用量提示依旧整条丢弃，不注入无意义的 (no content)。"""
+    msgs = _messages([
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "<total_tokens>15000000 tokens left</total_tokens>"},
+        {"role": "user", "content": "second"},
+    ])
+    assert [m["role"] for m in msgs] == ["user", "user"]
+    assert [m["content"] for m in msgs] == ["first", "second"]
+
+
+def test_trailing_tool_result_turn_not_clobbered():
+    """尾部是 tool_result（生成 role: tool）时已是有效应答输入，不得追加 (no content)。"""
+    msgs = _messages([
+        {"role": "user", "content": "call tool"},
+        {"role": "assistant", "content": "calling", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test", "arguments": "{}"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]},
+    ])
+    assert msgs[-1]["role"] == "tool"
+
