@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-29",
+  "updated_at": "2026-09-30",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -43,10 +43,10 @@
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "30a3e5ee",
-      "last_synced_sha": "30a3e5eee18c161fe6f39d9938f8783576da13da",
+      "last_synced_commit": "35c5ae9c",
+      "last_synced_sha": "35c5ae9c1236154d5ddcc449832c90e97b7fa2ff",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 1e23c2b2→30a3e5ee（含 PR #65、#69、#70、#71、#72 及 v1.11.10-panel 等 17 项提交）：涉及调度器槽位分段睡眠防系统待机/睡眠冻结定时器、积分扣除历史与模型倍率展示、面板模型限流与解封倒计时、请求指标脱敏归档、Go 账号池多模块 bug 修复（NoteModelCost、PickByUID、14017 softCooldown、SanitizeFingerprints atomic.Bool、parseRetryNumber 上限校验、desktop SSE 偏移推进）、签到/余额瞬时错误重试，以及声明文档更新。**未采纳**：本仓为 Windows 桌面端应用，无 Go 定时调度器睡眠冻结问题；14017 账号态故障短冷却与换号在本仓 converter.py 中早已由单测与契约锁定；本仓不维护 Web 控制台成长任务自动化。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 30a3e5ee→35c5ae9c（包含 d9edc067、230140e0 及 PR #79、#80）：针对小程序对话任务 accept 后回读真实 target 修复误领；针对上游对 tools[].function.parameters 校验严格导致 pattern 含非标转义 \\_ 时报 400（11129 invalid_function_call_parameters）引入 normalizeToolPatterns 递归归一化（\\_ → _）。**未采纳**：本仓不维护 Web 控制台成长任务自动化；本仓直连客户端为 Hermes / Claude Code / Codex CLI，工具参数定义标准，且 ZCode 已于 09-09 彻底退役，暂无工具 pattern 携带 \\_ 触发 11129 拒收之实案，保持透传架构优先。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -70,10 +70,10 @@
       "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
       "repo": "ShouZhuo0413/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "bdda19fd",
-      "last_synced_sha": "bdda19fd5ec5e81b2469a6bdcd92be75beabcbe7",
+      "last_synced_commit": "a85becd7",
+      "last_synced_sha": "a85becd7773a012591c129f4d80e38e1d9068acf",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议双向转换与流式语义状态机；本轮吸收其「流被截断不得报成功」的 validate_stream_end 思路）",
-      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 94aee8bf→bdda19fd（含 PR #21 与 commit bdda19fd）：PR #21 优化 Responses 流式转换、会话账号绑定、系统身份过滤（剥离客户端身份）、图片历史转换（input_image 与 Anthropic Messages 提取并转 Chat image_url）；commit bdda19fd 针对 WorkBuddy 5.6.0 引入 $wbEncrypted AES-256-GCM 凭证信封解密支持。**未采纳**：本仓已原生支持完整的 input_image 多模态输入、自动异步下载远程图片内联为 Data-URI 及 SSRF 防护；身份脱敏已由 desensitize.py 统一管理；本仓凭证真源收敛于 accounts.json 与桌面未加密会话，无 macOS/Electron 未解密凭据读取需求，无需引入额外加解密依赖。"
+      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 bdda19fd→a85becd7（包含 PR #22 commit fa5002e9 与 commit a85becd7）：PR #22 将 find_auth_file 从文件名排序改为按 mtime 最新排序以防止读取过期的旧 .info 凭据文件；commit a85becd7 锁定依赖版本以实现确定性构建。**未采纳**：本仓 find_auth_file() 早已明确锁定优先级：优先读取桌面端同步维护的 workbuddy-desktop.info，且多账号架构统一以 accounts.json 为真源，无文件名排序读取陈旧 .info 问题；构建依赖已由 package.json/Cargo.lock/pyproject 严格锁定。"
     },
     "wb2api-upstream-ardeyou": {
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
@@ -160,10 +160,10 @@
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "d12f55a3",
-      "last_synced_sha": "d12f55a312f767b7e798859c9449227c504f45df",
+      "last_synced_commit": "39bd7567",
+      "last_synced_sha": "39bd7567ad330fe6d58282a2f2ee2be44ee9a19e",
       "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；吸收其 #194 /v1/messages 内部 system 角色保真与 #178 用量提示剥离规则；吸收其 #196 尾部 user 轮次剥离后 (no content) 占位兜底防 assistant prefill 误判）",
-      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 2b183871→d12f55a3（包含 PR #216~#239 等 49 项提交，发布 v1.4.0）：大量改动集中于 Electron 桌面壳重构、macOS 托盘/菜单图标与打包流水线、设备浏览器扫码/授权登录；协议层 PR #230（b87ac964）修复 Responses 流式事件内存上限，去除 response.output_text.done 中冗余的 item 字段并为 reasoning 流增加尺寸上限。**未采纳**：本仓 responses_compat.py 的 response.output_text.done 原生即严格符合 OpenAI 规范（不含冗余 item，item 仅在 output_item.done 下发）；且本仓桌面端基于轻量 Tauri v2 + 原生微前端，与 Electron 技术栈正交，无采纳需求。"
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 d12f55a3→39bd7567（包含 8beb5bfc、49cd4ee4、1d0051eb、f9e03a88、39bd7567 及 PR #272~#276，发布 v1.4.1/v1.4.2）：全部改动集中于 Electron 桌面端开发环境拉起外壳修正、控制台打开前二次确认部署状态、CI 桌面构建路径修复，以及发版流水线版本号 bump。**未采纳**：与协议内核及网关功能无关，本仓基于轻量 Tauri v2 桌面架构，无 Electron 专有缺陷，无需采纳。"
     },
     "wb2api-upstream-hanhan": {
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
