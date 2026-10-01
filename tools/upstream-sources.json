@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-09-30",
+  "updated_at": "2026-10-01",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -43,10 +43,10 @@
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "35c5ae9c",
-      "last_synced_sha": "35c5ae9c1236154d5ddcc449832c90e97b7fa2ff",
+      "last_synced_commit": "1b6abaa0",
+      "last_synced_sha": "1b6abaa0cce4a960749494cad56d67fe87a6ee1f",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 30a3e5ee→35c5ae9c（包含 d9edc067、230140e0 及 PR #79、#80）：针对小程序对话任务 accept 后回读真实 target 修复误领；针对上游对 tools[].function.parameters 校验严格导致 pattern 含非标转义 \\_ 时报 400（11129 invalid_function_call_parameters）引入 normalizeToolPatterns 递归归一化（\\_ → _）。**未采纳**：本仓不维护 Web 控制台成长任务自动化；本仓直连客户端为 Hermes / Claude Code / Codex CLI，工具参数定义标准，且 ZCode 已于 09-09 彻底退役，暂无工具 pattern 携带 \\_ 触发 11129 拒收之实案，保持透传架构优先。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 35c5ae9c→1b6abaa0（包含 PR #82、PR #83、PR #87、PR #90、PR #91、issue #92、issue #94 及 1.11.11-panel 版本 bump，涵盖 4b944440、d19add41、981bbe2d、39af6b7f、b98fb4f7、a4557dc2、47112c73、5e0adb33、f1496d0a、1b6abaa0 等 15 项提交）：1. PR #82 虚拟实例权重分配快过期账号：本仓已有更严谨的凭据就绪门禁 + 日粒度到期分层（expire_priority）打散，无需虚拟 slot；2. PR #83/PR #90 积分保底 credit_floor 与目录倍率预热兜底：防止触底号接收费模型被打穿后导致免费模型一同 402，该机制依赖常驻多租户集中式账号池和每笔请求余额本地插值/轮询账本，本仓为个人轻量桌面网关，多账号以故障转移为主，不维护复杂账本状态机；3. PR #87 用量页重构与来源 IP/UA 查询：属其 Web 控制台专有，本仓采用原生桌面 GUI；4. PR #91 国际版活跃上报放开：本仓不做自动化打卡脚本以规避风控；5. Issue #92 前缀缓存命中率：本仓在 usage.jsonl 与契约测试中早已深度落地；6. Issue #94 刷新时同步昵称：本仓凭证真源由桌面端同步维护，无需调用 Web 资料接口。**全部不吸收**。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -124,10 +124,10 @@
       "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
       "repo": "Practice019/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "1f2a7a9a",
-      "last_synced_sha": "1f2a7a9ab09b5f5c723d7a43bc8e6d1e8d0f4b0c",
+      "last_synced_commit": "3da3d767",
+      "last_synced_sha": "3da3d767509f2badab2d4d0100ab1b20e0d479e7",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 ca8d66f3→1f2a7a9a（共 5 项提交）：改动为 Go 账号池导入/OAuth 凭据投影（poolAuthsFromCreds 解决 secret 渠道凭证丢失）与全池一键完成任务受限并发及跳过已知无法自动化任务（Expert_Philanthropy 等）。**无需采纳**：本仓专注于纯反代与桌面 GUI 架构，不维护成长任务/签到打卡自动化脚本；本仓多账号池凭证由原生 AccountRotator 维护，无 Go 内部结构体投影丢失问题。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 1f2a7a9a→3da3d767（共 47 项提交，发布 v1.7.0）：1. 引入 Cline、Raccoon Work、LobsterAI、Qoder（含 WASM 推理桥接与加密信封解包）等多第三方 AI 助手，并随之抽象中立模型目录类型与移除 upstream 私有 SDK 依赖，后删除 mimo 和 buddy：架构定位严重不符，本仓专注 WorkBuddy 本地网关，不引入非 WorkBuddy 厂商及 WASM 运行时重量级依赖；2. 补齐 X-Product-Code 与按模型族分档出站 UA：本仓已按 domain 区分国内与国际版官方客户端 UA，且针对标准请求头均能正常服务与统计，无需增加额外未经验证的 header；3. 统一寿命 50% 自动续期：本仓在 token_refresher.py 中已具备更可靠的绝对阈值巡检守护（_threshold_seconds）与请求时自动刷新；4. 98 个文件 gofmt 与 wazero 依赖调整：纯 Go 格式化与依赖标注，本仓为 Python+Tauri 架构。**全部无需采纳**。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
@@ -160,10 +160,10 @@
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "39bd7567",
-      "last_synced_sha": "39bd7567ad330fe6d58282a2f2ee2be44ee9a19e",
+      "last_synced_commit": "1b69cde6",
+      "last_synced_sha": "1b69cde6471675562c8cfd772dbd48242aee605a",
       "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；吸收其 #194 /v1/messages 内部 system 角色保真与 #178 用量提示剥离规则；吸收其 #196 尾部 user 轮次剥离后 (no content) 占位兜底防 assistant prefill 误判）",
-      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 d12f55a3→39bd7567（包含 8beb5bfc、49cd4ee4、1d0051eb、f9e03a88、39bd7567 及 PR #272~#276，发布 v1.4.1/v1.4.2）：全部改动集中于 Electron 桌面端开发环境拉起外壳修正、控制台打开前二次确认部署状态、CI 桌面构建路径修复，以及发版流水线版本号 bump。**未采纳**：与协议内核及网关功能无关，本仓基于轻量 Tauri v2 桌面架构，无 Electron 专有缺陷，无需采纳。"
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 39bd7567→1b69cde6（PR #278，commit 1b69cde6）：仅精简 README.md 中 Desktop App 说明段落并添加 release 下载链接，纯文档改动，零代码变动。**无需采纳**。"
     },
     "wb2api-upstream-hanhan": {
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
