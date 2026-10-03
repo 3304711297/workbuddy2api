@@ -18,7 +18,83 @@
   原生直连驱动 <b>Codex CLI</b>、<b>Claude Code CLI</b>、<b>Hermes Agent</b>、<b>Cline</b>、<b>Roo Code</b>、<b>Cherry Studio</b> 等各类主流 Coding Agent 与开发工具！
 </p>
 
+<p align="center">
+  <i>A standalone Tauri v2 desktop console & local tri-protocol API gateway converting Tencent WorkBuddy / CodeBuddy subscriptions into standard OpenAI Chat, Anthropic Messages, and OpenAI Responses endpoints.</i>
+</p>
+
+<p align="center">
+  <a href="#-30-秒极速上手-quick-start"><b>⚡ 30 秒极速上手</b></a> •
+  <a href="#-安全隐私与信任声明-security--privacy"><b>🛡️ 安全与隐私边界</b></a> •
+  <a href="#-界面与交互亮点-ui-preview"><b>🖥️ 界面预览</b></a> •
+  <a href="#-核心特性"><b>✨ 核心特性</b></a> •
+  <a href="#-核心接口与协议速查"><b>🌐 接口速查</b></a> •
+  <a href="#-english-overview"><b>📖 English Summary</b></a>
+</p>
+
 </div>
+
+---
+
+## ⚡ 30 秒极速上手 (Quick Start)
+
+本地服务默认监听 `http://127.0.0.1:8787`，启动应用后即可在各大开发工具与 CLI 中即配即用：
+
+### 1. Claude Code CLI 官方直连
+```bash
+# macOS / Linux / Git Bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
+export ANTHROPIC_API_KEY="local"
+claude
+
+# Windows PowerShell
+$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
+$env:ANTHROPIC_API_KEY="local"
+claude
+```
+
+### 2. Codex CLI (Responses 原生协议直连)
+在 `~/.codex/config.toml` 中配置：
+```toml
+model = "deepseek-v3"
+wire_api = "responses"
+base_url = "http://127.0.0.1:8787/v1"
+```
+
+### 3. OpenAI 兼容客户端 (Hermes Agent / Cherry Studio / Cline / NextChat)
+* **Base URL / 接口地址**：`http://127.0.0.1:8787/v1`
+* **API Key / 鉴权密钥**：`local`（若在控制台设置了自定义密钥，请填写真实密钥）
+* **支持模型**：动态获取当前账号全部可用模型（如 `deepseek-v3`, `deepseek-r1`, `claude-3-5-sonnet` 等）
+
+---
+
+## 🛡️ 安全、隐私与信任声明 (Security & Privacy)
+
+面对逆向网关类工具，**凭据安全与隐私边界是第一生命线**：
+
+1. 🔒 **100% 本地运行与存储，绝无云端中转**：
+   * 所有授权 Token、Cookie 与会话凭据仅持久化保存在用户本机操作系统目录（`%LOCALAPPDATA%/workbuddy2api/accounts.json`）。
+   * 绝不存在任何第三方中转代理、遥测上报或远程鉴权服务器，流量 100% 仅在「本机 ↔ 腾讯官方 Copilot 服务」之间发生。
+2. 🛡️ **严格回环绑定与防跨站盗用守卫**：
+   * 默认严格监听 `127.0.0.1`，拒绝公网暴露。
+   * 内建 **Host + Origin 双校验守卫中间件**，彻底防御恶意外网网页发起的跨站请求（CSRF）与 DNS Rebinding 盗刷额度；开启局域网共享时**强制要求 CSPRNG 32 位鉴权密钥**，无密钥拒绝启动。
+3. 🔍 **日志与调试快照全自动脱敏**：
+   * 结构化日志与 API 调试快照中，所有请求的 Token、Session 和密钥均经过自动掩码处理（自动替换为 `***`）。
+   * 明文 Payload（完整 Prompt / 响应正文）落盘默认**永久关闭**，开启需 Trace 级别与安全确认双重闸门。
+4. 📜 **纯粹的 MIT 宽松开源协议**：
+   * 源代码完全开放，架构解耦且包含覆盖三端的 900+ 项自动化契约测试，行为清晰透明，无任何恶意后门。
+
+---
+
+## 🖥️ 界面与交互亮点 (UI Preview)
+
+> 💡 **提示**：控制台采用现代极客深色设计（Dark Geek IDE Aesthetic），配备呼吸状态灯、微高光立体卡片与原生 SVG 动态数据图表。
+
+| 模块 | 视觉与能力亮点 |
+| :--- | :--- |
+| **资产与多账号看板** | 实时逆向官方计量接口，呈现真实积分余额、资源包到期进度条与 **「🌙 夜间限免中」** 动态感知徽章 |
+| **多账号调度矩阵** | 支持 **按到期日分层调度**（先烧快过期的额度）、Failover（遇 429 毫秒级静默切号重试）与轮询负载均衡 |
+| **原生用量分析下钻** | 4h / 24h / 今日 / 7d 多档时间切片，零外部依赖手写 SVG 趋势图，支持按模型、时延与成败全链路下钻 |
+| **内置 API 调试台** | 最近 200 条请求快照下钻回溯，支持一键参数回填重放与脱敏 curl 命令复制导出 |
 
 ---
 
@@ -307,6 +383,31 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
      setx WORKBUDDY_TURING_SDK_DIR "D:\workbuddy"
      ```
      设置后新启动的进程生效；SDK 校验仍会验证入口文件与特征，仅放宽"用户显式信任"的路径来源。
+
+---
+
+## 📖 English Overview
+
+**WorkBuddy2API** is a high-craft local API gateway and desktop console (powered by Tauri v2) that converts Tencent WorkBuddy / CodeBuddy subscriptions into standard AI interfaces.
+
+### Key Highlights
+- **Tri-Protocol Support**: Seamlessly translates upstream endpoints into standard **OpenAI Chat** (`/v1/chat/completions`), **Anthropic Messages** (`/v1/messages`), and **OpenAI Responses** (`/v1/responses`).
+- **Direct Agent Integration**: Natively drives **Claude Code CLI**, **Codex CLI**, **Hermes Agent**, **Cline**, **Roo Code**, and other coding assistants with streaming SSE, reasoning tokens, and tool-call auto-healing.
+- **Zero Official Client Dependency**: Standalone browser OAuth polling flow allows logging in without having the official desktop client installed.
+- **Intelligent Multi-Account Scheduler**: Tiered scheduling prioritizing earliest-expiring tokens, automatic failover on 429/6004 limits, and round-robin load distribution.
+- **Strict Local Security**: 100% offline local credential storage (`%LOCALAPPDATA%/workbuddy2api`), Origin & Host CSRF/DNS-rebinding guards, and CSPRNG-generated Bearer key support.
+- **Zero-Dependency Observability**: Native SVG usage charts, token rate-limit countdown monitors, and built-in interactive API replay console.
+
+### Quick Start
+```bash
+# Claude Code CLI
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
+export ANTHROPIC_API_KEY="local"
+claude
+
+# OpenAI Compatible (Base URL)
+http://127.0.0.1:8787/v1
+```
 
 ---
 
