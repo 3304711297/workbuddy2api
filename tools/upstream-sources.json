@@ -73,7 +73,7 @@
       "last_synced_commit": "a85becd7",
       "last_synced_sha": "a85becd7773a012591c129f4d80e38e1d9068acf",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议双向转换与流式语义状态机；本轮吸收其「流被截断不得报成功」的 validate_stream_end 思路）",
-      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 bdda19fd→a85becd7（包含 PR #22 commit fa5002e9 与 commit a85becd7）：PR #22 将 find_auth_file 从文件名排序改为按 mtime 最新排序以防止读取过期的旧 .info 凭据文件；commit a85becd7 锁定依赖版本以实现确定性构建。**未采纳**：本仓 find_auth_file() 早已明确锁定优先级：优先读取桌面端同步维护的 workbuddy-desktop.info，且多账号架构统一以 accounts.json 为真源，无文件名排序读取陈旧 .info 问题；构建依赖已由 package.json/Cargo.lock/pyproject 严格锁定。"
+      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 bdda19fd→a85becd7（包含 PR #22 commit fa5002e9 与 PR #28 commit a85becd7 / ce26dfdf）：PR #22 将 find_auth_file 从文件名排序改为按 mtime 最新排序以防止读取过期的旧 .info 凭据文件；PR #28 锁定依赖版本（requirements.lock.txt）以实现确定性构建。**未采纳**：本仓 find_auth_file() 早已明确锁定优先级：优先读取桌面端同步维护的 workbuddy-desktop.info，且多账号架构统一以 accounts.json 为真源，无文件名排序读取陈旧 .info 问题；构建依赖已由 package.json/Cargo.lock/pyproject 严格锁定。"
     },
     "wb2api-upstream-ardeyou": {
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
