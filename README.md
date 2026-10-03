@@ -24,11 +24,11 @@
 
 <p align="center">
   <a href="#-30-秒极速上手-quick-start"><b>⚡ 30 秒极速上手</b></a> •
-  <a href="#-安全隐私与信任声明-security--privacy"><b>🛡️ 安全与隐私边界</b></a> •
   <a href="#-界面与交互亮点-ui-preview"><b>🖥️ 界面预览</b></a> •
-  <a href="#-核心特性"><b>✨ 核心特性</b></a> •
+  <a href="#-核心特性矩阵"><b>✨ 核心特性</b></a> •
+  <a href="#-安全隐私与信任声明-security--privacy"><b>🛡️ 安全与信任</b></a> •
   <a href="#-核心接口与协议速查"><b>🌐 接口速查</b></a> •
-  <a href="#-english-overview"><b>📖 English Summary</b></a>
+  <a href="#-english-overview"><b>📖 English</b></a>
 </p>
 
 </div>
@@ -83,6 +83,18 @@ base_url = "http://127.0.0.1:8787/v1"
 4. 📜 **纯粹的 MIT 宽松开源协议**：
    * 源代码完全开放，架构解耦且包含覆盖三端的 900+ 项自动化契约测试，行为清晰透明，无任何恶意后门。
 
+<details>
+<summary><b>⚙️ 查看 Turing Shield SDK 与高级运行环境加固机制</b></summary>
+
+* **WSL 宿主凭据穿透**：在 Linux / WSL 环境下运行时，自动探测并挂载 Windows 宿主已登录的桌面端凭据与多账号配置，免参数无感工作。
+* **流式 tool_calls 损坏防御**：针对上游在 `stream=true` 且模型生成 `tool_calls` 时偶发分片损坏的问题，内核内建聚合校验与自动损坏重试，避免 Agent 死循环。
+* **Turing Shield SDK 搜索范围**：
+  1. 环境变量 `WORKBUDDY_TURING_SDK_DIR`（用户显式指定，最高优先级）；
+  2. 系统用户目录（`%LOCALAPPDATA%`, `%APPDATA%`, `%ProgramFiles%` 等）下的官方安装目录（严格特征校验：`index.cjs` + 原生模块与 turing 标识）；
+  3. **磁盘根目录（如 `D:\WorkBuddy`）默认不扫描**（防恶意伪造 SDK 注入）。非常规路径请使用 `setx WORKBUDDY_TURING_SDK_DIR "D:\workbuddy"` 显式放行。
+
+</details>
+
 ---
 
 ## 🖥️ 界面与交互亮点 (UI Preview)
@@ -98,46 +110,30 @@ base_url = "http://127.0.0.1:8787/v1"
 
 ---
 
-## ✨ 核心特性
+## ✨ 核心特性矩阵
 
-- 🔄 **原生三协议网关支持 (Tri-Protocol Gateway)**：
-  - **OpenAI Responses 协议 (`POST /v1/responses`)**：采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机），原生支持 **Codex CLI**（wire_api="responses"）、OpenCode 等长上下文 Agent，支持流式语义事件与非流式响应；SSE 事件完整携带 `sequence_number` / `response_id` / `item_id` 规范字段；原生支持 `input_image` 多模态输入（自动内联为 data URI）。内建可选 **Codex 长上下文最小语义闭包投影压缩 (`responses_projection.py`)**，默认**关闭**（safe，保全语义），可经 `--optimize-context` / `WORKBUDDY2API_OPTIMIZE_CONTEXT=1` / 请求体 `optimize_context: true` 显式开启。
-  - **Anthropic Messages 协议 (`POST /v1/messages`)**：采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机），原生直连驱动官方 **Claude Code CLI**、Cline、Roo Code 等工具，支持流式输出与函数调用（tool_use）。
-  - **OpenAI 对话补全端点 (`POST /v1/chat/completions`, `GET /v1/models`)**：完整支持标准流式 SSE、原生 tools / tool_calls 函数调用，兼容各类 OpenAI SDK、IDE 插件与智能体。
-  - **DeepSeek 思维链开关注入与多轮一致性回填 (`deepseek_thinking.py`)**：自动对 DeepSeek 模型注入 `thinking: {"type": "enabled"}` 与 effort 档位，并在多轮对话中自动为 assistant 历史补齐 `reasoning_content: ""`，根除上游 `11133 model_param_invalid` 参数报错与思维链静默丢失。
-- 🖥️ **独立现代化桌面 GUI (Tauri v2 + 原生深色设计)**：提供直观的服务看板、端口设置、实时延迟测试与状态指示。
-- 🔑 **无需安装原版 WorkBuddy**：集成浏览器 OAuth 授权全自动轮询流程，直接扫码/验证码登录获取凭据。
-- 👥 **多账号管理与切换**：凭据统一持久化于本地数据库，支持一键切换活跃账号、手动刷新 Token 与账号删除。
-- 🔀 **多账号智能调度与到期日分层（先烧快过期额度）**：
-  - 支持 `off`（默认关闭）/ `failover`（遇 429 / 6004 自动切号重试）/ `roundrobin`（按请求数轮询分摊）；
-  - **按积分到期日分层优先（借鉴 momo0410/workbuddy-switch-gateway，已由 iuuuuuuuu 延续镜像维护）**：自动提取各账号资产的最早到期日（日粒度 YYYY-MM-DD），优先调度最快过期的账号池，杜绝资产临期作废；同档账号平均轮换，未标记到期日账号保底兜底；
-  - 账号级冷却隔离（按「账号 + 模型」维度）；调度策略运行时热读 `settings.json`，GUI 改完**免重启内核**即生效；`/api/rate_limit` 的 `rotation.config_source` 字段可观测当前策略来源（`hot`=已热加载 / `default`=回退兜底）。
-- 📊 **内嵌真实积分资产看板与夜间限免感知**：
-  - 逆向对接腾讯官方计量计费接口，实时掌握账户剩余积分、资源包配额明细与使用进度条；
-  - **自然日今日用量统计**：自动统计当日请求数（`reqsToday`）、消耗 Token 数（`tokensToday`）与 429 频控次数；
-  - **动态感知官方夜间限免**：自动识别 `23:00–08:00` 官方限免时段，前端实时打上 **「🌙 夜间限免中」** 专属徽章。
-- 📈 **请求用量可观测性（汇总 + 明细下钻 + 分组分析）**：
-  - **多档时间范围**：用量页支持 4h / 24h / 今日 / 7d / 30d / 全部 六档切换，统计卡与趋势图同步裁剪；
-  - **请求明细下钻**：逐条展示每次请求的时间、模型、结果、Token 与时延；失败行直接给出错误原因（如 `HTTP 429 ...`）、重试次数与重试原因，降级行给出 `请求模型 → 实际模型 · 降级原因` 完整链路；
-  - **多维筛选与分页**：支持模型名（大小写不敏感子串）与结果状态（成功/失败）联合筛选，50 条/页翻页浏览，筛选条件与时间范围联动；
-  - **按模型分组分布**：自动汇总各模型的请求数、成功/失败数、Token 消耗与平均时延，按请求量降序排列；
-  - 以上数据源为内核写入的 `usage.jsonl`（`--usage-log` 启用），Rust 侧 `usage_summary` / `usage_events` 命令聚合，前端零依赖手写 SVG 渲染。
-- 🤖 **Agent 智能体接入引导（只读，不改写客户端配置）**：
-  - **Codex CLI**：在 `~/.codex/config.toml` 中配置 `wire_api = "responses"` 与 `base_url = "http://127.0.0.1:8787/v1"` 即可原生直连，享受自动上下文投影压缩与原生工具调用支持。
-  - **Claude Code CLI**：终端配置 `ANTHROPIC_BASE_URL="http://127.0.0.1:8787"` 与 `ANTHROPIC_API_KEY="local"` 即可一键直连驱动官方 Claude Code，双向协议无缝转换并支持流式与工具调用。
-  - **Hermes Agent**：提供推荐配置项与一键复制，按说明在 Hermes 的 `config.yaml` 中手动填写（供应商 + 模型别名）。
-  - **ZCode**：采用引导式接入——展示接口地址/密钥/模型清单，点击任意值即复制，在 ZCode Desktop → 模型设置 → 添加供应商 中粘贴即可；状态徽章基于本地服务端口真实可达性探测。
-- ⚡ **动态模型矩阵**：模型清单**自动获取 WorkBuddy 支持的全量模型**（含计费倍率、上下文窗口与思考强度配置），随上游动态更新，无需随版本维护静态列表；OpenAI 与 Anthropic 协议均可透明传入相同模型标识；在「模型与接口」页面查看与定制。
-- 🛡️ **安全脱敏、流量削峰与请求防护**：
-  - **客户端鉴权密钥（可选）**：设置页可一键生成 / 复制 / 清空 32 位十六进制随机密钥（CSPRNG 生成），内核以 `--api-key` 生效，之后所有客户端须携带 `Authorization: Bearer <key>` 或 `x-api-key: <key>`，未携带或错误时返回 `401 invalid api key`；密钥仅在启动时注入（改后需重启内核）。开启「局域网访问」（非回环监听）时**必须先设置密钥**，否则前端拒绝开启且内核亦拒绝启动（对标 `router-for-me/EasyCLIProxyAPI` 的 API 访问管理）；
-  - **结构化日志与级别管理**：设置页可切换内核日志级别 `info`（默认，仅请求摘要与耗时）/ `debug`（附加错误响应详情）/ `trace`（完整请求体与响应流，自动脱敏 Token/Key），日志写入 `converter.log` 并在「实时日志」页与进程 stdout 合并展示（分区标注）；可选开启 `--log-payloads` 落盘完整 Prompt / 响应正文（**明文**，需 trace 级双闸门生效，默认关闭且 UI 明确警示隐私风险）（对标 `router-for-me/EasyCLIProxyAPI` 的日志管理）；
-- 🔍 **内置 API 调试台**：「调试」页保留最近 200 条请求快照（端点/模型/状态/耗时/请求体/响应摘要/错误），点行看详情、基于快照重放复现问题、一键复制 curl（含 `YOUR_KEY` 占位不泄露密钥）；快照默认开启、设置页可关，请求体明文落盘（Token/Key 已脱敏），保留条数 10–2000 可调（对标 `orangeboyChen/codebuddy2api` 的 API Test/Debug 快照）；
-  - **局域网访问（可选）**：设置页可开启「允许局域网内其它设备访问」（`--host 0.0.0.0`），并自动探测本机局域网 IPv4 展示可复制地址（如 `http://192.168.x.x:8787/v1`），供手机 / 平板 / 其它电脑直连；出于安全默认关闭（仅 `127.0.0.1` 监听）。无鉴权密钥时前端**拒绝开启**且内核亦会 `exit 1`——双重守卫确保服务绝不无鉴权暴露（对标 `router-for-me/EasyCLIProxyAPI` 的网络设置，但刻意不提供 `--unsafe-expose` 放行开关）；
-  - 内置 `--desensitize` 敏感词处理机制与客户端身份指纹改写层，改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截；
-  - 内建请求并发削峰平滑器（`RequestPacer`）与后台主动令牌续期器（`BackgroundTokenRefresher`），削平脉冲请求防止 6004 频控，免除用户被动等待时延；
-  - **413 请求体超限安全防护**：对 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 施加严格大小守卫（默认 16MB，支持 `WORKBUDDY2API_MAX_BODY_MB`）。中间件在 ASGI `receive` 层按块累计，**超限立即熔断**（不等 body 读完），既防大包拖垮本地内存也防被上游连坐拦截（借鉴 `linguo2625469/workbuddy2api-panel`，源自原 `Sliverkiss/workbuddy2api`，已由 `HanawaBanana` 延续维护）；
-  - **多模态远程图片自动转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`（直接传 http 链接报错 400）。网关自动异步下载远程图片并内联嵌入，彻底解除视觉模型的多模态输入限制；下载前经 SSRF 守卫（拒绝回环/私网/元数据地址、重定向逐跳复检）并施加单图 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`）（借鉴 `neipor/codebuddy-cli2api`）；
-  - **官方客户端 User-Agent 仿真**：出站请求智能仿真官方客户端标识（国内版 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 触发 10085 拦截与官网使用端归因失真，亦支持 `WORKBUDDY2API_USER_AGENT` 动态配置（借鉴 `ardeyouxipianyi` 与 `turbomind66`）。
+### 🔄 原生三协议全兼容 (Tri-Protocol Engine)
+* **OpenAI Responses 协议 (`POST /v1/responses`)**：原生直连 **Codex CLI**（`wire_api="responses"`）与 OpenCode；完整承载流式语义事件状态机、`sequence_number` 等规范字段与多模态 Data-URI；内置可选长上下文最小语义闭包投影压缩（`--optimize-context`）。
+* **Anthropic Messages 协议 (`POST /v1/messages`)**：双向协议翻译与流式 SSE 状态机，原生驱动官方 **Claude Code CLI**、Cline、Roo Code，完整支持流式与 `tool_use` 函数调用。
+* **OpenAI 对话补全协议 (`POST /v1/chat/completions`, `GET /v1/models`)**：完整支持标准流式 SSE 与原生 Tools 函数调用，兼容 Hermes Agent、Cherry Studio、NextChat 等各类智能体。
+* **DeepSeek 思维链开关注入与多轮一致性回填**：自动对 DeepSeek 模型注入 `thinking: {"type": "enabled"}` 与 effort 档位，多轮历史自动补齐占位，根除上游 `11133 model_param_invalid` 报错。
+
+### 🔀 智能多账号调度与资产治理
+* **到期日优先分层调度**：自动按日粒度识别各账号资产最早到期日，优先消耗临期额度，杜绝资产临期作废；同档账号平均轮换，未标记账号兜底。
+* **智能故障转移 (Failover)**：遇 429 频控或 6004 限制时毫秒级自动切号重试；支持「账号 + 模型」维度的账号级独立冷却。
+* **动态热加载**：调度策略与配置运行时热读 `settings.json`，GUI 修改后**免重启内核即刻生效**。
+* **夜间限免与资产感知**：自动识别 `23:00–08:00` 官方限免时段并展示专属徽章；实时汇总自然日今日请求量、Token 消耗与频控次数。
+
+### 📈 原生用量可观测性与调试台
+* **多档时间范围切换**：用量页支持 4h / 24h / 今日 / 7d / 30d / 全部 六档切换，零依赖手写 SVG 趋势图表同步响应。
+* **请求明细全链路下钻**：逐条记录时间、模型、结果、Token 与时延；失败行直接标注错误原因与重试链路，降级行给出完整模型转换链。
+* **内置 API 调试台**：保留最近 200 条请求快照（数据脱敏安全落盘），支持一键参数回填重放与脱敏 curl 命令一键复制。
+
+### 🛡️ 工程级安全脱敏与风控防御
+* **流量削峰平滑器 (RequestPacer)**：内置并发槽位调度器与后台主动令牌续期器，削平脉冲并发防止触发上游 6004 频控。
+* **客户端指纹脱敏改写**：精准改写 Claude Code 身份短语并剔除触发特征，彻底消除系统提示词误触发 11128 安全风控拦截。
+* **413 超限熔断与多模态 Data-URI**：ASGI 块级累计超限（默认 16MB）秒级熔断；多模态图片自动异步下载并内嵌 Data-URI，配备严格 SSRF 校验。
+* **User-Agent 规范仿真**：出站请求智能仿真官方客户端标识，规避非标 UA 触发 10085 拦截与使用端归因失真。
 
 ---
 
@@ -265,32 +261,9 @@ npm run tauri build                      # 完整构建（含 NSIS 独立安装�
 
 ---
 
-## 💻 客户端接入示例
+## 💻 开发者 SDK 与 cURL 调用示例
 
-### 1. Claude Code CLI 原生直连（推荐）
-
-官方 Claude Code 原生基于 Anthropic Messages 协议工作。只需配置环境变量指向本地网关：
-
-**macOS / Linux / WSL (Bash)**：
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
-export ANTHROPIC_API_KEY="local"
-
-# 启动 Claude Code，指定 WorkBuddy 模型即可直接开发
-claude --model glm-5.3-flash
-```
-
-**Windows (PowerShell)**：
-```powershell
-$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8787"
-$env:ANTHROPIC_API_KEY = "local"
-claude --model glm-5.3-flash
-```
-
----
-
-### 2. Python (Anthropic SDK)
-
+### 1. Python (Anthropic SDK)
 ```python
 import anthropic
 
@@ -311,17 +284,14 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
----
-
-### 3. Python (OpenAI SDK)
-
+### 2. Python (OpenAI SDK)
 ```python
 from openai import OpenAI
 
 # 本地 WorkBuddy2API 的 OpenAI 兼容端点
 client = OpenAI(
     base_url="http://127.0.0.1:8787/v1",
-    api_key="local" # 本地模式固定填写 local
+    api_key="local"
 )
 
 response = client.chat.completions.create(
@@ -335,54 +305,22 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
----
-
-### 4. cURL 命令行调用
-
-**Anthropic Messages 接口**：
+### 3. cURL 命令行调用
 ```bash
+# Anthropic Messages 接口
 curl -X POST http://127.0.0.1:8787/v1/messages \
   -H "x-api-key: local" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm-5.3-flash",
-    "max_tokens": 512,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+  -d '{"model": "glm-5.3-flash", "max_tokens": 512, "messages": [{"role": "user", "content": "Hello!"}]}'
 
-**OpenAI Chat Completions 接口**：
-```bash
+# OpenAI Chat Completions 接口
 curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   -H "Authorization: Bearer local" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm-5.3-flash",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": false
-  }'
+  -d '{"model": "glm-5.3-flash", "messages": [{"role": "user", "content": "Hello!"}], "stream": false}'
 ```
 
----
-
-## 🛡️ 深度加固与高级特性
-
-- **WSL 宿主凭据环境自适应（零配置穿透）**：
-  在 Linux / WSL 环境下运行内核时，自动探测并挂载 Windows 宿主已登录的桌面端凭据（`CodeBuddyExtension/Data/Public/auth`）与多账号配置（`accounts.json`），免参数无感工作；亦可通过 `--wsl` 显式强制开启。
-- **流式 tool_calls 损坏防御机制（解决 upstream Issue #3）**：
-  针对腾讯后端在 `stream=true` 且模型生成 `tool_calls` 时偶发分片损坏（`function.name` 为空或 arguments 乱码残缺）导致 Claude Code / Codex / DeepSeek Harness 等 Agent 陷入死循环的硬伤，内核内建聚合校验与自动损坏重试，并通过标准平滑伪流式下发，彻底保障 Coding Agent 的调用稳定性。普通纯文本对话保持 100% 原始零延迟直通。
-- **`X-Device-Token` 设备风控头（Turing Shield SDK 集成）**：
-  内核对腾讯后端的请求会注入设备风控头 `X-Device-Token`，来源是本机已安装 WorkBuddy 桌面端自带的 Turing Shield SDK（`turing_helper.cjs` 自动发现 + 零宽空格脱敏等合规处理协同降低风控误判）。SDK 取不到时自动降级为不带该头，功能不受影响。
-
-  **SDK 自动发现的搜索范围（供应链加固说明）**：
-  1. 环境变量 `WORKBUDDY_TURING_SDK_DIR` —— 用户显式指定（最高优先级，指向 turing-sdk 目录或桌面端安装基目录均可）；
-  2. `%LOCALAPPDATA%` / `%APPDATA%` / `%ProgramFiles%` / `%ProgramFiles(x86)%` / `%USERPROFILE%` / `%HOME%` 下的 `WorkBuddy` / `workbuddy` 安装目录（严格特征校验：`index.cjs` 入口 + `turing_sdk.node` 原生模块且 `package.json` 含 turing 标识，或官方 `TuringShieldSDK.dll`）；
-  3. **各磁盘根目录（如 `D:\WorkBuddy`）默认不扫描** —— 这是刻意为之的安全设计：目录名巧合或被植入伪造 SDK 时，宽松扫描 + 直接 `require` 会构成本地代码执行风险。若你的桌面端安装在盘根等非常规位置，请显式设置环境变量后重启本客户端：
-     ```powershell
-     setx WORKBUDDY_TURING_SDK_DIR "D:\workbuddy"
-     ```
-     设置后新启动的进程生效；SDK 校验仍会验证入口文件与特征，仅放宽"用户显式信任"的路径来源。
 
 ---
 
@@ -411,35 +349,33 @@ http://127.0.0.1:8787/v1
 
 ---
 
-## 🤝 致谢与声明
+## 🤝 致谢与生态溯源 (Credits & Inspirations)
 
-- 本项目基于 [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) 进行深度二次开发与架构重构。
-- 架构设计深度借鉴了优秀开源项目 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 的桌面端实践思路。
-- 以下功能借鉴自社区衍生项目 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api) 及其增强分支 [DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)（均 MIT 开源）：
-  - **`X-Device-Token` 设备风控头注入**（借鉴 xiaofan6ya 版）：通过桌面端自带 Turing Shield SDK 取设备 token，`turing_helper.cjs` 自动发现安装位置，降低敏感请求被上游风控识别的概率；
-  - **流式 reasoning 合并器与空 delta 清洗**（借鉴 DistPub 版）：网关层把零散 reasoning 分片合并为一段再释放，剥离混入 `tool_calls` 参数流的推理内容，避免 AI SDK 出现大量碎片 Thought 块与工具参数 JSON 截断（移植时已修复其上游「键不存在被误判为空串导致纯 reasoning 帧被删」的缺陷）；
-  - **脱敏词表扩张**（借鉴 DistPub 版）：补充竞争品牌词（Claude/Anthropic/OpenAI/Gemini/Kimi/Qwen/Cursor 等），脱敏覆盖角色扩展至 `assistant` 历史回复；
-  - **每日签到**（端点逆向成果参考两仓库）：`/v2/billing/meter/daily-checkin` 链路，本项目按自身定位实现为 GUI 手动按钮触发，不做自动定时签到。
-- 以下功能与架构思路借鉴自活跃衍生项目 [IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)（当前重写树为 MIT 开源）：
-  - **Claude 客户端指纹脱敏与精准改写层（P0 已落地）**：借鉴其对已知客户端特征句做中性改写的思路（`_rewrite_known_fingerprints`），改写 Claude Code 身份短语、移除 `x-anthropic-billing-header:` 等触发源，彻底解决上游 11128 安全策略拦截；
-  - **多凭证轮换与账号调度（已交付，2026-09-11）**：参考其凭据生命周期感知与平滑轮换设计，已交付多账号调度（failover / roundrobin 双模式 + 账号级冷却 + 策略热读免重启）。
-- 以下安全与协议兼容优秀实践借鉴自开源生态（2026-09 横向对比采纳）：
-  - **OpenAI Responses 协议原生端点 (`POST /v1/responses`)**（借鉴 [ShouZhuo0413/codebuddy2api](https://github.com/ShouZhuo0413/codebuddy2api) 与 [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api)，MIT）：引入 `responses_compat.py`，原生支持 Codex CLI 等长上下文 Agent 的双向协议转换与流式事件状态机；
-  - **按积分到期日分层选号调度**（借鉴 [momo0410/workbuddy-switch-gateway](https://github.com/momo0410/workbuddy-switch-gateway)，原仓库转私有后已由 [iuuuuuuuu/workbuddy-switch-gateway](https://github.com/iuuuuuuuu/workbuddy-switch-gateway) 延续维护，MIT）：引入日粒度到期日分层，多账号调度优先消耗快要过期的额度，避免资产过期浪费；
-  - **413 请求体超限安全防护**（借鉴 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 与原 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（原仓已删库，由 [HanawaBanana/workbuddy2api](https://github.com/HanawaBanana/workbuddy2api) 延续维护），MIT）：`converter.py` 引入大小守卫，秒拒超大报文保护本地与上游；
-  - **官方客户端 User-Agent 规范仿真**（借鉴 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)（原 `workbuddy2api-intl`，已更名）与 [turbomind66/workbuddy2api-python](https://github.com/turbomind66/workbuddy2api-python)，MIT）：出站请求智能仿真官方客户端标识，并支持环境变量动态自定义；
-  - **HTTP 200 内嵌错误不再当成功**（借鉴 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api)，MIT）：上游偶以 HTTP 200 + 非 SSE 正文（错误信封 / 网关页）返回，此类响应原先被聚合为空回答的「成功」。现按本仓实测形态独立实现 `_parse_non_sse_body` + `UpstreamInBandError`（刻意继承 `httpx.HTTPError` 以复用各协议入口既有的换号 / 记失败 / 协议化错误链路），并对零帧空流补哨兵；
-  - **客户端用量提示剥离**（借鉴 [orangeboyChen/codebuddy2api](https://github.com/orangeboyChen/codebuddy2api)，MIT）：Claude Code 在 token-usage 附件开启时会把**客户端自己的账**以元消息追加在会话尾部（`Token usage: 190010/180000; -10010 remaining` 与补零倒计时 `<total_tokens>15000000 tokens left</total_tokens>`，可裸放也可被 `<system-reminder>` 包住）。这些内容对上游模型零信息价值、白占上下文并占用提示词缓存位，负数倒计时还会被模型误读为指令。`anthropic_compat` 现按上游同款规则剥离（带壳形态先匹配、倒计时必须带数字载荷以免误删用户自己贴的片段），整条仅为提示时丢弃该元消息；同源自查还修掉了 `responses_projection` 中「命中 harness 标记即整条丢」导致真实指令被连带删除的缺陷，改为块级剥离；
-  - **流被截断不再报成功**（借鉴 [ShouZhuo0413/codebuddy2api](https://github.com/ShouZhuo0413/codebuddy2api)，MIT）：上游流被中途切断（既无 `[DONE]` 也无 `finish_reason`）时原先会被合成为正常收尾，客户端把半句话当完整答案消费、日志却只留一行 200 成功。现两条路径各加哨兵：Chat 流式（未收终止标记即下发错误帧并如实记失败）与 `ResponsesStreamConverter`（转 `response.failed` 而非 `response.completed`），并保留已产出的部分正文。判据取「两个终止信号都缺」而非单看 `[DONE]`——本机 600 条流式响应实证中 587 条只给 `finish_reason` 不补 `[DONE]`，单看后者会大面积误报；
-  - **14003 瞬时模型级限流识别与秒级短冷却**（借鉴 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api)，MIT）：上游下发 14003（RateLimitError / quota_request_limit，官方 UI 对应「当前模型请求繁忙，请切换模型或稍后重试」）属于模型瞬时繁忙而非账号额度耗尽。现将其纳入限流码族并给予秒级短冷却（20s±5s），避免被误判为 300s 软限流或 90000s 日级额度导致整池连坐停摆，换号或换模型可即刻自愈；
-  - **Anthropic 协议 messages 内内置 system 角色保真**（借鉴 [orangeboyChen/codebuddy2api](https://github.com/orangeboyChen/codebuddy2api)，MIT）：部分客户端会在 `/v1/messages` 的 `messages` 数组内夹带 `role: "system"` 消息。`anthropic_compat` 始终完整保留其 `system` 角色（绝不降级或误转换为 `assistant`），正确清洗 attribution 与用量提示空壳，并由专项契约测试锁定；
-  - **尾部 User 轮次剥离后占位兜底防 Assistant Prefill 误判**（借鉴 [orangeboyChen/codebuddy2api](https://github.com/orangeboyChen/codebuddy2api) #196，MIT）：当客户端在会话尾部追加仅含 token 倒计时/用量提示的 user 轮次时，剥离后若整条丢弃会导致请求以 assistant 结尾，上游模型会将其误读为 assistant prefill 续写前文回答，导致模型复读或偏离对话。`anthropic_compat` 在原始输入以 user 结尾时，若转换后末尾非 user/tool，自动保留带有 Claude Code 原生兜底占位符 `(no content)` 的 user 轮次，而故意发送的 assistant prefill 保持原样直通，并由双向契约测试锁定。
-- 本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。
+本项目基于 [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) 进行深度二次开发与架构重构，架构设计深度借鉴了优秀开源项目 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 的桌面端实践思路。
+
+同时，以下特性吸收了社区核心开源成果的智慧：
+* **设备风控头注入与空 delta 清洗**：借鉴 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api) 与 [DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)（MIT）。
+* **Claude 指纹精准改写与多账号轮换**：借鉴 [IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)（MIT）。
+
+<details>
+<summary><b>📋 点击展开社区开源生态借鉴与技术溯源清单（10+ 衍生项目明细）</b></summary>
+
+| 借鉴 / 延续来源 | 协议 | 引入的设计思路与架构实践 |
+| :--- | :--- | :--- |
+| [ShouZhuo0413](https://github.com/ShouZhuo0413/codebuddy2api) · [hawklithm](https://github.com/hawklithm/workbuddy2api) | MIT | OpenAI Responses 协议原生端点 (`POST /v1/responses`) 请求响应状态机设计 |
+| [momo0410](https://github.com/momo0410/workbuddy-switch-gateway) · [iuuuuuuuu](https://github.com/iuuuuuuuu/workbuddy-switch-gateway) | MIT | 按积分到期日（日粒度）分层选号调度机制，优先消耗临期额度 |
+| [linguo2625469](https://github.com/linguo2625469/workbuddy2api-panel) · [HanawaBanana](https://github.com/HanawaBanana/workbuddy2api) | MIT | 413 请求体超限安全防护，ASGI 块级累计秒级熔断守卫 |
+| [ardeyouxipianyi](https://github.com/ardeyouxipianyi/workbuddy2api-hub) · [turbomind66](https://github.com/turbomind66/workbuddy2api-python) | MIT | 官方客户端 User-Agent 规范仿真与动态自定义机制 |
+| [xiaofan6ya](https://github.com/xiaofan6ya/workbuddy2api) | MIT | HTTP 200 内嵌错误识别拦截、14003 瞬时模型级限流秒级短冷却策略 |
+| [orangeboyChen](https://github.com/orangeboyChen/codebuddy2api) | MIT | 客户端用量提示剥离、Anthropic 内置 system 角色保真与尾部占位兜底 |
+| [neipor](https://github.com/neipor/codebuddy-cli2api) | MIT | 多模态远程图片异步下载内联转 Data-URI 与严格 SSRF 安全校验 |
+
+</details>
+
+> ⚠️ **免责声明**：本工具仅供个人学习、技术研究与工作流效率提升使用，请妥善保管个人授权凭据，遵循腾讯云相关产品服务协议。
 
 ---
 
 ## 📄 开源许可证
 
-本项目基于 [MIT License](LICENSE) 开源。
-
-本仓库包含从 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api)、[DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)、[IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)、[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)、原 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（延续自 [HanawaBanana/workbuddy2api](https://github.com/HanawaBanana/workbuddy2api)）、[ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)、[turbomind66/workbuddy2api-python](https://github.com/turbomind66/workbuddy2api-python)、原 [momo0410/workbuddy-switch-gateway](https://github.com/momo0410/workbuddy-switch-gateway)（延续自 [iuuuuuuuu/workbuddy-switch-gateway](https://github.com/iuuuuuuuu/workbuddy-switch-gateway)）、[ShouZhuo0413/codebuddy2api](https://github.com/ShouZhuo0413/codebuddy2api)、[hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api)、[orangeboyChen/codebuddy2api](https://github.com/orangeboyChen/codebuddy2api)、[Practice019/multi2api](https://github.com/Practice019/multi2api)（原 workbuddy2api）与 [neipor/codebuddy-cli2api](https://github.com/neipor/codebuddy-cli2api)（均 MIT）移植或借鉴的代码与架构设计，其版权声明、借鉴范围与移植差异详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目基于 [MIT License](LICENSE) 开源。第三方开源代码与移植说明详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
