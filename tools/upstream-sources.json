@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-10-01",
+  "updated_at": "2026-10-03",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -61,10 +61,10 @@
       "name": "Workbuddy2API 增强版（Joy4Fire，借鉴雷达）",
       "repo": "Joy4Fire/Workbuddy2API",
       "branch": "main",
-      "last_synced_commit": "9946a6b2",
-      "last_synced_sha": "9946a6b2b1ca1ff3b98288462cc4eb17fed0954f",
+      "last_synced_commit": "45037e7e",
+      "last_synced_sha": "45037e7e45ecb31906cbe2a8069535e2de336bee",
       "absorbed": "借鉴雷达（横向对比与特性雷达）",
-      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 2cd50bd7→9946a6b2：改动涉及区域出站 UA 映射与启动预热上限及额度首轮刷新循环修复。本仓 UA 策略此前已锁定 WorkBuddy 官方标识，调度机制走按需拉取，无对应问题，未采纳。"
+      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 9946a6b2→45037e7e（发布 0.6.2）：改动涉及账号池并发锁占位（满载等待10s超时报503）、区域目录低价优先路由、SSE心跳转发反压最多缓存32块、历史正文体积在SQL中聚合，以及数据库升级至 schema v8 等。**未采纳**：本仓为个人轻量桌面网关，多账号通过 AccountRotator 采用到期分层与单飞探针调度，无需复杂的集中式多租户并发排队锁与目录竞价路由；本仓已具备快照日志自动截断轮转，无大并发内存膨胀问题。"
     },
     "wb2api-upstream-shouzhuo": {
       "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
@@ -124,10 +124,10 @@
       "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
       "repo": "Practice019/workbuddy2api",
       "branch": "main",
-      "last_synced_commit": "3da3d767",
-      "last_synced_sha": "3da3d767509f2badab2d4d0100ab1b20e0d479e7",
+      "last_synced_commit": "cec3569b",
+      "last_synced_sha": "cec3569bebe2481b597b73f4e30562cdb170238f",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 1f2a7a9a→3da3d767（共 47 项提交，发布 v1.7.0）：1. 引入 Cline、Raccoon Work、LobsterAI、Qoder（含 WASM 推理桥接与加密信封解包）等多第三方 AI 助手，并随之抽象中立模型目录类型与移除 upstream 私有 SDK 依赖，后删除 mimo 和 buddy：架构定位严重不符，本仓专注 WorkBuddy 本地网关，不引入非 WorkBuddy 厂商及 WASM 运行时重量级依赖；2. 补齐 X-Product-Code 与按模型族分档出站 UA：本仓已按 domain 区分国内与国际版官方客户端 UA，且针对标准请求头均能正常服务与统计，无需增加额外未经验证的 header；3. 统一寿命 50% 自动续期：本仓在 token_refresher.py 中已具备更可靠的绝对阈值巡检守护（_threshold_seconds）与请求时自动刷新；4. 98 个文件 gofmt 与 wazero 依赖调整：纯 Go 格式化与依赖标注，本仓为 Python+Tauri 架构。**全部无需采纳**。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 3da3d767→cec3569b（包含 0f1c9434、7612eb26、aa159e63 与 cec3569b 等 5 项提交）：引入 Loomy 讯飞/豆包（doubao-seedream-5-lite）生图端点支持、客户端聊天工具分区注入、工具循环流式两态判断，以及修复其生图腾讯 COS 签名 URL HEAD 探测 403 与 Markdown alt 字符转义截断。**未采纳**：本仓专注于 WorkBuddy/CodeBuddy 官方生态的协议兼容反代与推理，架构上不引入非官方第三方服务（Loomy/豆包生图）及其客户端工具循环劫持；本仓流式输出保持端到端纯净透传，无需侵入式注入伪工具。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
@@ -151,19 +151,19 @@
       "name": "codebuddy-gateway 容器网关（WindoC，借鉴雷达）",
       "repo": "WindoC/codebuddy-gateway",
       "branch": "main",
-      "last_synced_commit": "e26411c6",
-      "last_synced_sha": "e26411c6cf054b4b1c13f7dde1c20ca44a4d804d",
+      "last_synced_commit": "3ae1c666",
+      "last_synced_sha": "3ae1c6666c61794d28677094badf9ed0ef5b4672",
       "absorbed": "借鉴雷达（官方 Agent SDK 容器化桥接模式参考）",
-      "note": "基于 CodeBuddy Agent SDK (@tencent-ai/agent-sdk) 桥接的容器化 REST 网关，支持持久化凭证与 MCP tools 自动映射；监控整仓新提交。"
+      "note": "基于 CodeBuddy Agent SDK (@tencent-ai/agent-sdk) 桥接的容器化 REST 网关，支持持久化凭证与 MCP tools 自动映射；监控整仓新提交。本轮评估 e26411c6→3ae1c666（包含 PR #6 与 PR #7）：PR #6 修正 LiteLLM 流式兼容性，将 JSON 序列化的 '\"[DONE]\"' 修正为裸 'data: [DONE]'；PR #7 从 CLI 获取模型列表并缓存 5 分钟，截获 SDK 未捕获异常。**未采纳**：本仓流式终止符原本即为标准裸 data: [DONE]，天然兼容 LiteLLM；且本仓模型列表通过官方端点直连与内置能力矩阵解析，不依赖 Node.js Agent SDK，无对应异常与发现缺陷。"
     },
     "wb2api-upstream-orangeboy": {
       "name": "codebuddy2api Next.js 网关（orangeboyChen，借鉴雷达）",
       "repo": "orangeboyChen/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "1b69cde6",
-      "last_synced_sha": "1b69cde6471675562c8cfd772dbd48242aee605a",
+      "last_synced_commit": "75cd0812",
+      "last_synced_sha": "75cd0812047fe395099fcad00e338709efd814f4",
       "absorbed": "借鉴雷达（TypeScript/Next.js 架构协议路由参考；吸收其 #194 /v1/messages 内部 system 角色保真与 #178 用量提示剥离规则；吸收其 #196 尾部 user 轮次剥离后 (no content) 占位兜底防 assistant prefill 误判）",
-      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 39bd7567→1b69cde6（PR #278，commit 1b69cde6）：仅精简 README.md 中 Desktop App 说明段落并添加 release 下载链接，纯文档改动，零代码变动。**无需采纳**。"
+      "note": "Next.js / TypeScript 实现的轻量三协议网关与调试追踪层；监控整仓新提交。本轮评估 1b69cde6→75cd0812（PR #279，commit 75cd0812）：改动涉及 Electron 桌面端直接打开远程桌面连接后端的部署与配置调整。**无需采纳**：纯 Electron/Next.js 外壳逻辑，与本仓 Tauri v2 架构无关。"
     },
     "wb2api-upstream-hanhan": {
       "name": "codebuddy2openai 原上游基座（HanHan666666，借鉴雷达）",
