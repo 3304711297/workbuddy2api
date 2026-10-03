@@ -31,13 +31,13 @@
       "note": "腾讯 copilot 系反代的活跃衍生库（MIT，25★），含凭证轮换/令牌管理/多账号调度等 workbuddy2api 已补齐的能力；监控整仓新提交，出现可采纳改进时评估摘樱桃。【合规红线】上游 xueyue33/codebuddy2api 无 LICENSE（all rights reserved），MIT 仅覆盖 IceeAn 自 bce86ded 起独立重写的当前树；只借鉴思路不整文件搬运，若取代码须出自当前树并在 THIRD_PARTY_NOTICES.md 署名 IceeAn。"
     },
     "wb2api-upstream-momo": {
-      "name": "workbuddy-switch-gateway（momo0410，借鉴雷达）",
-      "repo": "momo0410/workbuddy-switch-gateway",
+      "name": "workbuddy-switch-gateway（iuuuuuuuu 延续，原 momo0410，借鉴雷达）",
+      "repo": "iuuuuuuuu/workbuddy-switch-gateway",
       "branch": "main",
       "last_synced_commit": "ebd9427b",
       "last_synced_sha": "ebd9427b350a866108a8787714e8cd54fd7ed33a",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
-      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；监控整仓新提交。本轮评估 7116dbf9→ebd9427b（发布 0.8.16）：新增逐条请求明细查询接口（GET /usage/requests）与前端明细表，并将内容安全审核失败（FailureContentSafety）在上游分类映射为 content_filter 与 invalid_request_error。**未采纳**：本仓调试页早已原生支持基于 snapshots.jsonl 的完整结构化请求快照与重放，且 converter.py 与 anthropic_compat 已完备实现 11140/content_filter 审核拦截跨三大协议的标准化归一与防误切号保护，本仓机制更全面，无跟进需求。"
+      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；原 momo0410 仓库转私有后由 iuuuuuuuu 延续镜像看门（含 0.8.16 全部提交）。监控整仓新提交。本轮评估 7116dbf9→ebd9427b（发布 0.8.16）：新增逐条请求明细查询接口（GET /usage/requests）与前端明细表，并将内容安全审核失败（FailureContentSafety）在上游分类映射为 content_filter 与 invalid_request_error。**未采纳**：本仓调试页早已原生支持基于 snapshots.jsonl 的完整结构化请求快照与重放，且 converter.py 与 anthropic_compat 已完备实现 11140/content_filter 审核拦截跨三大协议的标准化归一与防误切号保护，本仓机制更全面，无跟进需求。"
     },
     "wb2api-upstream-linguo": {
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
@@ -121,22 +121,22 @@
       "note": "支持前端凭证启用/停用与多账号管理的衍生实现；监控整仓新提交。"
     },
     "wb2api-upstream-practice019": {
-      "name": "workbuddy2api 熔断与会话粘性版（Practice019，借鉴雷达）",
-      "repo": "Practice019/workbuddy2api",
-      "branch": "main",
+      "name": "multi2api 熔断与会话粘性版（Practice019，原 workbuddy2api，借鉴雷达）",
+      "repo": "Practice019/multi2api",
+      "branch": "master",
       "last_synced_commit": "cec3569b",
       "last_synced_sha": "cec3569bebe2481b597b73f4e30562cdb170238f",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；监控整仓新提交。本轮评估 3da3d767→cec3569b（包含 0f1c9434、7612eb26、aa159e63 与 cec3569b 等 5 项提交）：引入 Loomy 讯飞/豆包（doubao-seedream-5-lite）生图端点支持、客户端聊天工具分区注入、工具循环流式两态判断，以及修复其生图腾讯 COS 签名 URL HEAD 探测 403 与 Markdown alt 字符转义截断。**未采纳**：本仓专注于 WorkBuddy/CodeBuddy 官方生态的协议兼容反代与推理，架构上不引入非官方第三方服务（Loomy/豆包生图）及其客户端工具循环劫持；本仓流式输出保持端到端纯净透传，无需侵入式注入伪工具。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；原 workbuddy2api 更名为 multi2api。监控整仓新提交。本轮评估 3da3d767→cec3569b（包含 0f1c9434、7612eb26、aa159e63 与 cec3569b 等 5 项提交）：引入 Loomy 讯飞/豆包（doubao-seedream-5-lite）生图端点支持、客户端聊天工具分区注入、工具循环流式两态判断，以及修复其生图腾讯 COS 签名 URL HEAD 探测 403 与 Markdown alt 字符转义截断。**未采纳**：本仓专注于 WorkBuddy/CodeBuddy 官方生态的协议兼容反代与推理，架构上不引入非官方第三方服务（Loomy/豆包生图）及其客户端工具循环劫持；本仓流式输出保持端到端纯净透传，无需侵入式注入伪工具。"
     },
     "wb2api-upstream-sliverkiss": {
-      "name": "workbuddy2api Go 核心原版（Sliverkiss，借鉴雷达）",
-      "repo": "Sliverkiss/workbuddy2api",
-      "branch": "main",
-      "last_synced_commit": "9a26ae7a",
-      "last_synced_sha": "9a26ae7a4f3ed581aaf5f98a9c390f8940659105",
+      "name": "workbuddy2api Go 核心延续版（HanawaBanana，原 Sliverkiss，借鉴雷达）",
+      "repo": "HanawaBanana/workbuddy2api",
+      "branch": "master",
+      "last_synced_commit": "81225d05",
+      "last_synced_sha": "81225d05dfe2cf5d92eaa0bd1af0dd927bd6ef1b",
       "absorbed": "借鉴雷达（横向对比与加权调度/多账号池核心架构参考；本轮起其源码作为错误码语义的**上游真源**用于交叉验证）",
-      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；监控整仓新提交。本轮评估 f2ccc7bb→9a26ae7a：改动为小程序成长任务 Sequential_Tasks_2/3 及治理工作流，与本仓内核无重叠，未采纳。2026-09-24 巡检发现上游返回 404 Not Found（疑似删库、更名或设为私有）；保留基线 9a26ae7a 挂起监测，若上游恢复公开将自动继续看门。"
+      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；原 Sliverkiss 仓库删库后由 HanawaBanana 以完整历史接续维护（默认分支 master）。监控整仓新提交。本轮评估 9a26ae7a→81225d05（共 37 项提交）：1. 镜像构建支持 ARG GOPROXY 避免国内拉 Go 模块超时；2. 成功响应透出 X-Wb-Account 头（本仓已有 X-WorkBuddy-Active-Account）；3. 新增 Prometheus /metrics 文本端点与可用性阈值告警（本仓为本地桌面工具，不接入集中式 Prometheus/HMAC 告警中间件）；4. 新增手动触发排程任务 admin 端点 POST /admin/tasks/{name}/run；5. 扩展 POST /v1/checkin 手动签到入口（本仓已有 UI/IPC 原生支持）；6. 引入账号分组隔离与多密钥 groups ACL 及凭证健康指标（本仓基于 AccountRotator 维护个人凭证）。**全部无需采纳**。"
     },
     "wb2api-upstream-neipor": {
       "name": "codebuddy-cli2api 全协议网关（neipor，借鉴雷达）",
