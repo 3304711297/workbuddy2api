@@ -551,8 +551,8 @@ function Invoke-Logged {
 }
 
 $exePath = Join-Path $InstallRoot 'src-tauri\target\release\workbuddy2api.exe'
-# 裸 cargo build --release 的空壳基准尺寸：产物明显小于它即说明前端没进包
-$SHELL_BASELINE_BYTES = 15572992
+# 产物完整性基准尺寸下限（10MB，native-tls 优化后产物约 13.6MB）：防范编译产物残损或空壳 stub；真伪由后续的前端资源内嵌校验（index-*.js）做决定性拦截
+$SHELL_BASELINE_BYTES = 10485760
 # 反代探活地址：端口由 GUI 传入（配置真源 load_app_config().port），**不写死**。
 # GUI 起来后会拉起 converter.py，该端口通即证明整条链路活着。
 #

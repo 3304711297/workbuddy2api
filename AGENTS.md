@@ -129,14 +129,15 @@ Rust 侧**不得再设置任何 `creation_flags`**。契约锁定：
 真实的 `$LASTEXITCODE`，随后再用 `Select-Object -First 1` 提取首行。契约锁定：`tests/test_app_update_contract.test.js`。
 
 **绝不跑裸 `cargo build --release`**：`custom-protocol` feature 只有 tauri CLI 会带上，
-plain cargo 会**静默产出无前端的空壳 exe**（15,572,992 字节 vs 正确约 15,663,616）
-且照常打印 "Built application at..."，不报错。正确产物尺寸随功能增长，判据不是死记数字。
+plain cargo 会**静默产出无前端的空壳 exe**（且照常打印 "Built application at..."，不报错）。
+（历史背景：早先使用 reqwest/rustls 时空壳约 15.57MB，完整约 15.66MB；3929e62 优化为 Windows native-tls 后，
+二进制免去 ring/rustls 静态代码，整体体积缩减至约 13.6MB。正确产物尺寸随依赖与功能演进，脚本尺寸下限基准已校准为 10MB 防残损，决定性判据为前端资源内嵌命中，而非死记数字）。
 
 **验证产物真伪的方法**（构建日志说成功不算数）：
 
 ```python
 d = open("src-tauri/target/release/workbuddy2api.exe","rb").read()
-len(d)                                                        # 尺寸应显著大于空壳 15,572,992
+len(d)                                                        # 尺寸应大于下限基准（> 10MB，当前约 13.6MB）
 d.count(b"index-XXXXXX.js")                                   # 从 dist/assets 取实际文件名，命中=前端已内嵌
 d.count(b"hermes_proxy_base_url")                             # Rust 侧 ASCII 标记物
 ```
