@@ -815,9 +815,26 @@ try {
         Write-Log 'package-lock.json 未变化，跳过 npm ci'
     }
 
-    Write-State -Phase 'frontend' -Message '正在构建前端'
-    if ((Invoke-Logged -FilePath 'npm' -Arguments @('run', 'build') -What '前端构建') -ne 0) {
-        Throw-Failure 'frontend-build-failed' 'npm run build 失败（前端构建未通过）'
+    # 借鉴 Hermes 输入感知跳过机制（d49da55d4c）：
+    # 当且仅当前端源码或配置文件变更时才重新运行 npm run build；若输入未变且 dist 已存在，则复用既有产物
+    $assetsDir = Join-Path $InstallRoot 'dist\assets'
+    $hasExistingDist = (Test-Path $assetsDir) -and (Get-ChildItem -Path $assetsDir -Filter 'index-*.js' -File | Select-Object -First 1)
+
+    $frontendInputsChanged = $false
+    foreach ($file in $changedFiles) {
+        if ($file -match '^(src/|index\.html$|vite\.config\.js$|package\.json$|package-lock\.json$)') {
+            $frontendInputsChanged = $true
+            break
+        }
+    }
+
+    if ($hasExistingDist -and -not $frontendInputsChanged) {
+        Write-Log '前端源码与依赖均未变动，复用现有 dist 产物（跳过 npm run build）'
+    } else {
+        Write-State -Phase 'frontend' -Message '正在构建前端'
+        if ((Invoke-Logged -FilePath 'npm' -Arguments @('run', 'build') -What '前端构建') -ne 0) {
+            Throw-Failure 'frontend-build-failed' 'npm run build 失败（前端构建未通过）'
+        }
     }
 
     # ── 5. Rust 重建（必须走 tauri CLI） ────────────────────────────────────
@@ -825,6 +842,7 @@ try {
     $env:CARGO_TERM_PROGRESS_WHEN = 'always'
     $env:CARGO_TERM_PROGRESS_WIDTH = '80'
     $env:CARGO_TERM_COLOR = 'always'
+    $env:CARGO_INCREMENTAL = '1'
     Push-Location (Join-Path $InstallRoot 'src-tauri')
     try {
         # ⚠️ 绝不改成 cargo build --release：custom-protocol feature 只有 tauri CLI 会带上，

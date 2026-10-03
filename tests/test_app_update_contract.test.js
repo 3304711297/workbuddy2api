@@ -231,6 +231,22 @@ test('交接脚本必须走 tauri CLI 重建，并校验产物真伪', () => {
   assert.ok(/index-\*\.js/.test(code), '脚本未校验前端资源是否内嵌进 exe');
 });
 
+test('交接脚本必须支持输入感知跳过前端构建并开启增量编译加速', () => {
+  const code = handoff
+    .split('\n')
+    .filter(line => !line.trimStart().startsWith('#'))
+    .join('\n');
+
+  assert.ok(
+    /\$frontendInputsChanged/.test(code) && /hasExistingDist/.test(code),
+    '脚本缺少输入感知的前端构建跳过判定（非前端改动无需重复 npm run build）'
+  );
+  assert.ok(
+    /CARGO_INCREMENTAL\s*=\s*['"]1['"]/.test(code),
+    '脚本未设置 CARGO_INCREMENTAL = 1 以加速 Rust 增量重编'
+  );
+});
+
 test('交接脚本必须等 GUI 退出并能在失败后回滚', () => {
   assert.ok(/Get-Process -Id \$GuiPid/.test(handoff), '脚本未等待发起更新的 GUI 退出');
   assert.ok(/回滚/.test(handoff), '脚本缺少失败回滚（构建失败会把用户留在半更新状态）');

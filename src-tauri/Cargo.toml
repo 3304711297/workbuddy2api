@@ -28,5 +28,8 @@ dirs = "6"
 custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
+opt-level = 3
 strip = true
-lto = true
+lto = "thin"
+codegen-units = 16
+incremental = true

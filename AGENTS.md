@@ -133,6 +133,10 @@ plain cargo 会**静默产出无前端的空壳 exe**（且照常打印 "Built a
 （历史背景：早先使用 reqwest/rustls 时空壳约 15.57MB，完整约 15.66MB；3929e62 优化为 Windows native-tls 后，
 二进制免去 ring/rustls 静态代码，整体体积缩减至约 13.6MB。正确产物尺寸随依赖与功能演进，脚本尺寸下限基准已校准为 10MB 防残损，决定性判据为前端资源内嵌命中，而非死记数字）。
 
+**构建加速与增量优化（借鉴 Hermes 输入感知机制）**：
+Release 配置采用 `lto = "thin"` + `codegen-units = 16` + `incremental = true`，摆脱单核 Fat LTO 链接数分钟的泥潭，实现多核并行代码生成与增量对象缓存；
+更新脚本 `windows.ps1` 采用输入感知判断：若本次提交未改动前端源码（`src/`、`index.html`、`vite.config.js` 等），自动复用既有 `dist/` 产物跳过 `npm run build`，使只改动反代内核/文档时的更新重编耗时大幅下降。
+
 **验证产物真伪的方法**（构建日志说成功不算数）：
 
 ```python
