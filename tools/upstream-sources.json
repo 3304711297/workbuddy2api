@@ -43,10 +43,10 @@
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "1b6abaa0",
-      "last_synced_sha": "1b6abaa0cce4a960749494cad56d67fe87a6ee1f",
+      "last_synced_commit": "e05edb72",
+      "last_synced_sha": "e05edb7249b26e3fc071170cd277c6b8e9c4ce1d",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 35c5ae9c→1b6abaa0（包含 PR #82、PR #83、PR #87、PR #90、PR #91、issue #92、issue #94 及 1.11.11-panel 版本 bump，涵盖 4b944440、d19add41、981bbe2d、39af6b7f、b98fb4f7、a4557dc2、47112c73、5e0adb33、f1496d0a、1b6abaa0 等 15 项提交）：1. PR #82 虚拟实例权重分配快过期账号：本仓已有更严谨的凭据就绪门禁 + 日粒度到期分层（expire_priority）打散，无需虚拟 slot；2. PR #83/PR #90 积分保底 credit_floor 与目录倍率预热兜底：防止触底号接收费模型被打穿后导致免费模型一同 402，该机制依赖常驻多租户集中式账号池和每笔请求余额本地插值/轮询账本，本仓为个人轻量桌面网关，多账号以故障转移为主，不维护复杂账本状态机；3. PR #87 用量页重构与来源 IP/UA 查询：属其 Web 控制台专有，本仓采用原生桌面 GUI；4. PR #91 国际版活跃上报放开：本仓不做自动化打卡脚本以规避风控；5. Issue #92 前缀缓存命中率：本仓在 usage.jsonl 与契约测试中早已深度落地；6. Issue #94 刷新时同步昵称：本仓凭证真源由桌面端同步维护，无需调用 Web 资料接口。**全部不吸收**。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 1b6abaa0→e05edb72（40 项提交，发布 1.12.0-panel）：改动涵盖出站管线 mergeAdjacentToolCalls（相邻工具调用合并）、sanitizeMessages 洗 reasoning 字段、上游超时不罚号、分段睡眠时钟校验、首页积分 FEFO 到期卡片、全局目录桌面 UA 补齐、11101 bad_params 快速 400 失败、GPT 系 max_tokens 抬至下限 16、暂停选号 paused 状态、请求归档按事件时间排序、速率扣除 TTFB 及模型锁池视图等。**未采纳**：本仓为轻量单用户桌面网关，基于原生 Tauri GUI 与独立流式响应管线；多账号由 AccountRotator 结合到期分层调度，无需其 Web 控制台专有的模型锁池视图与复杂 UI 表单修复；且本仓流式输出保持端到端纯净透传，不侵入式篡改工具调用或伪装状态。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -61,10 +61,10 @@
       "name": "Workbuddy2API 增强版（Joy4Fire，借鉴雷达）",
       "repo": "Joy4Fire/Workbuddy2API",
       "branch": "main",
-      "last_synced_commit": "45037e7e",
-      "last_synced_sha": "45037e7e45ecb31906cbe2a8069535e2de336bee",
+      "last_synced_commit": "d0909982",
+      "last_synced_sha": "d090998259a0054a9aa1184e1f3ebeaa40c817b6",
       "absorbed": "借鉴雷达（横向对比与特性雷达）",
-      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 9946a6b2→45037e7e（发布 0.6.2）：改动涉及账号池并发锁占位（满载等待10s超时报503）、区域目录低价优先路由、SSE心跳转发反压最多缓存32块、历史正文体积在SQL中聚合，以及数据库升级至 schema v8 等。**未采纳**：本仓为个人轻量桌面网关，多账号通过 AccountRotator 采用到期分层与单飞探针调度，无需复杂的集中式多租户并发排队锁与目录竞价路由；本仓已具备快照日志自动截断轮转，无大并发内存膨胀问题。"
+      "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 45037e7e→d0909982（commit d0909982，发布 0.6.3）：fix(models) 修复合并客户端模型目录时跨区域 fallback 导致的目录污染。**未采纳**：本仓各上游端点与模型能力矩阵按 realm/provider 严格隔离，天然不执行盲目跨区域目录 fallback，模型列表保持高确定性，无对应缺陷。"
     },
     "wb2api-upstream-shouzhuo": {
       "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
@@ -79,10 +79,10 @@
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "6c2a6637",
-      "last_synced_sha": "6c2a6637f27dcecb6c4956392dfd936fac687306",
+      "last_synced_commit": "4bdeaf03",
+      "last_synced_sha": "4bdeaf03df51313a902e6f1243d1c8e11b384ea4",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。本轮评估 05a8db14→6c2a6637（含 15 项提交）：涉及 Docker 发布流水线、按 API Key 限制可用模型列表（per-key model restrictions）、后台请求过滤放行用户自身的 context compaction、单账号配置每日 token 预算（daily_token_limit 防 6004）、通过 wb_webagent.py 走 ACP JSON-RPC 模拟网页端对话打卡签到、禁用账号时保留 proxySlot 绑定，以及暂停发版说明。**未采纳**：本仓为个人桌面客户端，无多租户 API Key 模型细粒度管控或代理槽绑定需求；本仓坚决不做模拟会话定时自动化打卡以规避风控；客户端上下文压缩等背景请求由 Hermes/Claude Code 等原生处理，无跟进需求。"
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。本轮评估 6c2a6637→4bdeaf03（55 项提交，发布 v1.6.14）：涵盖解密 Electron 桌面端本地凭据、OpenRouter 实时计价与价目表、按 API Key 限制模型与用量看板、按日积分/token 双重限额护栏、代理槽出口地区 IP 展示、Docker 一键部署模板、国际化中英文切换等。**未采纳**：本仓为个人本地桌面客户端网关，非多租户托管服务，无多用户 API Key 计费与出口 IP 探测需求；凭证真源统一收敛于 accounts.json 与桌面端未加密会话，不引入额外 cryptography 加解密依赖。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
@@ -124,19 +124,19 @@
       "name": "multi2api 熔断与会话粘性版（Practice019，原 workbuddy2api，借鉴雷达）",
       "repo": "Practice019/multi2api",
       "branch": "master",
-      "last_synced_commit": "cec3569b",
-      "last_synced_sha": "cec3569bebe2481b597b73f4e30562cdb170238f",
+      "last_synced_commit": "def0fb9f",
+      "last_synced_sha": "def0fb9f7c8140176ed014f989a8c38cea72cb27",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；原 workbuddy2api 更名为 multi2api。监控整仓新提交。本轮评估 3da3d767→cec3569b（包含 0f1c9434、7612eb26、aa159e63 与 cec3569b 等 5 项提交）：引入 Loomy 讯飞/豆包（doubao-seedream-5-lite）生图端点支持、客户端聊天工具分区注入、工具循环流式两态判断，以及修复其生图腾讯 COS 签名 URL HEAD 探测 403 与 Markdown alt 字符转义截断。**未采纳**：本仓专注于 WorkBuddy/CodeBuddy 官方生态的协议兼容反代与推理，架构上不引入非官方第三方服务（Loomy/豆包生图）及其客户端工具循环劫持；本仓流式输出保持端到端纯净透传，无需侵入式注入伪工具。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；原 workbuddy2api 更名为 multi2api。监控整仓新提交。本轮评估 cec3569b→def0fb9f（21 项提交）：引入第十一个上游 ZCode（智谱 GLM Coding Plan）、Trae 签到与 Raccoon 后台续期任务、修复生图端点预览 URL 与请求日志统计回填、账号列表增加成功列。**未采纳**：本机已于 2026-09-09 彻底退役拆除 ZCode；本仓聚焦 WorkBuddy/CodeBuddy 官方生态，不引入非官方第三方服务及签到续期脚本。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心延续版（HanawaBanana，原 Sliverkiss，借鉴雷达）",
       "repo": "HanawaBanana/workbuddy2api",
       "branch": "master",
-      "last_synced_commit": "81225d05",
-      "last_synced_sha": "81225d05dfe2cf5d92eaa0bd1af0dd927bd6ef1b",
+      "last_synced_commit": "73bb0237",
+      "last_synced_sha": "73bb02374359d480f917ac99a1bd76e14ad95efe",
       "absorbed": "借鉴雷达（横向对比与加权调度/多账号池核心架构参考；本轮起其源码作为错误码语义的**上游真源**用于交叉验证）",
-      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；原 Sliverkiss 仓库删库后由 HanawaBanana 以完整历史接续维护（默认分支 master）。监控整仓新提交。本轮评估 9a26ae7a→81225d05（共 37 项提交）：1. 镜像构建支持 ARG GOPROXY 避免国内拉 Go 模块超时；2. 成功响应透出 X-Wb-Account 头（本仓已有 X-WorkBuddy-Active-Account）；3. 新增 Prometheus /metrics 文本端点与可用性阈值告警（本仓为本地桌面工具，不接入集中式 Prometheus/HMAC 告警中间件）；4. 新增手动触发排程任务 admin 端点 POST /admin/tasks/{name}/run；5. 扩展 POST /v1/checkin 手动签到入口（本仓已有 UI/IPC 原生支持）；6. 引入账号分组隔离与多密钥 groups ACL 及凭证健康指标（本仓基于 AccountRotator 维护个人凭证）。**全部无需采纳**。"
+      "note": "Go 语言实现的高性能多账号 OpenAI 兼容网关核心，支持 OAuth 登录、三因子加权池调度与流式响应；原 Sliverkiss 仓库删库后由 HanawaBanana 以完整历史接续维护（默认分支 master）。监控整仓新提交。本轮评估 81225d05→73bb0237（4 项提交）：新增签到结果落盘与只读历史端点 GET /v1/checkin/history、放行 fork PR 检出及 PR CI 失败时评论 @ 作者通知机制。**未采纳**：本仓签到状态与历史由桌面 GUI 原生状态机持久化管理；CI 失败 @ 作者机制属于多贡献者公共仓库协作特性，本仓为个人工作流，无需采纳。"
     },
     "wb2api-upstream-neipor": {
       "name": "codebuddy-cli2api 全协议网关（neipor，借鉴雷达）",
