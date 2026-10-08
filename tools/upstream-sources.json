@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "WorkBuddy2API 社区反代生态借鉴仓库看门清单。由 upstream-watch 工作流定期比对上游新提交，出现新特性或风控变更时评估摘樱桃（Cherry-pick）。",
-  "updated_at": "2026-10-03",
+  "updated_at": "2026-10-08",
   "sources": {
     "wb2api-upstream-xiaofan": {
       "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
@@ -43,10 +43,10 @@
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
-      "last_synced_commit": "e05edb72",
-      "last_synced_sha": "e05edb7249b26e3fc071170cd277c6b8e9c4ce1d",
+      "last_synced_commit": "d66384d9",
+      "last_synced_sha": "d66384d9e3d69655f799d7d8f2e5fba1946e00ab",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
-      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 1b6abaa0→e05edb72（40 项提交，发布 1.12.0-panel）：改动涵盖出站管线 mergeAdjacentToolCalls（相邻工具调用合并）、sanitizeMessages 洗 reasoning 字段、上游超时不罚号、分段睡眠时钟校验、首页积分 FEFO 到期卡片、全局目录桌面 UA 补齐、11101 bad_params 快速 400 失败、GPT 系 max_tokens 抬至下限 16、暂停选号 paused 状态、请求归档按事件时间排序、速率扣除 TTFB 及模型锁池视图等。**未采纳**：本仓为轻量单用户桌面网关，基于原生 Tauri GUI 与独立流式响应管线；多账号由 AccountRotator 结合到期分层调度，无需其 Web 控制台专有的模型锁池视图与复杂 UI 表单修复；且本仓流式输出保持端到端纯净透传，不侵入式篡改工具调用或伪装状态。"
+      "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 e05edb72→d66384d9（8 项提交，发布 1.13.0-panel）：改动涵盖企业版账号能力门控与企业额度展示（enterpriseId 门控跳过个人成长与每日签到任务、额度分流走 get-enterprise-user-usage）、暂停选号单列统计（区分 paused 与 disabled）、积分到期提醒按最早到期批次升序重排、图表 tooltip 包入柱子 <g> 结构修复全局同数据问题。**未采纳**：本仓面向个人本地桌面客户端网关，无企业版组织架构/多租户额度需求；本仓基于原生 Tauri + 极客控制台，用量统计与到期展示早已按时间精准排序，无 Web 控制台专有的 SVG 柱状图父子层级缺陷与多列卡片问题。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",
@@ -79,10 +79,10 @@
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "4bdeaf03",
-      "last_synced_sha": "4bdeaf03df51313a902e6f1243d1c8e11b384ea4",
+      "last_synced_commit": "457e7081",
+      "last_synced_sha": "457e708106f5c780f7a95c90374576eae59d254b",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。本轮评估 6c2a6637→4bdeaf03（55 项提交，发布 v1.6.14）：涵盖解密 Electron 桌面端本地凭据、OpenRouter 实时计价与价目表、按 API Key 限制模型与用量看板、按日积分/token 双重限额护栏、代理槽出口地区 IP 展示、Docker 一键部署模板、国际化中英文切换等。**未采纳**：本仓为个人本地桌面客户端网关，非多租户托管服务，无多用户 API Key 计费与出口 IP 探测需求；凭证真源统一收敛于 accounts.json 与桌面端未加密会话，不引入额外 cryptography 加解密依赖。"
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。本轮评估 4bdeaf03→457e7081（27 项提交，发布 v1.6.15 与 v1.6.16）：涵盖原生 Anthropic Messages 协议支持、孤儿 function_call_output 携带图片多模态保留、运行期剥离 lastError/cooldownUntil 磁盘持久化、会话亲和上限 WB_AFFINITY_MAX_MSGS 与动态并发槽、账号软限流指数退避与熔断、企业版积分接口分流、Web 看板区块导航与 i18n 优化等。**未采纳**：本仓面向个人本地桌面代理，Anthropic Messages 协议与 Responses 多模态已独立完整支持（契约测试全绿）；冷却调度由内存态 AccountRotator + time.monotonic() 驱动不落盘；且无企业版与多用户 Web 租户需求，无需引入额外改动。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
