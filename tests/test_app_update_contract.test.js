@@ -231,6 +231,26 @@ test('交接脚本必须走 tauri CLI 重建，并校验产物真伪', () => {
   assert.ok(/index-\*\.js/.test(code), '脚本未校验前端资源是否内嵌进 exe');
 });
 
+test('交接脚本必须支持自动探测 Tauri CLI 执行器（cargo 与 npx 双通道）防环境缺失 cargo-tauri', () => {
+  const code = handoff
+    .split('\n')
+    .filter(line => !line.trimStart().startsWith('#'))
+    .join('\n');
+
+  assert.ok(
+    /function\s+Resolve-TauriRunner/.test(code),
+    '脚本缺少 Resolve-TauriRunner 函数：未对 cargo 与 npx 执行器做探测解析'
+  );
+  assert.ok(
+    /Invoke-Logged\s+-FilePath\s+\$tauriRunner\s+-Arguments\s+@\(\s*'tauri'\s*,\s*'build'\s*,\s*'--no-bundle'\s*\)/.test(code),
+    '构建主流程未通过动态解析的 $tauriRunner 执行 tauri build --no-bundle'
+  );
+  assert.ok(
+    /Invoke-Logged\s+-FilePath\s+\$tauriRunner\s+-Arguments\s+@\(\s*'tauri'\s*,\s*'build'\s*,\s*'--no-bundle'\s*\)\s+-What\s+'回滚后 Rust 重建'/.test(code),
+    '回滚流程未通过动态解析的 $tauriRunner 执行回滚重建'
+  );
+});
+
 test('交接脚本必须支持输入感知跳过前端构建并开启增量编译加速', () => {
   const code = handoff
     .split('\n')

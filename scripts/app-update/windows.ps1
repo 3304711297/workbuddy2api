@@ -550,6 +550,23 @@ function Invoke-Logged {
     return $code
 }
 
+function Resolve-TauriRunner {
+    # 优先检测 cargo 是否安装了 tauri-cli 插件（cargo tauri 子命令）
+    $cargoTauri = (& cargo tauri --version 2>&1)
+    if ($LASTEXITCODE -eq 0 -and $cargoTauri) {
+        return 'cargo'
+    }
+
+    # 降级使用项目依赖中的 @tauri-apps/cli（经由 npx）
+    $npxTauri = (& npx tauri --version 2>&1)
+    if ($LASTEXITCODE -eq 0 -and $npxTauri) {
+        return 'npx'
+    }
+
+    # 兜底回退为 cargo（若环境异常，调用时由 Invoke-Logged 记录并暴露错误）
+    return 'cargo'
+}
+
 $exePath = Join-Path $InstallRoot 'src-tauri\target\release\workbuddy2api.exe'
 # 产物完整性基准尺寸下限（10MB，native-tls 优化后产物约 13.6MB）：防范编译产物残损或空壳 stub；真伪由后续的前端资源内嵌校验（index-*.js）做决定性拦截
 $SHELL_BASELINE_BYTES = 10485760
@@ -843,12 +860,14 @@ try {
     $env:CARGO_TERM_PROGRESS_WIDTH = '80'
     $env:CARGO_TERM_COLOR = 'always'
     $env:CARGO_INCREMENTAL = '1'
+    $tauriRunner = Resolve-TauriRunner
+    Write-Log "使用 Tauri CLI 执行器：$tauriRunner"
     Push-Location (Join-Path $InstallRoot 'src-tauri')
     try {
         # ⚠️ 绝不改成 cargo build --release：custom-protocol feature 只有 tauri CLI 会带上，
         # plain cargo 会静默产出无前端的空壳 exe 且照常打印成功。
-        if ((Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What 'Rust 重建') -ne 0) {
-            Throw-Failure 'rust-build-failed' 'cargo tauri build 失败（Rust 编译未通过）'
+        if ((Invoke-Logged -FilePath $tauriRunner -Arguments @('tauri', 'build', '--no-bundle') -What 'Rust 重建') -ne 0) {
+            Throw-Failure 'rust-build-failed' "$tauriRunner tauri build 失败（Rust 编译未通过）"
         }
     } finally {
         Pop-Location
@@ -991,7 +1010,8 @@ catch {
                     $env:CARGO_TERM_PROGRESS_WHEN = 'always'
                     $env:CARGO_TERM_PROGRESS_WIDTH = '80'
                     $env:CARGO_TERM_COLOR = 'always'
-                    $cargoCode = Invoke-Logged -FilePath 'cargo' -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建'
+                    $tauriRunner = Resolve-TauriRunner
+                    $cargoCode = Invoke-Logged -FilePath $tauriRunner -Arguments @('tauri', 'build', '--no-bundle') -What '回滚后 Rust 重建'
                     if ($cargoCode -eq 0) {
                         $rollbackRebuildOk = $true
                     } else {

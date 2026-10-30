@@ -371,7 +371,7 @@ workbuddy2api.exe (GUI)
   用户可能已手动 pull 过、或上次更新中断，此时工作树已领先而远端无新提交；
   只看远端会得出「无需重建」→ 点了更新却什么都没发生。脚本为此接收
   `-CurrentBuildSha`（Rust 传烘焙 sha）；拿不到构建 sha 时**保守重建**（慢但正确）。
-  ⚠️ 脚本内**必须**用 `cargo tauri build`（裸 cargo 会产出空壳）；
+  ⚠️ 脚本内**必须**走 Tauri CLI 重建（裸 cargo 会产出空壳），且由 `Resolve-TauriRunner` 动态探测 `cargo tauri`（若安装了 cargo-tauri）或降级回退到项目本地 `@tauri-apps/cli`（经由 `npx tauri`）双通道支持，防止环境未单独安装 cargo-tauri 时更新重建与回滚直接报 `error: no such command: tauri`。
   `--ff-only` 不可改成 merge/`reset --hard origin`（会覆盖或丢失用户提交）。
 
   **③ 阶段进度与失败分级**：脚本每步 `Write-State` 写
