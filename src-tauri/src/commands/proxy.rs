@@ -23,11 +23,42 @@ pub struct TestChatResult {
     pub protocol: String,
 }
 
-/// Python 解释器定位：`WORKBUDDY2API_PYTHON`（兼容旧名 `C2O_PYTHON`）环境变量优先 → 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留现机行为）→ PATH 中的 python
-fn resolve_python_interpreter() -> PathBuf {
+/// Python 解释器定位：
+/// 1. `WORKBUDDY2API_PYTHON`（兼容旧名 `C2O_PYTHON`）环境变量显式指定优先
+/// 2. converter.py 所在目录、可执行文件祖先目录或当前工作目录下的 `.venv` 虚拟环境
+/// 3. 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留官方安装兼容）
+/// 4. PATH 中的 python 兜底
+fn resolve_python_interpreter(script_dir: Option<&std::path::Path>) -> PathBuf {
     if let Some(p) = env_compat("PYTHON").map(PathBuf::from).filter(|p| p.exists()) {
         return p;
     }
+
+    let mut search_dirs = Vec::new();
+    if let Some(dir) = script_dir {
+        search_dirs.push(dir.to_path_buf());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for anc in exe_dir.ancestors().take(6) {
+                search_dirs.push(anc.to_path_buf());
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        search_dirs.push(cwd);
+    }
+
+    for dir in search_dirs {
+        #[cfg(target_os = "windows")]
+        let venv_py = dir.join(".venv").join("Scripts").join("python.exe");
+        #[cfg(not(target_os = "windows"))]
+        let venv_py = dir.join(".venv").join("bin").join("python");
+
+        if venv_py.exists() {
+            return venv_py;
+        }
+    }
+
     // 内置解释器路径从用户主目录派生，等价于原开发机绝对路径但不再硬编码用户名
     let bundled = user_home().join(".workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe");
     if bundled.exists() {
@@ -59,8 +90,6 @@ pub fn proxy_start(
             return Ok(format!("already-running(port {port})"));
         }
     }
-
-    let python = resolve_python_interpreter();
 
     // converter.py 定位：`WORKBUDDY2API_CONVERTER`（兼容旧名 `C2O_CONVERTER`）环境变量优先 → 资源目录 → 可执行文件目录逐级向上 → 当前工作目录兜底
     let script = match env_compat("CONVERTER")
@@ -103,6 +132,8 @@ pub fn proxy_start(
             }
         }
     };
+
+    let python = resolve_python_interpreter(script.parent());
 
     let mut cmd = Command::new(python);
     cmd.env("PYTHONIOENCODING", "utf-8");
@@ -2401,5 +2432,35 @@ mod orphan_climb_tests {
             }
         });
         assert_eq!(res, Ok(None));
+    }
+}
+
+#[cfg(test)]
+mod python_resolver_tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_python_prefers_local_venv() {
+        let unique = format!(
+            "wb2a_venv_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let temp = std::env::temp_dir().join(unique);
+        #[cfg(target_os = "windows")]
+        let venv_py = temp.join(".venv").join("Scripts").join("python.exe");
+        #[cfg(not(target_os = "windows"))]
+        let venv_py = temp.join(".venv").join("bin").join("python");
+
+        std::fs::create_dir_all(venv_py.parent().unwrap()).unwrap();
+        std::fs::write(&venv_py, b"fake-python").unwrap();
+
+        let resolved = resolve_python_interpreter(Some(&temp));
+        assert_eq!(resolved, venv_py);
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }
