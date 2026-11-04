@@ -4,13 +4,13 @@
   "updated_at": "2026-11-04",
   "sources": {
     "wb2api-upstream-xiaofan": {
-      "name": "workbuddy2api 原版（xiaofan6ya，借鉴雷达）",
-      "repo": "xiaofan6ya/workbuddy2api",
+      "name": "wb2api 原版（xiaofan6ya，借鉴雷达；原 workbuddy2api 已更名）",
+      "repo": "xiaofan6ya/wb2api",
       "branch": "master",
-      "last_synced_commit": "aeb0afbc",
-      "last_synced_sha": "aeb0afbc873888deef0a856367bf2c1245003ca2",
+      "last_synced_commit": "21276d21",
+      "last_synced_sha": "21276d214667eeb05c703d5d2de0abbea3a0fdaa",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 14003 瞬时模型级限流识别与秒级短冷却机制；吸收其「HTTP 200 包着的错误不得当成功」语义）",
-      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 e66d1492→aeb0afbc（40 项提交，发布 1.0.2 至 1.10.0）：涵盖积分到期面板/调度、紧凑表格与移动端适配、Android 独立应用与后台唤醒保活、Electron/系统托盘客户端与更新机制、批量权益与 DeepSeek 补偿一键领取、账号专属池绑定与 API Key 并发数限制、实时请求动态推送等。**未采纳**：本仓为 Windows 平台 Tauri v2 极客客户端架构，面向个人本地网关，不依赖 Android/公共 Web/多用户并发租户体系；多账号调度已有原生 AccountRotator/Half-Open 探针和积分到期加权；且桌面托盘与生命周期由 Rust 端稳定管控，无需引入外部复杂机制。"
+      "note": "workbuddy2api 的借鉴源仓库（同名网关+多账号共享平台）；监控整仓新提交，出现可采纳改进（协议适配器/投影压缩/脱敏词表）时评估摘樱桃。本轮评估 e66d1492→aeb0afbc（40 项提交，发布 1.0.2 至 1.10.0）：涵盖积分到期面板/调度、紧凑表格与移动端适配、Android 独立应用与后台唤醒保活、Electron/系统托盘客户端与更新机制、批量权益与 DeepSeek 补偿一键领取、账号专属池绑定与 API Key 并发数限制、实时请求动态推送等。**未采纳**：本仓为 Windows 平台 Tauri v2 极客客户端架构，面向个人本地网关，不依赖 Android/公共 Web/多用户并发租户体系；多账号调度已有原生 AccountRotator/Half-Open 探针和积分到期加权；且桌面托盘与生命周期由 Rust 端稳定管控，无需引入外部复杂机制。 【2026-11-04 仓库迁移】原 xiaofan6ya/workbuddy2api 已 404（删库/更名）。经 GitHub 用户 API 检索，同作者 xiaofan6ya 仍活跃且新仓库 wb2api（2026-10-22 创建，master）README 自述「把 wb 登录态接入 OpenAI、Responses 和 Anthropic 兼容 API，提供多账号池、API Key 与自动化管理界面」，目录含同源的 converter.py / desensitize.py / anthropic_adapter.py，确认为原仓库更名后的延续。看门迁移至该仓库，基线取 HEAD 21276d21 重新起算。"
     },
     "wb2api-upstream-distpub": {
       "name": "workbuddy2api 增强 fork（DistPub，借鉴雷达）",
@@ -31,13 +31,13 @@
       "note": "腾讯 copilot 系反代的活跃衍生库（MIT，25★），含凭证轮换/令牌管理/多账号调度等 workbuddy2api 已补齐的能力；监控整仓新提交，出现可采纳改进时评估摘樱桃。【合规红线】上游 xueyue33/codebuddy2api 无 LICENSE（all rights reserved），MIT 仅覆盖 IceeAn 自 bce86ded 起独立重写的当前树；只借鉴思路不整文件搬运，若取代码须出自当前树并在 THIRD_PARTY_NOTICES.md 署名 IceeAn。"
     },
     "wb2api-upstream-momo": {
-      "name": "workbuddy-switch-gateway（iuuuuuuuu 延续，原 momo0410，借鉴雷达）",
-      "repo": "iuuuuuuuu/workbuddy-switch-gateway",
+      "name": "workbuddy-switch-gateway（moshouhot 延续；原 momo0410 → iuuuuuuuu 链路已全部 404，借鉴雷达）",
+      "repo": "moshouhot/workbuddy-switch-gateway",
       "branch": "main",
-      "last_synced_commit": "596ea65d",
-      "last_synced_sha": "596ea65d5781ab329654d71e44055cf46b4a61ec",
+      "last_synced_commit": "d815cefc",
+      "last_synced_sha": "d815cefca98c26bdf79c0a71803cdf807125136a",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其积分到期日分层调度与到期时间解析）",
-      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；原 momo0410 仓库转私有后由 iuuuuuuuu 延续镜像看门（含 0.8.16 全部提交）。监控整仓新提交。本轮评估 ebd9427b→596ea65d（134 项提交，发布 1.0.1 至 1.0.37）：涵盖多产品聚合网关架构（接入 Qoder、ZCode 等多平台）、自动养号与每日任务自动完成、决策笔记树接进 CI、用量统计与流式中断归因、上游状态码透传等。**未采纳**：本机已于 2026-09-09 彻底退役拆除 ZCode，本仓聚焦 WorkBuddy/CodeBuddy 官方生态，不引入非官方第三方平台路由与养号脚本；本仓错误分类与断流判定已有契约测试锁定。"
+      "note": "账号管理+OpenAI兼容网关；已借鉴其按积分到期日分层选号调度算法（先烧快过期额度），优先调度即将过期账号池；原 momo0410 仓库转私有后由 iuuuuuuuu 延续镜像看门（含 0.8.16 全部提交）。监控整仓新提交。本轮评估 ebd9427b→596ea65d（134 项提交，发布 1.0.1 至 1.0.37）：涵盖多产品聚合网关架构（接入 Qoder、ZCode 等多平台）、自动养号与每日任务自动完成、决策笔记树接进 CI、用量统计与流式中断归因、上游状态码透传等。**未采纳**：本机已于 2026-09-09 彻底退役拆除 ZCode，本仓聚焦 WorkBuddy/CodeBuddy 官方生态，不引入非官方第三方平台路由与养号脚本；本仓错误分类与断流判定已有契约测试锁定。 【2026-11-04 仓库迁移】原 momo0410 仓库早已转私有，其延续镜像 iuuuuuuuu/workbuddy-switch-gateway 本轮亦返回 404（iuuuuuuuu 账号现存仓库仅 qwen-compress 等无关项）。GitHub 检索同名仓库：sunju0621 为空仓，moshouhot/workbuddy-switch-gateway 是唯一有实质代码的公开延续（README「账号管理 + OpenAI 兼容网关，一个桌面应用搞定」，Windows 桌面应用，MIT，最后提交 2026-09-11）。迁移看门并以 HEAD d815cefc 为新基线；该仓活跃度低，若连续两个巡检周期无新提交可考虑降级为「归档参考」。"
     },
     "wb2api-upstream-linguo": {
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
@@ -67,22 +67,22 @@
       "note": "社区高活跃衍生版本，集成了多项参考项目特性与 WebUI/代码审查改进；监控整仓新提交，评估可采纳特性。本轮评估 d0909982→3f4a81ef（1 项提交，发布 0.6.4）：允许在 Docker 容器网络下进行带 Token 保护的局域网访问。**未采纳**：本仓为 Windows 物理机桌面客户端架构，局域网监听在无密钥时严格 Fail-Closed 拒绝启动，不涉及 Docker 专用网络模式。"
     },
     "wb2api-upstream-shouzhuo": {
-      "name": "codebuddy2api 协议适配库（ShouZhuo0413，借鉴雷达）",
-      "repo": "ShouZhuo0413/codebuddy2api",
+      "name": "codebuddy2api 三协议适配库（maiphucgiang，借鉴雷达；原 ShouZhuo0413 已 404）",
+      "repo": "maiphucgiang/codebuddy2api",
       "branch": "main",
-      "last_synced_commit": "a85becd7",
-      "last_synced_sha": "a85becd7773a012591c129f4d80e38e1d9068acf",
+      "last_synced_commit": "5cc4fc1f",
+      "last_synced_sha": "5cc4fc1f17f7f553ead2bb943fef3e4f5de8da4f",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 Responses 协议双向转换与流式语义状态机；本轮吸收其「流被截断不得报成功」的 validate_stream_end 思路）",
-      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 bdda19fd→a85becd7（包含 PR #22 commit fa5002e9 与 PR #28 commit a85becd7 / ce26dfdf）：PR #22 将 find_auth_file 从文件名排序改为按 mtime 最新排序以防止读取过期的旧 .info 凭据文件；PR #28 锁定依赖版本（requirements.lock.txt）以实现确定性构建。**未采纳**：本仓 find_auth_file() 早已明确锁定优先级：优先读取桌面端同步维护的 workbuddy-desktop.info，且多账号架构统一以 accounts.json 为真源，无文件名排序读取陈旧 .info 问题；构建依赖已由 package.json/Cargo.lock/pyproject 严格锁定。"
+      "note": "腾讯代码助手转 OpenAI/Anthropic/Responses 协议适配器；已借鉴其 OpenAI Responses 协议（POST /v1/responses）双向转换与流式事件状态机设计；监控整仓新提交。本轮评估 bdda19fd→a85becd7（包含 PR #22 commit fa5002e9 与 PR #28 commit a85becd7 / ce26dfdf）：PR #22 将 find_auth_file 从文件名排序改为按 mtime 最新排序以防止读取过期的旧 .info 凭据文件；PR #28 锁定依赖版本（requirements.lock.txt）以实现确定性构建。**未采纳**：本仓 find_auth_file() 早已明确锁定优先级：优先读取桌面端同步维护的 workbuddy-desktop.info，且多账号架构统一以 accounts.json 为真源，无文件名排序读取陈旧 .info 问题；构建依赖已由 package.json/Cargo.lock/pyproject 严格锁定。 【2026-11-04 仓库迁移】原 ShouZhuo0413/codebuddy2api 已 404（作者账号仍在，但仓库列表中已无此项）。检索替代时优先保留「三协议适配器」这一借鉴定位：maiphucgiang/codebuddy2api（★261，v1.5.3，2026-11-04 活跃，README 明示 Chat Completions / Responses / Anthropic Messages 三协议 + tool calling + streaming）为同类最活跃延续，迁移看门并以 HEAD 5cc4fc1f 为新基线。另有 shanshan0530/codebuddy2api-mirror 自称原仓库 public 镜像（含 anthropic_adapter.py / converter.py / desensitize.py，2026-09-12 后冻结），仅作内容留存参考，不纳入巡检。"
     },
     "wb2api-upstream-ardeyou": {
       "name": "workbuddy2api-hub 国际版（ardeyouxipianyi，借鉴雷达；原 workbuddy2api-intl 已更名）",
       "repo": "ardeyouxipianyi/workbuddy2api-hub",
       "branch": "main",
-      "last_synced_commit": "077fb2fc",
-      "last_synced_sha": "077fb2fcfc273e29bd1266e527afc4a3d548b516",
+      "last_synced_commit": "3bee2536",
+      "last_synced_sha": "3bee2536db704aaa5546f8646ce73c0e613eadbc",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其国际版客户端 UA 仿真规范；v1.4.0 的 Responses 多轮 reasoning item 处理已按同语义在 responses_compat._convert_input_items 落地）",
-      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。本轮评估 457e7081→af706fc3（522 项提交，发布 v1.7.0 至 v1.7.17）：包含移动端面板适配、出口手机号脱敏、一键部署模式分流（local/lan/public）、自定义国内版对话上游（WB_CN_CHAT_UPSTREAM）、OpenRouter 价格校准系数、Codex 一键配置内联 bearer token 等。**未采纳**：本仓为个人本地专用 Tauri 客户端，出站与日志脱敏已全面覆盖，不需要多用户部署与公网分流。\n\n本轮评估 af706fc3→077fb2fc：**采纳**其 at-rest 加密凭据解密链路（`wb_atrest.py`，纯标准库 AES-256-GCM + ELECTRON_RUN_AS_NODE 取构建密钥，修 #37），并已在 THIRD_PARTY_NOTICES/README 署名。其余为媒体实现文档、11-128 渠道指纹排障、身份诊断脚本、看板移动端适配等，属其 Web 看板生态，本仓 Tauri 桌面端不适用。"
+      "note": "WorkBuddy 国际版反代网关（www.workbuddy.ai）；已借鉴其国际版官方桌面 User-Agent 规范与海外域适配规则；监控整仓新提交。本轮评估 457e7081→af706fc3（522 项提交，发布 v1.7.0 至 v1.7.17）：包含移动端面板适配、出口手机号脱敏、一键部署模式分流（local/lan/public）、自定义国内版对话上游（WB_CN_CHAT_UPSTREAM）、OpenRouter 价格校准系数、Codex 一键配置内联 bearer token 等。**未采纳**：本仓为个人本地专用 Tauri 客户端，出站与日志脱敏已全面覆盖，不需要多用户部署与公网分流。\n\n本轮评估 af706fc3→077fb2fc：**采纳**其 at-rest 加密凭据解密链路（`wb_atrest.py`，纯标准库 AES-256-GCM + ELECTRON_RUN_AS_NODE 取构建密钥，修 #37），并已在 THIRD_PARTY_NOTICES/README 署名。其余为媒体实现文档、11-128 渠道指纹排障、身份诊断脚本、看板移动端适配等，属其 Web 看板生态，本仓 Tauri 桌面端不适用。 本轮评估 077fb2fc→ff47b07a（10 项提交，12 文件）：① `fix(panel)` 侧栏 aria-current 同步、`refactor(settings)` 删除废弃 WB_DEEPSEEK_FLASH_FORCE_SG —— 本仓无 Web 面板与该开关，不适用；② `feat(codearts)` 模型目录透传倍率 —— 本仓不接入 CodeArts 平台，不适用；③ `fix(sanitize)` 把 `You are Claude Code, Anthropic's official CLI ...` 整句中性化（含大小写与弯引号变体）—— 本仓 desensitize.py 已有 `_CLAUDE_CODE_IDENTITY` 整句改写 + `_CLAUDE_CODE_IDENTITY_PREFIX` 前缀兜底 + 品牌词零宽打断，且 AGENTS.md 明确禁止在拿到新 11128 样本前扩词表，**未采纳**（其大小写/弯引号变体处理值得下轮复评）；④ `fix(launcher)` 拒绝「端口能连上但不答」的占用实例 —— 本仓 `Wait-PortReleased` 以探活失败即判端口已释放，存在同类形态（卡死旧内核被读成已释放，叠加 Windows SO_REUSEADDR 后可能静默双实例）。已列为**候选改进**，因涉及更新链路契约与回滚语义，需单独任务走 TDD，本轮未落地。 再评估 ff47b07a→3bee2536（12 项提交，19 文件）：① `feat(deploy)` 启动入口改 `-m wb_proxy` 省 47-54MB —— Docker/OpenWrt 部署向，本仓 Tauri 桌面端不适用；② `feat(diagnostics)` `WB_DUMP_11_128` 按需抓出站 body —— 本仓已有快照腿（`usage/snapshots.jsonl`，含完整 prompt 明文、Token/Key 脱敏、调试 Tab 重放），能力覆盖更广，**不采纳**；③ `fix(usage)` checkpoint 遇状态锁忙跳过该类 —— 本仓用量为追加写 JSONL + Rust 侧过滤，无「全量重折状态锁」架构，不适用；④ 国际版每日活跃总开关 / 登录出口代理槽 / 账号表分页与轮询指纹跳过 —— 均属其多租户 Web 面板与国际版调度，本仓个人本地 Tauri 客户端不适用。基线推进至 3bee2536。"
     },
     "wb2api-upstream-hawklithm": {
       "name": "workbuddy2api 协议扩展库（hawklithm，借鉴雷达）",
