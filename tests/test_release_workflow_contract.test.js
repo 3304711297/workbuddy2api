@@ -96,12 +96,24 @@ test('tag 必须与 tauri.conf.json 版本严格一致才允许发版', () => {
   );
 });
 
-test('产物必须有尺寸下限，防止发布空壳/残损安装包', () => {
-  assert.match(releaseCode, /10485760/, '缺少 10MB 松散下限：断掉的产物会被当成正常安装包发布');
+test('产物尺寸判据必须是安装包量级，不得套用主 exe 的 10MB', () => {
   assert.match(
     releaseCode,
-    /"\$size"\s+-lt\s+10485760/,
-    '尺寸比较逻辑缺失（应为 "$size" -lt 10485760）'
+    /"\$size"\s+-lt\s+1048576/,
+    '缺少 1MB 松散下限（应为 "$size" -lt 1048576）'
+  );
+  assert.ok(
+    !/10485760/.test(releaseCode),
+    '仍在使用 10MB 下限：那是主二进制的判据，NSIS 是 LZMA 压缩体（13.6MB exe 压到约 3.5MB），' +
+      '实测会把正常安装包误判成残损并中止发版'
+  );
+});
+
+test('产物文件名必须与版本号绑定，防止传错包', () => {
+  assert.match(
+    releaseCode,
+    /workbuddy2api_\$\{VER\}_x64-setup\.exe/,
+    '未断言 workbuddy2api_${VER}_x64-setup.exe：版本号与安装包不匹配时不会失败'
   );
 });
 

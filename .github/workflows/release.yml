@@ -91,24 +91,25 @@ jobs:
 
       - name: 校验产物并生成校验和
         shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          files=(src-tauri/target/release/bundle/nsis/*.exe)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::未生成 NSIS 安装包（bundle/nsis 为空），拒绝发布空 Release"
+          expected="src-tauri/target/release/bundle/nsis/workbuddy2api_${VER}_x64-setup.exe"
+          if [ ! -f "$expected" ]; then
+            echo "::error::未找到预期安装包 $expected；实际产物：$(ls -1 src-tauri/target/release/bundle/nsis 2>/dev/null || echo '(目录为空)')"
             exit 1
           fi
-          for f in "${files[@]}"; do
-            size=$(stat -c%s "$f")
-            # 松散下限：只拦截断/空壳产物，不锁死具体尺寸（依赖优化会让二进制变小）
-            if [ "$size" -lt 10485760 ]; then
-              echo "::error::$f 仅 $size 字节，低于 10MB 下限，疑似残损产物"
-              exit 1
-            fi
-            echo "产物：$f（$size 字节）"
-          done
-          sha256sum src-tauri/target/release/bundle/nsis/*.exe > SHA256SUMS.txt
+          size=$(stat -c%s "$expected")
+          # NSIS 是 LZMA 压缩体：13.6MB 主 exe 装进来约 3~4MB，
+          # 因此绝不能套用主二进制那套 10MB 判据（实测把 3.48MB 的正常包误判成残损）。
+          # 1MB 下限只用来拦截 0 字节 / 写入中断的断包。
+          if [ "$size" -lt 1048576 ]; then
+            echo "::error::$expected 仅 $size 字节，低于 1MB 下限，疑似断包/空壳"
+            exit 1
+          fi
+          echo "产物：$expected（$size 字节）"
+          sha256sum "$expected" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: 发布 Release
