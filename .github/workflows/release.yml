@@ -1,0 +1,123 @@
+name: Release
+
+# 安装包发版（2026-11-04 新增）
+#
+# 边界（改动前必读）：
+#   - 应用内自动更新**不读** GitHub Release，仍走「committed SHA 比对 + 就地重建」，
+#     见 src-tauri/src/commands/update.rs 与 tests/test_app_update_contract.test.js。
+#   - 本工作流只负责把 NSIS 安装包作为**可选分发渠道**发布，供没有 Rust/Node 工具链的用户直接安装。
+#   - 日常 CI（ci.yml）保持「只检查、不打包」：完整 tauri bundle 一次要 5~15 分钟，
+#     不该在每次 push 时消耗。
+#
+# 触发方式：
+#   ① 推送 v* tag（tag 必须与 src-tauri/tauri.conf.json 的 version 严格一致，否则 fail-closed）；
+#   ② 手动 workflow_dispatch（版本取 tauri.conf.json，tag 名 v<version>）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 发版串行化：避免两次 tag/手动触发同时抢同一个 Release tag
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build installer & publish Release
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # 完整历史：build.rs 用 git rev-parse 烘焙构建 SHA，深克隆更稳妥
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 解析并校验版本（tag 必须与 tauri.conf.json 一致）
+        id: ver
+        shell: bash
+        # tag 名属于外部可控输入，必须经 env 中转，禁止直接插值进 run:（命令注入）
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          CONF_VER=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ -z "$CONF_VER" ] || [ "$CONF_VER" = "undefined" ]; then
+            echo "::error::无法从 tauri.conf.json 读取 version"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            TAG="$REF_NAME"
+            if [ "$TAG" != "v$CONF_VER" ]; then
+              echo "::error::tag $TAG 与 tauri.conf.json 版本 $CONF_VER 不一致，拒绝发版（先将版本号改为 $TAG 再去掉 v）"
+              exit 1
+            fi
+          else
+            TAG="v$CONF_VER"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$CONF_VER" >> "$GITHUB_OUTPUT"
+          echo "发版版本：$TAG（tauri.conf.json=$CONF_VER）"
+
+      - name: 构建安装包（NSIS，必须带 bundle）
+        # 必须走 tauri CLI：裸 cargo build 会产出无前端的空壳 exe（见 AGENTS.md）
+        # tauri.conf.json 的 beforeBuildCommand 会自动先跑 npm run build
+        run: npm run tauri build
+
+      - name: 校验产物并生成校验和
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(src-tauri/target/release/bundle/nsis/*.exe)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::未生成 NSIS 安装包（bundle/nsis 为空），拒绝发布空 Release"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            size=$(stat -c%s "$f")
+            # 松散下限：只拦截断/空壳产物，不锁死具体尺寸（依赖优化会让二进制变小）
+            if [ "$size" -lt 10485760 ]; then
+              echo "::error::$f 仅 $size 字节，低于 10MB 下限，疑似残损产物"
+              exit 1
+            fi
+            echo "产物：$f（$size 字节）"
+          done
+          sha256sum src-tauri/target/release/bundle/nsis/*.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            SHA256SUMS.txt

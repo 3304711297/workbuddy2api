@@ -622,6 +622,16 @@ workbuddy2api.exe (GUI)
 - push 后**必须盯 CI 到绿**：`gh run list -R 3304711297/workbuddy2api --limit 3`。
   CI 覆盖 Build frontend / pytest / 前端单测 / cargo check / cargo test。
 - 推送若报 `Recv failure`，改走 Karing 代理（`127.0.0.1:3067`）；两种都试。
+- **安装包发版与日常 CI 彻底分离**：`ci.yml` 只做检查、**不打包**（一次完整 `cargo tauri build`
+  要 5~15 分钟 runner 时间，不该挂在每次 push 上）。`.github/workflows/release.yml` 单独负责发版：
+  推 `v*` tag 或手动 `workflow_dispatch` 时跑 `npm run tauri build`，把 NSIS 安装包与 `SHA256SUMS.txt`
+  发到 GitHub Release。
+  - 发版前必须把 `src-tauri/tauri.conf.json` 的 `version` 改成与 tag 相同（`v0.2.1` ↔ `0.2.1`），
+    否则工作流 fail-closed 直接拒绝，不会发出版本号说谎的安装包。
+  - **边界**：GitHub Release 只是「安装包分发渠道」（给没有 Rust/Node 工具链的用户），
+    应用内自动更新仍走 commit SHA 比对（第 4 节），两者互不依赖；`update.rs` 依旧不得请求 Release API。
+  - 契约锁定：`tests/test_release_workflow_contract.test.js`，其中一条是**反向断言**
+    `ci.yml` 不得出现 `tauri build` / NSIS 产物路径 —— 想「顺手」把打包挪回 CI 会立刻变红。
 
 ## 7. 已知待办（未实现，别重复造）
 
