@@ -559,6 +559,7 @@ workbuddy2api.exe (GUI)
     - **流式 (stream=true)**: 遵循 SSE 协议标准（HTTP 200 `text/event-stream` 保持连接，首帧下发协议级 error 事件并立即闭合流：OpenAI 下发 `data: {"error": {"type": "invalid_request_error", "code": 11140, ...}}`；Anthropic 下发 `event: error`；Responses 下发 `event: response.failed`），严禁在 generator 内部抛 HTTPException(400)（FastAPI/Starlette 会因 headers 已发无法回滚并触发内部异常）；
     - **调度与用量**: 无论流式或非流式，usage 记录唯一归属 `HTTP 400 (11140 content rejected)`。
   - **借鉴项目看门巡检与故障降级守卫 (`tools/check-upstream.py` + `upstream-watch.yml`)**：巡检脚本区分「发现更新（`has_updates`）」与「查询失败（`has_query_failures`）」，仅在**全部查询成功且全部基线一致**（`has_updates == 'false' && has_query_failures == 'false'`）时才自动收口关闭 Issue。出现网络波动或 API 限额导致 `query_failed` 时，自动进入 `Watch degraded` 降级状态保留 Issue 并追加警告说明，根除「上游查询失败却被误当成无更新而误关 Issue」的假收口漏洞。
+    ⚠️ **基线必须对齐「分支真实 HEAD」，不能用 `commits?path=.`**（2026-11-04 修复的每日误报根因）：旧实现查 `repos/{repo}/commits?path=.`，拿到的是「最近触及仓库根目录的提交」，比分支 HEAD 旧；基线一旦记成真实 HEAD 就永远对不上，于是每天报「有新提交」但 `compare` 里 `ahead_by=0`。正确口径是 `GET /repos/{repo}/commits/{branch}`（分支名写错/已删时回退默认分支 HEAD），`latest_commit` 与 `last_synced_sha` 同源比较；`branch` 字段必须填仓库真实默认分支（曾有仓库只有 `master`，填 `main` 导致两边永远比不到一起）。
 
   **Responses / Anthropic 协议层硬约束（2026-09-12 修复，改动相关代码前必读）**：
 
