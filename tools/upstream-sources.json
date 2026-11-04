@@ -150,7 +150,7 @@
     "wb2api-upstream-windoc": {
       "name": "codebuddy-gateway 容器网关（WindoC，借鉴雷达）",
       "repo": "WindoC/codebuddy-gateway",
-      "branch": "main",
+      "branch": "master",
       "last_synced_commit": "afe04fb6",
       "last_synced_sha": "afe04fb6c7a5d57e380dc4ac72c4c2c4a262dffe",
       "absorbed": "借鉴雷达（官方 Agent SDK 容器化桥接模式参考）",

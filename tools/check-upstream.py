@@ -92,18 +92,25 @@ def check_source(sid: str, cfg: dict, token: str) -> dict:
     last_sha = cfg.get("last_synced_sha", "").strip()
     baseline = (last_sha or last_commit)[:8]
 
-    # 优先查路径为 . 的 commits（确保与代码树真实提交一致）
-    raw_res = api_get(f"https://api.github.com/repos/{repo}/commits?path=.&per_page=5", token)
-    commits, status_code = _normalize_api_response(raw_res)
+    # 口径：直接取**配置分支的真实 HEAD**。早期用 `commits?path=.` 取到的是「最近触及仓库
+    # 根目录的提交」，比分支 HEAD 旧 —— 基线一旦记成真实 HEAD 就永远对不上，每天误报「有新提交」。
+    branch = (cfg.get("branch") or "").strip()
+    url = (f"https://api.github.com/repos/{repo}/commits/{branch}" if branch
+           else f"https://api.github.com/repos/{repo}/commits")
+    head_item, status_code = _normalize_api_response(api_get(url, token))
+    if isinstance(head_item, list):
+        head_item = head_item[0] if head_item else None
 
-    if not commits or not isinstance(commits, list):
-        # 回退全仓最新 commit
-        raw_res_all = api_get(f"https://api.github.com/repos/{repo}/commits?per_page=5", token)
-        commits, fallback_status = _normalize_api_response(raw_res_all)
+    if not isinstance(head_item, dict) or not head_item.get("sha"):
+        # 分支名写错/分支已删时回退到默认分支 HEAD；仍失败才算查询失败
+        head_item, fallback_status = _normalize_api_response(
+            api_get(f"https://api.github.com/repos/{repo}/commits", token))
+        if isinstance(head_item, list):
+            head_item = head_item[0] if head_item else None
         if fallback_status != 0:
             status_code = fallback_status
 
-    if not commits or not isinstance(commits, list) or len(commits) == 0:
+    if not isinstance(head_item, dict) or not head_item.get("sha"):
         if status_code == 404:
             return {
                 "id": sid,
@@ -134,7 +141,6 @@ def check_source(sid: str, cfg: dict, token: str) -> dict:
             "note": cfg.get("note", ""),
         }
 
-    head_item = commits[0]
     latest_sha = head_item.get("sha", "")
     latest_short = latest_sha[:8]
     commit_msg = (head_item.get("commit", {}).get("message", "") or "").splitlines()[0][:65]
