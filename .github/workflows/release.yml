@@ -109,7 +109,9 @@ jobs:
             exit 1
           fi
           echo "产物：$expected（$size 字节）"
-          sha256sum "$expected" > SHA256SUMS.txt
+          # 只写文件名：用户把安装包与 SHA256SUMS.txt 下到同一目录后可直接 `sha256sum -c` /
+          # Get-FileHash 比对；带 src-tauri/... 前缀的路径会让校验必然找不到文件。
+          (cd "$(dirname "$expected")" && sha256sum "$(basename "$expected")") > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: 发布 Release

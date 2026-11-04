@@ -117,6 +117,15 @@ test('产物文件名必须与版本号绑定，防止传错包', () => {
   );
 });
 
+test('SHA256SUMS 只写文件名，用户下到同目录即可校验', () => {
+  assert.match(
+    releaseCode,
+    /\(cd "\$\(dirname "\$expected"\)" && sha256sum "\$\(basename "\$expected"\)"\) > SHA256SUMS\.txt/,
+    'SHA256SUMS 必须 cd 到产物目录、只写 basename：带 src-tauri/... 前缀的路径会让用户下载后 ' +
+      '`sha256sum -c` 必然找不到文件（2026-11-04 实测踩到）'
+  );
+});
+
 test('ci.yml 保持「只检查、不打包」', () => {
   assert.ok(
     !/tauri\s+build/.test(ciCode),

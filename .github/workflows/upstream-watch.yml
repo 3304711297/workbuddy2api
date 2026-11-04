@@ -48,15 +48,27 @@ jobs:
         run: |
           COUNT="${{ steps.check.outputs.update_count }}"
           TITLE="🔔 [Upstream Watch] 社区反代借鉴项目有新提交（${COUNT} 项待评估）"
-          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+          # 查询失败绝不能退化成「没有 Issue」：那会直接新建一个重复的跟踪 Issue。
+          # 连续失败时显式中止（宁可巡检红，也不要造重复 Issue）。
+          get_issue() {
+            for i in 1 2 3; do
+              if out=$(gh issue list --state open --label "upstream-watch" --limit 1 --json number --jq '.[0].number // ""'); then
+                printf '%s' "$out"
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+          EXISTING=$(get_issue) || { echo "::error::无法查询 upstream-watch Issue（连续 3 次失败），为避免创建重复 Issue 本次中止"; exit 1; }
+          if [ -n "$EXISTING" ]; then
             echo "更新已存在的 Issue #$EXISTING"
-            gh issue edit "$EXISTING" --title "$TITLE" --body-file upstream-report.md || true
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file upstream-report.md
           else
             gh issue create \
               --title "$TITLE" \
               --body-file upstream-report.md \
-              --label "upstream-watch" || true
+              --label "upstream-watch"
           fi
 
       - name: Retain and update issue when watch degraded
@@ -66,10 +78,20 @@ jobs:
         run: |
           FAIL_COUNT="${{ steps.check.outputs.query_failure_count }}"
           echo "⚠️ 巡检降级：本次有 ${FAIL_COUNT} 项查询失败，为防止误报不自动收口，保持跟踪。"
-          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-            gh issue edit "$EXISTING" --body-file upstream-report.md || true
-            gh issue comment "$EXISTING" --body "⚠️ [Upstream Watch] 本次巡检有 ${FAIL_COUNT} 项上游仓库查询失败（受网络波动或 GitHub API 限额影响），已保留现有跟踪 Issue 并更新报告，不作虚假收口。" || true
+          get_issue() {
+            for i in 1 2 3; do
+              if out=$(gh issue list --state open --label "upstream-watch" --limit 1 --json number --jq '.[0].number // ""'); then
+                printf '%s' "$out"
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+          EXISTING=$(get_issue) || { echo "::error::无法查询 upstream-watch Issue（连续 3 次失败），无法更新降级报告"; exit 1; }
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --body-file upstream-report.md
+            gh issue comment "$EXISTING" --body "⚠️ [Upstream Watch] 本次巡检有 ${FAIL_COUNT} 项上游仓库查询失败（受网络波动或 GitHub API 限额影响），已保留现有跟踪 Issue 并更新报告，不作虚假收口。"
           fi
 
       - name: Auto-close when caught up and all queries succeeded
@@ -77,9 +99,25 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING=$(gh issue list --state open --label "upstream-watch" --json number --jq '.[0].number' 2>/dev/null || true)
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-            gh issue close "$EXISTING" --comment "✅ 所有可用借鉴源基线与上游一致（404 仓库已锁定基线挂起待恢复），自动收口。下次有新提交会自动重新开 Issue。" || true
+          set -euo pipefail
+          # ⚠️ 查询失败绝不能伪装成「没有 open Issue」。
+          # 2026-11-04 实测：`gh issue list ... 2>/dev/null || true` 吞掉了一次 GraphQL 502
+          # （Something went wrong while executing your query），EXISTING 变空 → 走 else 分支 →
+          # 明明已 0 待跟进项，Issue 却留着没关，且整条流水线照样绿。
+          # 三个 Issue 相关步骤统一走 get_issue()：失败重试 3 次，仍失败则显式退出（宁可变红，不要静默漏关）。
+          get_issue() {
+            for i in 1 2 3; do
+              if out=$(gh issue list --state open --label "upstream-watch" --limit 1 --json number --jq '.[0].number // ""'); then
+                printf '%s' "$out"
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+          EXISTING=$(get_issue) || { echo "::error::连续 3 次无法查询 upstream-watch Issue（gh/GraphQL 故障），本次不关闭以免误判，请重跑巡检"; exit 1; }
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --comment "✅ 所有可用借鉴源基线与上游一致（404 仓库已锁定基线挂起待恢复），自动收口。下次有新提交会自动重新开 Issue。"
           else
             echo "无待跟进项，也无未关闭 Issue，跳过。"
           fi
