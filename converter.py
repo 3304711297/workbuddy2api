@@ -48,6 +48,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
+import wb_atrest
+
 try:
     from desensitize import desensitize_body, scan_messages
 except ImportError:  # 模块缺失时降级为不脱敏
@@ -361,7 +363,21 @@ def _load_active_session(cfg: dict) -> tuple[str, dict]:
     session = accounts.get(active_uid)
     if not isinstance(session, dict):
         raise ValueError(f"accounts.json 中不存在活跃账号 {active_uid} 的会话")
-    return active_uid, session
+    return active_uid, _decrypt_session_at_rest(session)
+
+
+def _decrypt_session_at_rest(session: dict) -> dict:
+    """把桌面端 `$wbEncrypted` 信封字段就地解密（明文原样返回）。
+
+    新版客户端把 token / nickname 存成 AES-256-GCM 信封（见 wb_atrest.py）。
+    不处理时整个字典会被当成 token 拼进 Authorization 头 → 上游 401。
+    失败只记日志后向上抛，让调用方给出可行动报错，而不是把信封发给上游。
+    """
+    try:
+        return wb_atrest.decrypt_session_secrets(session)
+    except wb_atrest.AtRestError as exc:
+        _log(f"桌面端加密凭据解密失败：{exc}")
+        raise RuntimeError(f"桌面端加密凭据解密失败：{exc}") from exc
 
 
 def _auth_is_expired(auth: dict) -> bool:
@@ -614,7 +630,7 @@ class CredentialManager:
                 "无可用凭据：accounts.json 缺少有效活跃会话，且未找到 legacy .info 文件"
             )
         with open(self.path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return _decrypt_session_at_rest(json.load(f))
 
     def _load_if_stale(self):
         """若 accounts.json 或 auth 文件 mtime 变了（外部刷新或切换账号），重新加载缓存。"""

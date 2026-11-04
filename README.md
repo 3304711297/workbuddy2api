@@ -356,6 +356,7 @@ http://127.0.0.1:8787/v1
 同时，以下特性吸收了社区核心开源成果的智慧：
 * **设备风控头注入与空 delta 清洗**：借鉴 [xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api) 与 [DistPub/workbuddy2api](https://github.com/DistPub/workbuddy2api)（MIT）。
 * **Claude 指纹精准改写与多账号轮换**：借鉴 [IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api)（MIT）。
+* **桌面端加密凭据（`$wbEncrypted` 信封）解密**：格式与取密钥思路借鉴 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 与 [jlcodes99/cockpit-tools](https://github.com/jlcodes99/cockpit-tools)（MIT），实现为本仓库独立的 `wb_atrest.py`。
 
 <details>
 <summary><b>📋 点击展开社区开源生态借鉴与技术溯源清单（10+ 衍生项目明细）</b></summary>

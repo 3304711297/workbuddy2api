@@ -739,6 +739,29 @@ workbuddy2api.exe (GUI)
   （09-08 用户裁定）；参考 `IceeAn/codebuddy2api`（MIT，看门条目 `c2api-upstream-iceean`），
   只借思路不搬文件，取代码须出自其当前树并署名（合规红线见第 5 节）。
 
+- **桌面端 at-rest 加密凭据（`wb_atrest.py`，issue #37，改动必读）**：
+  新版桌面端把 `.info` 的 `auth.accessToken` / `auth.refreshToken` 与 `account.nickname`
+  从明文改成 `{"$wbEncrypted":1,"envelope":"<base64(JSON)>"}` 信封（AES-256-GCM）。
+  不解密时 `_read_raw()` 拿到的 token 是整个字典，`str()` 后被拼进 `Authorization` 头，
+  上游必然回 **401 Authorization Required**——报错现场看起来像「登录失效」，极易误诊成鉴权 bug。
+  链路：`sha256(atRestSecretKey文本)` 派生密钥 → `keyId = sha256(key).hex[:16]` →
+  AAD = `WB-AAD\0 | 0x01 | LP(WBEV1) | LP(sym-v1) | u32(1) | LP(keyId) | 2 | 0 | 0` →
+  `envelope` 的 nonce/authTag/ciphertext 三段做 GCM。
+  ⚠️ **哈希的是 base64 文本，不是解码后的 32 字节**（客户端 `normalizeAtRestKeyPayload` 口径，
+  写成解码后字节会得到另一把钥匙，症状是「GCM 校验失败」）。
+  ⚠️ 密钥是**客户端构建期内置**常量，磁盘上无明文、不在 keyblob 里；
+  唯一正确来源是用 `ELECTRON_RUN_AS_NODE=1` 启动已安装的客户端并调
+  `process._linkedBinding('electron_browser_workbuddy_storage').loggerGet()`
+  （不开窗口、不读 Keychain、不出网）。**禁止**把密钥副本写进仓库/配置/日志，
+  也**禁止**改成进程内存扫描（跨平台不可用且误杀风险高）。
+  ⚠️ 失败必须**抛可行动报错**（`_decrypt_session_at_rest` → `RuntimeError`），
+  绝不能把信封当 token 发出去换回 401——老实现就是静默 401，用户无法判断原因。
+  昵称这类可降级字段解不开时退回空串，不得让整个会话读取失败。
+  明文凭据（老版本 / accounts.json）原样保留，一次密钥都不取（`decrypt_session_secrets` 先探形态再取钥）。
+  ⚠️ `.info` 回写（`_save_tokens`）仍是明文：客户端 `decodeString` 对字符串直接返回，
+  容忍明文；且这与加密版客户端共存时会被它下次写入重新加密，故不在此另加封印逻辑。
+  契约锁定：`tests/test_at_rest_crypto.py`（NIST GCM 向量 + AAD 逐字节 + 密钥降级 + 接线）。
+
 - **前端极客 UI 规范（对标 EasyCLIProxyAPI 设计语言，2026-09-17 重构）**：
   采用双列控制中心（左侧服务核心控制面板 + 状态胶囊 `state-pill` 与呼吸发光灯 `dotPulse`；右侧三大协议端点卡片网格 `endpoint-card`，支持完整端点与端口动态联动）。
   卡片采用现代极客立体微高光双层边框（`inset 0 1px 0 rgba(255,255,255,0.05)` + 渐变微光）；
