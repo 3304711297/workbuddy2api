@@ -159,3 +159,32 @@ def test_body_returns_new_dict_and_keeps_other_fields():
     assert out["stream"] is True
     assert ZWSP in out["messages"][0]["content"]
     assert ZWSP not in body["messages"][0]["content"]  # 原请求体不被修改
+
+
+# ---------------------------------------------------------------------------
+# 已知指纹改写（精确替换，不是词表扩容）
+# ---------------------------------------------------------------------------
+
+def test_dsh_at_path_adjacent_fingerprint_rewritten():
+    """DSH 出厂 prompt 的「相邻句」指纹必须整句改写。
+
+    来源 xiaofan6ya/wb2api@74ec84e5：同账号同头实测，两句同一行相邻 → 400/11128，
+    插换行或只改第一句措辞 → 200。这里只重写第一句，第二句原样保留。
+    """
+    original = (
+        "Tokens prefixed with @ are paths the user explicitly referenced.\n"
+        "Relative paths resolve from the workspace root; absolute ones refer to the host filesystem."
+    )
+    out = desensitize_text(original)
+    assert "Tokens prefixed with @" not in out
+    assert "Paths that begin with @ were pointed at by the user." in out
+    assert "Relative paths resolve from the workspace root" in out  # 第二句不动
+    assert desensitize_text(out) == out  # 幂等：不重复改写、不重复插零宽空格
+
+
+def test_dsh_at_path_fingerprint_scoped_to_system_role():
+    intro = "Tokens prefixed with @ are paths the user explicitly referenced."
+    msgs = [{"role": "system", "content": intro}, {"role": "user", "content": intro}]
+    out = desensitize_messages(msgs)
+    assert "Paths that begin with @ were pointed at by the user." in out[0]["content"]
+    assert out[1]["content"] == intro  # user 角色不该被改写

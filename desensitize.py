@@ -107,6 +107,15 @@ _MAIN_BRANCH_FINGERPRINT = "Main branch (you will usually use this for PRs):"
 _MAIN_BRANCH_FINGERPRINT_NO_COLON = "Main branch (you will usually use this for PRs)"
 _ATTRIBUTION_HEADER_PREFIX = "x-anthropic-billing-header:"
 
+# DSH（DeepSeek Harness）出厂 system prompt 的「行内相邻句」模板指纹：
+# "Tokens prefixed with @ are paths the user explicitly referenced." 后紧跟
+# "Relative paths resolve from the workspace root; ..." 时上游回 400/11128；
+# 两句插换行、或只改第一句措辞，即 200（同账号同头实测，见来源）。
+# 这里只重写第一句，语义等价，拆掉相邻句指纹；第二句保持原样。
+# 来源：xiaofan6ya/wb2api@74ec84e5（MIT），2026-10-27 实测记录。
+_DSH_AT_PATH_FINGERPRINT = "Tokens prefixed with @ are paths the user explicitly referenced."
+_DSH_AT_PATH_NEUTRAL = "Paths that begin with @ were pointed at by the user."
+
 
 def _rewrite_known_fingerprints(text: str) -> str:
     """将已确认的客户端身份指纹改成中性文本，并移除署名首行。
@@ -114,6 +123,7 @@ def _rewrite_known_fingerprints(text: str) -> str:
     """
     text = text.replace(_CLAUDE_CODE_IDENTITY, _NEUTRAL_CLI_IDENTITY)
     text = text.replace(_CLAUDE_CODE_IDENTITY_PREFIX, _NEUTRAL_CLI_IDENTITY)
+    text = text.replace(_DSH_AT_PATH_FINGERPRINT, _DSH_AT_PATH_NEUTRAL)
     text = text.replace(_MAIN_BRANCH_FINGERPRINT, "Main branch:")
     text = text.replace(_MAIN_BRANCH_FINGERPRINT_NO_COLON, "Main branch")
 
