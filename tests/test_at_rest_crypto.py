@@ -187,7 +187,6 @@ def test_resolve_key_without_desktop_client_raises_actionable_error(monkeypatch)
 def test_helper_failure_surfaces_stderr_hint(monkeypatch):
     monkeypatch.delenv("WORKBUDDY_AT_REST_KEY", raising=False)
     monkeypatch.setattr(wb_atrest, "find_desktop_exe", lambda: "X:/fake/WorkBuddy.exe")
-
     class _Proc:
         returncode = 1
         stdout = ""
@@ -292,3 +291,21 @@ def test_credential_manager_decrypts_encrypted_info(tmp_path, monkeypatch):
     assert cred.peek_active_session()["auth"]["accessToken"] == "access-plain"
     assert cred.peek_active_session()["account"]["nickname"] == "晚街"
     wb_atrest.forget_key()
+
+
+# ---------------------------------------------------------------------------
+# 6. 跨平台可执行文件发现（issue #37 报告者就是 macOS）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("platform", "needle"),
+    [
+        ("darwin", "/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy"),
+        ("linux", "/opt/WorkBuddy/workbuddy"),
+        ("win32", "WorkBuddy.exe"),
+    ],
+)
+def test_desktop_candidates_cover_all_platforms(monkeypatch, platform, needle):
+    monkeypatch.setattr(wb_atrest.sys, "platform", platform)
+    paths = [str(p).replace("\\", "/") for p in wb_atrest._desktop_candidates()]
+    assert any(needle in p for p in paths), paths[:5]

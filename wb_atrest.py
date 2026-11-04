@@ -387,8 +387,25 @@ def _key_from_env(raw: str) -> bytes:
 
 
 def _desktop_candidates() -> list[Path]:
-    """桌面端可执行文件的候选路径（不写死；可用 ENV_EXE 覆盖）。"""
+    """桌面端可执行文件的候选路径（覆盖三平台；可用 ENV_EXE 覆盖）。"""
     names = ("WorkBuddy.exe", "WorkBuddyAI.exe", "WorkBuddy", "WorkBuddyAI")
+    out: list[Path] = []
+
+    if sys.platform == "darwin":
+        # macOS：可执行文件在 .app 包内，ELECTRON_RUN_AS_NODE 直接指向它
+        for app in ("WorkBuddy", "WorkBuddyAI"):
+            for root in ("/Applications", os.path.expanduser("~/Applications")):
+                out.append(Path(root) / f"{app}.app" / "Contents" / "MacOS" / app)
+        return out
+
+    if sys.platform != "win32":
+        # Linux 打包/绿色版常见落点
+        for root in ("/opt", os.path.expanduser("~/.local/share"), "/usr/lib"):
+            for app in ("WorkBuddy", "workbuddy"):
+                for exe in ("workbuddy", "WorkBuddy", "WorkBuddyAI"):
+                    out.append(Path(root) / app / exe)
+        return out
+
     bases: list[Path] = []
     for env in ("LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "USERPROFILE"):
         root = os.environ.get(env)
@@ -397,7 +414,6 @@ def _desktop_candidates() -> list[Path]:
         for name in ("WorkBuddy", "workbuddy"):
             bases.append(Path(root) / name)
             bases.append(Path(root) / "Programs" / name)
-    out: list[Path] = []
     for base in bases:
         for name in names:
             out.append(base / name)
