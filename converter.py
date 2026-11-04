@@ -6422,12 +6422,13 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                            requested_model=req_m,
                            fallback_reason=fallback_reason)
     except (asyncio.CancelledError, GeneratorExit):
-        # 客户端提前主动断开 / 任务取消 / 生成器被外部关闭
+        # 收到结束标记后关流属于正常收尾；此前取消才是客户端提前断开。
         req_m = requested_model or model_name
-        _record_usage_once(actual_model, ok=False, t0=t0,
+        completed = err_msg is None and (saw_done or finish_reason is not None)
+        _record_usage_once(actual_model, ok=completed, t0=t0,
                            input_tokens=usage.get("prompt_tokens"),
                            output_tokens=usage.get("completion_tokens"),
-                           ttft_ms=ttft_ms, error="client disconnected",
+                           ttft_ms=ttft_ms, error=None if completed else "client disconnected",
                            requested_model=req_m,
                            fallback_reason=fallback_reason)
         raise

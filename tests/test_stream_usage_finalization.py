@@ -174,6 +174,76 @@ def test_stream_usage_normal_completion_records_success(monkeypatch):
     assert kwargs.get("error") is None
 
 
+@pytest.mark.parametrize(
+    ("final_event", "finish_marker"),
+    [
+        (b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+         b'"finish_reason":"stop"'),
+        (b"data: [DONE]\n\n", b"data: [DONE]"),
+    ],
+    ids=["finish_reason", "done"],
+)
+def test_stream_usage_client_close_after_completion_records_success(
+        monkeypatch, final_event, finish_marker):
+    """收到正常结束标记后客户端关闭流，不得把已完成的模型调用记为失败。"""
+    recorded_calls = []
+
+    def mock_record_usage(*args, **kwargs):
+        recorded_calls.append((args, kwargs))
+
+    monkeypatch.setattr(converter, "_record_usage", mock_record_usage)
+
+    class FinishThenWaitStreamResponse:
+        status_code = 200
+        headers = {}
+
+        async def aiter_bytes(self):
+            yield (b'data: {"choices":[{"delta":{"content":"hi"}}],'
+                   b'"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n')
+            yield final_event
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    class DummyClient:
+        def stream(self, *args, **kwargs):
+            return FinishThenWaitStreamResponse()
+
+    class DummyCtx:
+        async def __aenter__(self):
+            return DummyClient()
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(converter, "_shared_client_ctx", lambda timeout=None: DummyCtx())
+
+    async def _run():
+        gen = converter._stream_upstream(
+            url="https://api.test/stream",
+            headers={},
+            body={"model": "deepseek-chat"},
+            model_name="deepseek-chat",
+        )
+        saw_finish = False
+        async for event in gen:
+            if finish_marker in event:
+                saw_finish = True
+                break
+        await gen.aclose()
+        assert saw_finish, "测试必须复现客户端收到正常结束标记后立即关流的时序"
+
+    asyncio.run(_run())
+
+    assert len(recorded_calls) == 1, "正常结束后关流必须恰好记录一次 usage"
+    _, kwargs = recorded_calls[0]
+    assert kwargs.get("ok") is True
+    assert kwargs.get("error") is None
+
+
 def test_stream_usage_upstream_500_records_once(monkeypatch):
     """测试上游 500 报错时，记录一条 ok=False, error='HTTP 500' 的记录，且 finally 不重复记账。"""
     recorded_calls = []
