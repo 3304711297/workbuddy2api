@@ -27,8 +27,7 @@
   <a href="#-界面与交互亮点-ui-preview"><b>🖥️ 界面预览</b></a> •
   <a href="#-核心特性矩阵"><b>✨ 核心特性</b></a> •
   <a href="#-安全隐私与信任声明-security--privacy"><b>🛡️ 安全与信任</b></a> •
-  <a href="#-核心接口与协议速查"><b>🌐 接口速查</b></a> •
-  <a href="#-english-overview"><b>📖 English</b></a>
+  <a href="#-核心接口与协议速查"><b>🌐 接口速查</b></a>
 </p>
 
 </div>
@@ -321,31 +320,6 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model": "glm-5.3-flash", "messages": [{"role": "user", "content": "Hello!"}], "stream": false}'
 ```
 
-
----
-
-## 📖 English Overview
-
-**WorkBuddy2API** is a high-craft local API gateway and desktop console (powered by Tauri v2) that converts Tencent WorkBuddy / CodeBuddy subscriptions into standard AI interfaces.
-
-### Key Highlights
-- **Tri-Protocol Support**: Seamlessly translates upstream endpoints into standard **OpenAI Chat** (`/v1/chat/completions`), **Anthropic Messages** (`/v1/messages`), and **OpenAI Responses** (`/v1/responses`).
-- **Direct Agent Integration**: Natively drives **Claude Code CLI**, **Codex CLI**, **Hermes Agent**, **Cline**, **Roo Code**, and other coding assistants with streaming SSE, reasoning tokens, and tool-call auto-healing.
-- **Zero Official Client Dependency**: Standalone browser OAuth polling flow allows logging in without having the official desktop client installed.
-- **Intelligent Multi-Account Scheduler**: Tiered scheduling prioritizing earliest-expiring tokens, automatic failover on 429/6004 limits, and round-robin load distribution.
-- **Strict Local Security**: 100% offline local credential storage (`%LOCALAPPDATA%/workbuddy2api`), Origin & Host CSRF/DNS-rebinding guards, and CSPRNG-generated Bearer key support.
-- **Zero-Dependency Observability**: Native SVG usage charts, token rate-limit countdown monitors, and built-in interactive API replay console.
-
-### Quick Start
-```bash
-# Claude Code CLI
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
-export ANTHROPIC_API_KEY="local"
-claude
-
-# OpenAI Compatible (Base URL)
-http://127.0.0.1:8787/v1
-```
 
 ---
 
