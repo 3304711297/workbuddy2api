@@ -430,7 +430,7 @@ export function initUpdateCheck() {
   // 绑定版本与构建指纹展示（形态与 Hermes 一致：v0.2.1 d1cb787）
   const verEl = el('app-ver');
   if (verEl) {
-    const ver = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.1';
+    const ver = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.2';
     const hash = typeof __GIT_HASH__ !== 'undefined' ? __GIT_HASH__ : '';
     const fp = typeof __BUILD_FINGERPRINT__ !== 'undefined' ? __BUILD_FINGERPRINT__ : `v${ver}`;
     // 行内直接显示「版本 + 构建提交」：当前跑的是哪个提交必须一眼可见，
