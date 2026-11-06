@@ -1,17 +1,14 @@
 /**
  * 应用更新：检测（GitHub commit 比对）+ 交接式自动更新
  *
- * 检测口径对齐 Hermes Desktop：
- *   - 被动查询 GitHub API 比对远端分支 tip SHA 与本机 HEAD，不做 git fetch 轮询；
- *   - 有更新时用 compare 返回的 commit 列表构建分组变更清单；
- *   - 检测失败不打断流程，只落可辨识的失败态（入口 title + 弹窗内可重试）。
+ * 分发渠道有两条：
+ *   - 源码检出：被动查询远端分支 tip SHA，走「退出 GUI → 脚本快进源码 + 重建」；
+ *   - NSIS 安装包（无 .git）：查询最新 Release，引导用户下载新安装包覆盖升级。
  *
- * 本项目不使用 GitHub Release 发版，因此「立即更新」不是下载安装包，而是
- * 退出 GUI → 更新脚本快进源码 + 重建 → 自动拉起新版本
- * （见 scripts/app-update/windows.ps1）。
+ * 两条路径都不做 git fetch 轮询；安装包渠道不会调用源码更新脚本。
  */
 
-import { showToast, copyToClipboard, invokeTauri } from './utils.js';
+import { showToast, copyToClipboard, invokeTauri, openExternal } from './utils.js';
 import { buildCommitChangelog, totalItems } from './commit-changelog.js';
 
 let updateInfo = null; // 最近一次 check_app_update 的完整结果
@@ -135,6 +132,38 @@ function closeOverlay() {
 // ---------------------------------------------------------------------------
 
 /** 依据检测结果渲染弹窗内容（检测与渲染分离，便于「重试」复用）。 */
+function renderReleaseInstall(info) {
+  if (info.error) {
+    renderStatus({
+      title: '无法检查更新',
+      body: '安装包版本检查失败，请检查网络或代理后重试。',
+      detail: info.error,
+      icon: '!',
+      action: { label: '重试', onClick: () => runCheck({ silent: false, force: true }) },
+    });
+    return;
+  }
+
+  if (!info.update_available) {
+    renderStatus({
+      title: '已是最新',
+      body: `当前已是最新安装包版本${info.latest_version ? `（v${info.latest_version}）` : ''}。`,
+      icon: '✓',
+    });
+    return;
+  }
+
+  const version = info.latest_version ? ` v${info.latest_version}` : '';
+  renderStatus({
+    title: `发现新版本${version}`,
+    body: info.message || '请打开下载页获取新安装包并覆盖安装。配置保存在 %LOCALAPPDATA%\\workbuddy2api，不会丢失。',
+    icon: '↑',
+    action: info.release_url
+      ? { label: '打开下载页', onClick: () => openExternal(info.release_url) }
+      : { label: '重试', onClick: () => runCheck({ silent: false, force: true }) },
+  });
+}
+
 function renderResult(info) {
   if (!info) {
     renderStatus({
@@ -143,6 +172,12 @@ function renderResult(info) {
       icon: '!',
       action: { label: '重试', onClick: () => runCheck({ silent: false, force: true }) },
     });
+    return;
+  }
+
+  // NSIS 安装包没有 .git：可检测、可给下载入口，但不能走源码重建。
+  if (info.reason === 'release-install') {
+    renderReleaseInstall(info);
     return;
   }
 
@@ -197,7 +232,11 @@ async function runCheck({ silent = true, force = false } = {}) {
     // 侧栏入口状态：有更新点亮圆点并改文案，不开弹窗也能看见
     if (info?.update_available) {
       if (dot) dot.hidden = false;
-      if (text) text.textContent = `新版本可用（落后 ${info.behind ?? '若干'}）`;
+      if (text) {
+        text.textContent = info.reason === 'release-install'
+          ? '新版本可用（安装包）'
+          : `新版本可用（落后 ${info.behind ?? '若干'}）`;
+      }
       if (entry) entry.title = '发现新版本，点击查看更新详情';
     } else {
       if (dot) dot.hidden = true;
@@ -214,10 +253,10 @@ async function runCheck({ silent = true, force = false } = {}) {
     // 注意不能在静默路径里渲染弹窗内容：弹窗此时是隐藏的，渲染了用户也看不到。
     if (silent) {
       if (info?.update_available) {
-        showToast(
-          `发现新版本（落后 ${info.behind ?? '若干'} 个提交），点击侧栏「检查更新」查看详情`,
-          'info'
-        );
+        const message = info.reason === 'release-install'
+          ? '发现新版本安装包，点击侧栏「检查更新」查看下载入口'
+          : `发现新版本（落后 ${info.behind ?? '若干'} 个提交），点击侧栏「检查更新」查看详情`;
+        showToast(message, 'info');
       }
     } else {
       renderResult(info);

@@ -3,9 +3,11 @@ name: Release
 # 安装包发版（2026-11-04 新增）
 #
 # 边界（改动前必读）：
-#   - 应用内自动更新**不读** GitHub Release，仍走「committed SHA 比对 + 就地重建」，
-#     见 src-tauri/src/commands/update.rs 与 tests/test_app_update_contract.test.js。
-#   - 本工作流只负责把 NSIS 安装包作为**可选分发渠道**发布，供没有 Rust/Node 工具链的用户直接安装。
+# - 源码检出仍走「committed SHA 比对 + 就地重建」，不读 GitHub Release；
+#   无 .git 的 NSIS 安装包只查 latest Release 并引导下载覆盖安装，
+#   不启用 Tauri updater、不自动安装。
+#   见 src-tauri/src/commands/update.rs 与 tests/test_app_update_contract.test.js。
+# - 本工作流只负责把 NSIS 安装包作为官方分发渠道发布，供没有 Rust/Node 工具链的用户直接安装。
 #   - 日常 CI（ci.yml）保持「只检查、不打包」：完整 tauri bundle 一次要 5~15 分钟，
 #     不该在每次 push 时消耗。
 #

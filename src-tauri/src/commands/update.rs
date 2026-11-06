@@ -21,6 +21,7 @@ use super::shared::{atomic_write_file, env_compat, local_app_dir};
 
 const DEFAULT_BRANCH: &str = "main";
 const SLUG: &str = "3304711297/workbuddy2api";
+const REASON_RELEASE_INSTALL: &str = "release-install";
 /// 检测结果缓存 TTL：有更新 24h、无更新 10min、失败 1h。
 /// 失败重试更勤；「无更新」必须短（见 cache_is_fresh 的文档——键里没有远端 tip，
 /// 长缓存会把远端新提交挡在门外，让「检查更新」变成复读旧答案）。
@@ -57,6 +58,10 @@ pub struct AppUpdateInfo {
     pub fetched_at: i64,
     pub error: Option<String>,
     pub message: Option<String>,
+    /// NSIS 安装包渠道：最新 Release 的版本（不含前缀 v）。
+    pub latest_version: Option<String>,
+    /// NSIS 安装包渠道：该 Release 的下载页面。
+    pub release_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +139,60 @@ fn branch_tip_api_url(slug: &str, branch: &str) -> String {
 
 fn compare_api_url(slug: &str, base: &str, head: &str) -> String {
     format!("https://api.github.com/repos/{slug}/compare/{base}...{head}")
+}
+
+/// NSIS 安装包（无 .git）没有源码可快进、可重编，只能比对官方 Release。
+fn latest_release_api_url(slug: &str) -> String {
+    format!("https://api.github.com/repos/{slug}/releases/latest")
+}
+
+#[derive(Clone, Debug)]
+struct LatestRelease {
+    version: String,
+    html_url: String,
+}
+
+fn parse_latest_release(payload: &serde_json::Value) -> Option<LatestRelease> {
+    if payload.get("draft").and_then(|v| v.as_bool()).unwrap_or(false)
+        || payload
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    let tag = payload.get("tag_name")?.as_str()?.trim();
+    let version = tag
+        .trim_start_matches(|c| c == 'v' || c == 'V')
+        .trim()
+        .to_string();
+    let html_url = payload.get("html_url")?.as_str()?.trim().to_string();
+    if version.is_empty() || html_url.is_empty() {
+        return None;
+    }
+    Some(LatestRelease { version, html_url })
+}
+
+fn version_parts(value: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    Some((major, minor, patch))
+}
+
+fn release_is_newer(remote: &str, current: &str) -> bool {
+    match (version_parts(remote), version_parts(current)) {
+        (Some(remote), Some(current)) => remote > current,
+        _ => false,
+    }
+}
+
+fn install_dir_label() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_string_lossy().to_string()))
+        .unwrap_or_default()
 }
 
 /// 把 compare 载荷映射成弹窗需要的形状。任何形状异常都返回 None，
@@ -310,6 +369,68 @@ async fn fetch_compare(slug: &str, base: &str, head: &str) -> Option<(u32, Vec<U
     parse_compare(&payload)
 }
 
+async fn fetch_latest_release() -> Result<LatestRelease, String> {
+    #[cfg(test)]
+    if let Ok(raw) = std::env::var("WORKBUDDY2API_TEST_LATEST_RELEASE_JSON") {
+        let payload: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("测试 Release 载荷不是有效 JSON：{e}"))?;
+        return parse_latest_release(&payload)
+            .ok_or_else(|| "测试 Release 载荷缺少 tag_name/html_url".to_string());
+    }
+    let resp = fetch_github(&latest_release_api_url(SLUG), None)
+        .await
+        .map_err(|e| describe_failure(&e))?;
+    let payload: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("latest Release 响应不是有效 JSON：{e}"))?;
+    parse_latest_release(&payload)
+        .ok_or_else(|| "latest Release 响应缺少 tag_name/html_url".to_string())
+}
+
+/// 无 .git 的安装包走独立渠道：能检测版本、能给出下载页，但不伪装成可自动重建。
+async fn release_install_info(current_sha: String, now: i64, branch: String) -> AppUpdateInfo {
+    let current_version = env!("CARGO_PKG_VERSION");
+    match fetch_latest_release().await {
+        Ok(release) => {
+            let update_available = release_is_newer(&release.version, current_version);
+            let message = if update_available {
+                format!(
+                    "当前为安装包版本 v{current_version}，最新版本 v{}。请打开下载页获取新安装包并覆盖安装；配置与数据保存在 %LOCALAPPDATA%\\workbuddy2api，不会丢失。",
+                    release.version
+                )
+            } else {
+                format!("当前已是最新安装包版本（v{current_version}）。")
+            };
+            AppUpdateInfo {
+                supported: false,
+                reason: Some(REASON_RELEASE_INSTALL.into()),
+                branch,
+                current_sha,
+                update_available,
+                update_root: install_dir_label(),
+                fetched_at: now,
+                error: None,
+                message: Some(message),
+                latest_version: Some(release.version),
+                release_url: Some(release.html_url),
+                ..Default::default()
+            }
+        }
+        Err(error) => AppUpdateInfo {
+            supported: false,
+            reason: Some(REASON_RELEASE_INSTALL.into()),
+            branch,
+            current_sha,
+            update_root: install_dir_label(),
+            fetched_at: now,
+            error: Some(error),
+            message: Some("无法检查安装包版本更新，请检查网络或代理后重试。".into()),
+            ..Default::default()
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 缓存落盘
 // ---------------------------------------------------------------------------
@@ -337,23 +458,28 @@ fn write_cache(info: &AppUpdateInfo) {
 pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let branch = update_branch();
+    let current_sha = build_sha().to_string();
 
-    // 前置：必须是带 .git 的源码检出，且编排脚本齐备，否则明确告知不可自更新
+    // 前置：必须是带 .git 的源码检出，且编排脚本齐备。无 .git 的 NSIS 安装包
+    // 走 Release 渠道：仍然能检查新版本并给出下载页，而不是一句「请重新 clone」。
     let Some(root) = resolve_install_root() else {
-        return Ok(AppUpdateInfo {
-            supported: false,
-            reason: Some("not-a-git-checkout".into()),
-            branch,
-            message: Some("此副本不是源码检出，无法在应用内自更新；请重新 clone 仓库后构建。".into()),
-            fetched_at: now,
-            ..Default::default()
-        });
+        if !force.unwrap_or(false) {
+            if let Some(cached) = read_cache() {
+                if cached.reason.as_deref() == Some(REASON_RELEASE_INSTALL)
+                    && cache_is_fresh(&cached, &current_sha, &branch, now)
+                {
+                    return Ok(cached);
+                }
+            }
+        }
+        let result = release_install_info(current_sha, now, branch).await;
+        write_cache(&result);
+        return Ok(result);
     };
     let root_str = root.to_string_lossy().to_string();
     // ⚠️ 版本比对必须用「本 exe 构建时的提交」，不能用工作树 HEAD：
     // 源码留在检出目录且更新靠就地重建，工作树会被 pull 推到最新，而运行中的 exe
     // 仍是旧提交的产物 —— 读工作树会把「运行的是旧版本」谎报成「已是最新」。
-    let current_sha = build_sha().to_string();
     let dirty = working_tree_dirty(&root);
 
     if !handoff_script_path(&root).exists() {
@@ -406,6 +532,7 @@ pub async fn check_app_update(force: Option<bool>) -> Result<AppUpdateInfo, Stri
                 fetched_at: now,
                 error: None,
                 message: None,
+                ..Default::default()
             }
         }
         Err(message) => AppUpdateInfo {
@@ -1271,6 +1398,31 @@ mod tests {
     }
 
     #[test]
+    fn latest_release_api_url_matches_github_convention() {
+        assert_eq!(
+            latest_release_api_url("o/r"),
+            "https://api.github.com/repos/o/r/releases/latest"
+        );
+    }
+
+    #[test]
+    fn release_version_comparison_is_numeric_and_tag_tolerant() {
+        assert!(release_is_newer("99.0.0", "0.2.1"));
+        assert!(release_is_newer("0.10.0", "0.2.1"));
+        assert!(!release_is_newer("0.2.1", "0.2.1"));
+        assert!(!release_is_newer("0.0.0", "0.2.1"));
+        assert!(!release_is_newer("not-a-version", "0.2.1"));
+        let release = parse_latest_release(&serde_json::json!({
+            "tag_name": "v1.2.3",
+            "html_url": "https://github.com/o/r/releases/tag/v1.2.3",
+            "draft": false,
+            "prerelease": false
+        }))
+        .unwrap();
+        assert_eq!(release.version, "1.2.3");
+    }
+
+    #[test]
     fn api_urls_match_github_conventions() {
         assert_eq!(
             branch_tip_api_url("o/r", "main"),
@@ -1367,7 +1519,12 @@ mod tests {
         // ⚠️ 只取测试模块之前的生产代码：include_str! 会把测试模块自身也读进来，
         // 断言里的字符串字面量会命中自己（恒真的假绿）。截断到 #[cfg(test)] 之前。
         let src = include_str!("update.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // 取测试模块起点，不能按第一个 #[cfg(test)] 切：生产代码内部也有
+        // cfg(test) 测试注入（Release 载荷注入），那样会把 check_app_update 截掉。
+        let production = src
+            .find("mod tests {")
+            .map(|i| &src[..i])
+            .unwrap_or(src);
         let code: String = production
             .split('\n')
             .map(|line| line.split("//").next().unwrap_or(""))
@@ -1458,6 +1615,119 @@ mod tests {
                 "脚本会写入阶段 `{phase}`，但 phase_is_handoff_ready_or_later 不认识它 → \
                  该阶段出现时会被判为「握手未完成」并误报超时。白名单需同步。"
             );
+        }
+    }
+
+    /// NSIS 安装目录没有 .git 时，检测必须切换到 Release 渠道，而不是把用户
+    /// 错误地引导回源码检出。子进程使用复制到临时安装目录的本测试二进制，
+    /// 因而 current_exe 的祖先目录确实没有 .git；Release 载荷经测试注入，
+    /// 不在单测里依赖真实 GitHub 网络。
+    #[test]
+    fn release_install_without_git_uses_release_channel() {
+        const CHILD: &str = "WBA_UPDATE_RELEASE_NO_GIT_CHILD";
+        const RAW_RELEASE: &str = "WORKBUDDY2API_TEST_LATEST_RELEASE_JSON";
+        const EXPECT_AVAILABLE: &str = "WBA_UPDATE_RELEASE_EXPECT_AVAILABLE";
+        const EXPECT_VERSION: &str = "WBA_UPDATE_RELEASE_EXPECT_VERSION";
+        const EXPECT_URL: &str = "WBA_UPDATE_RELEASE_EXPECT_URL";
+
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(
+                resolve_install_root(),
+                None,
+                "测试前提失效：临时 NSIS 安装目录不应被识别成源码检出"
+            );
+            let info = tauri::async_runtime::block_on(check_app_update(Some(true))).unwrap();
+            let value = serde_json::to_value(info).unwrap();
+            let expected_available = std::env::var(EXPECT_AVAILABLE).unwrap() == "true";
+            assert_eq!(value["supported"], false, "NSIS 只能手动覆盖安装，不能走源码重建");
+            assert_eq!(value["reason"], "release-install");
+            assert_eq!(value["current_sha"], build_sha());
+            assert_eq!(
+                value["update_available"], expected_available,
+                "Release 检测结果异常：{value}"
+            );
+            assert_eq!(
+                value["latest_version"],
+                std::env::var(EXPECT_VERSION).unwrap(),
+                "展示的版本必须来自最新 Release 的 tag，不能编造"
+            );
+            assert_eq!(
+                value["release_url"],
+                std::env::var(EXPECT_URL).unwrap(),
+                "下载入口必须指向该 Release 的 html_url"
+            );
+            assert_eq!(value["error"], serde_json::Value::Null);
+            if expected_available {
+                let message = value["message"].as_str().unwrap();
+                assert!(message.contains("覆盖安装"), "缺少 NSIS 手动升级步骤：{message}");
+                assert!(message.contains("%LOCALAPPDATA%"), "缺少配置保留说明：{message}");
+            }
+            return;
+        }
+
+        // 第二个用例覆盖「远端不更新 ⇒ 不得误报」：若只返回 update_available=true，
+        // 安装包用户会被永久诱导重复下载同一个版本。
+        for (remote_tag, expected_available) in [("v99.0.0", true), ("v0.0.0", false)] {
+            let root = tmp_dir("release_no_git");
+            let install_dir = root.join("installed");
+            std::fs::create_dir_all(&install_dir).unwrap();
+            let current_exe = std::env::current_exe().unwrap();
+            let child_exe = install_dir.join(current_exe.file_name().unwrap());
+            std::fs::copy(&current_exe, &child_exe).unwrap();
+
+            let body = format!(
+                concat!(
+                    "{{",
+                    "\"tag_name\":\"{remote_tag}\",",
+                    "\"html_url\":\"https://github.com/3304711297/workbuddy2api/releases/tag/{remote_tag}\",",
+                    "\"draft\":false,\"prerelease\":false,",
+                    "\"assets\":[",
+                    "{{\"name\":\"workbuddy2api_99.0.0_x64-setup.exe\",\"size\":3475418,",
+                    "\"browser_download_url\":\"https://github.com/3304711297/workbuddy2api/releases/download/{remote_tag}/workbuddy2api_99.0.0_x64-setup.exe\"}},",
+                    "{{\"name\":\"SHA256SUMS.txt\",\"size\":100,",
+                    "\"browser_download_url\":\"https://github.com/3304711297/workbuddy2api/releases/download/{remote_tag}/SHA256SUMS.txt\"}}",
+                    "]}}"
+                ),
+                remote_tag = remote_tag
+            );
+            let expected_version = remote_tag.trim_start_matches('v').to_string();
+            let expected_url = format!(
+                "https://github.com/3304711297/workbuddy2api/releases/tag/{remote_tag}"
+            );
+
+            let output = std::process::Command::new(&child_exe)
+                .args([
+                    "--exact",
+                    "commands::update::tests::release_install_without_git_uses_release_channel",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .current_dir(&install_dir)
+                .env(CHILD, "1")
+                .env(RAW_RELEASE, &body)
+                .env(EXPECT_AVAILABLE, expected_available.to_string())
+                .env(EXPECT_VERSION, &expected_version)
+                .env(EXPECT_URL, &expected_url)
+                .env("LOCALAPPDATA", root.join("local-app-data"))
+                .env("USERPROFILE", &root)
+                .env_remove("WORKBUDDY2API_INSTALL_ROOT")
+                .env_remove("C2O_INSTALL_ROOT")
+                .env_remove("HTTP_PROXY")
+                .env_remove("HTTPS_PROXY")
+                .env_remove("ALL_PROXY")
+                .env_remove("http_proxy")
+                .env_remove("https_proxy")
+                .env_remove("all_proxy")
+                .output()
+                .unwrap();
+
+            assert!(
+                output.status.success(),
+                "无 .git 的 Release 子进程回归失败（tag={remote_tag}）：\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let _ = std::fs::remove_dir_all(&root);
         }
     }
 

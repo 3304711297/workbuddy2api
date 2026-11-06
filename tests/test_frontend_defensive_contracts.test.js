@@ -156,22 +156,40 @@ test('openExternal 实施协议白名单、不抛错、window.open 带 noopener'
   assert.ok(/noopener/.test(fn), 'window.open 兜底缺 noopener,noreferrer');
 });
 
-test('update-check 不得再依赖 GitHub Release（本项目用 commit 比对发版）', () => {
-  // 旧实现点击更新是「打开 Release 发布页」。现改为 commit 比对 + 应用内自更新，
-  // 因此代码里不得再残留 release_url / openExternal 这条已废弃路径。
+test('源码更新不依赖 GitHub Release；NSIS 安装包必须给 Release 下载入口', () => {
+  // 旧口径把 Release 路径整体禁掉，导致 NSIS 用户只能看到「请重新 clone」。
+  // 现分流：源码检出继续 commit 比对 + 自更新；无 .git 的安装包检查最新 Release。
   assert.ok(
-    !/release_url/.test(UPDATE),
-    'update-check.js 仍引用 release_url：Release 路径已废弃（本项目不用 Release 发版）'
+    /release-install/.test(UPDATE),
+    'update-check.js 未处理 release-install，安装包用户仍会看到「更新不可用」'
   );
   assert.ok(
-    !/openExternal/.test(UPDATE),
-    'update-check.js 仍在打开外部发布页：应改为应用内自更新弹窗'
+    /release_url/.test(UPDATE),
+    'update-check.js 未消费 release_url：安装包用户没有可点击的下载入口'
+  );
+  assert.ok(
+    /openExternal/.test(UPDATE),
+    'update-check.js 未复用 openExternal 打开发布页（绕过协议白名单会增加钓鱼风险）'
+  );
+  const releaseBranchIdx = UPDATE.indexOf("info.reason === 'release-install'");
+  assert.ok(releaseBranchIdx > -1, 'update-check.js 未判断 release-install 分支');
+  const releaseBranch = UPDATE.slice(releaseBranchIdx, releaseBranchIdx + 250);
+  assert.ok(
+    /renderReleaseInstall\s*\(\s*info\s*\)/.test(releaseBranch),
+    'release-install 分支未调用专用渲染：安装包用户仍会落进「更新不可用」'
+  );
+  const releaseFnIdx = UPDATE.indexOf('function renderReleaseInstall');
+  assert.ok(releaseFnIdx > -1, 'update-check.js 缺少 renderReleaseInstall');
+  const releaseFn = UPDATE.slice(releaseFnIdx, releaseFnIdx + 1400);
+  assert.ok(
+    /label:\s*'打开下载页'/.test(releaseFn) && /openExternal\(\s*info\.release_url\s*\)/.test(releaseFn),
+    '安装包更新必须提供「打开下载页」按钮并复用 openExternal'
   );
   assert.ok(
     !/__TAURI__[^\n]*shell[^\n]*\.open/.test(UPDATE),
     'update-check.js 仍直接调 shell.open，绕过应用层校验'
   );
-  // 新的应用内更新链路必须齐备
+  // 源码检出的应用内更新链路必须继续齐备
   assert.ok(/apply_app_update/.test(UPDATE), 'update-check.js 未调用 apply_app_update（无法应用更新）');
   assert.ok(/check_app_update/.test(UPDATE), 'update-check.js 未调用 check_app_update');
 });

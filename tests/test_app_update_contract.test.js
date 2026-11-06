@@ -31,19 +31,30 @@ const handoff = readFileSync(join(root, 'scripts', 'app-update', 'windows.ps1'),
 // Rust 注释里提到 Release 是在解释「为何不用它」，断言需剥离注释后再看代码。
 // 剥离实现见 helpers/strip-rust-comments.mjs（含「为什么不能用逐行正则」的说明）。
 const updateRsCode = stripRustComments(updateRs);
+// 静态契约只看生产代码：测试模块自身会包含 URL / 字段名字面量，
+// 否则「删除实现」后断言仍会被测试源码喂饱（恒真的假绿）。
+// 注意取测试模块（mod tests）的起点，不能按第一个 #[cfg(test)] 切：
+// 生产代码内部也允许用 cfg(test) 提供测试注入。
+const testModuleIndex = updateRsCode.search(/#\[cfg\(test\)\]\s*mod tests/);
+const updateRsProduction =
+  testModuleIndex === -1 ? updateRsCode : updateRsCode.slice(0, testModuleIndex);
 
-test('Rust 侧不得再使用 GitHub Release API 作为更新来源', () => {
+test('源码检出仍走 commit 比对；仅无 .git 的 NSIS 安装包走 Release 检查', () => {
+  // 分发渠道有两条：源码检出靠 commit 比对 + 就地重建；NSIS 安装包没有 .git,
+  // 只能查询最新 Release 并引导用户下载覆盖安装。两者不可混用。
   assert.ok(
-    !/releases\/latest/.test(updateRsCode),
-    'update.rs 仍在请求 releases/latest：Release 路径已废弃（改用 commit 比对）'
+    /releases\/latest/.test(updateRsProduction),
+    'update.rs 未提供 Release 检查：无 .git 的安装包用户会永远卡在「更新不可用」'
+  );
+  assert.ok(/tag_name/.test(updateRsProduction), 'update.rs 未解析 Release tag：无法判断是否真有新版本');
+  assert.ok(/release_url/.test(updateRsProduction), 'update.rs 未产出 release_url：安装包用户没有下载入口');
+  assert.ok(
+    /release-install/.test(updateRsProduction),
+    'update.rs 未区分 release-install 与源码检出，前端无法给出正确操作'
   );
   assert.ok(
-    !/release_url/.test(updateRsCode),
-    'update.rs 仍产出 release_url 字段：前端已不再消费它'
-  );
-  assert.ok(
-    !/tag_name/.test(updateRsCode),
-    'update.rs 仍在解析 tag_name：语义已改为 commit sha 比对'
+    /%LOCALAPPDATA%/.test(updateRsProduction),
+    '安装包升级说明必须告知配置保存在 %LOCALAPPDATA%，否则用户不敢覆盖安装'
   );
 });
 

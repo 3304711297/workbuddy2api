@@ -248,13 +248,22 @@ workbuddy2api.exe (GUI)
   契约锁定：`tests/test_hermes_detection_contract.test.js` + `agents.rs` 内 10 条 Rust 单测。
 
 - **应用更新（`commands/update.rs` + `scripts/app-update/windows.ps1`，2026-09-16 重写，改动必读）**：
-  检测与「应用更新」的机制对齐 Hermes Desktop，**不使用 GitHub Release 发版**。
+  **源码检出**走「commit 比对 + 就地重建」；**NSIS 安装包**（无 `.git`）走「latest Release 比对 + 下载页手动覆盖安装」。
+  两条路径严格分流，安装包分支绝不调用 `apply_app_update`，源码分支也不得改走 Release。
 
   **① 检测 = 被动 API 比对 commit，不做 `git fetch` 轮询**：
   多客户端反复 fetch 会拖垮仓库并触发 GitHub 429。正确口径是
   `GET /repos/{slug}/commits/{branch}` + `Accept: application/vnd.github.sha`
   取 40 字节远端 tip SHA，与本机**运行版本**比对；
   **仅当两者不同**才 `GET /compare/{head}...{tip}` 取 `ahead_by`（= 落后数）与 commit 列表。
+
+  ⚠️ **无 `.git` 的 NSIS 安装包是独立分支**：`resolve_install_root()` 返回 None 时，
+  查 `GET /repos/{slug}/releases/latest`，用 `tag_name` 与 `CARGO_PKG_VERSION` 做数值比较，
+  返回 `supported=false` / `reason="release-install"` / `latest_version` / `release_url`；
+  前端在更新弹窗给出「打开下载页」，并说明配置保存在 `%LOCALAPPDATA%\workbuddy2api`。
+  绝不能再回退成「请重新 clone 仓库」——Release 是官方分发渠道，用户手上没有源码。
+  该结果同样走 `update-check.json` 缓存（有更新 24h / 无更新 10min / 失败 1h），
+  避免每次启动都打 GitHub API。
 
   ⚠️ **「本机版本」必须用烘焙进二进制的构建提交，绝不能读工作树 `.git/HEAD`**：
   本项目源码留在检出目录且更新靠就地重建，工作树会被 pull 推进到最新，而运行中的
@@ -384,7 +393,7 @@ workbuddy2api.exe (GUI)
   Rust 侧另做了 `trim_start_matches('\u{feff}')` 防御兜底（双保险，有单测锁定）。
 
   **④ 契约**：前端字段名走 **snake_case**（`update_available` / `current_sha` / `target_sha` /
-  `behind` / `supported` / `dirty` / `commits` / `failure_kind`），写驼峰会静默 `undefined`；
+  `behind` / `dirty` / `commits` / `failure_kind` / `latest_version` / `release_url`），写驼峰会静默 `undefined`；
   远端 commit 标题**必须**用 `textContent` 渲染（不可信输入，防注入）；
   阶段名在「脚本 / 前端 UPDATE_PHASES / index.html 步骤条」三处必须一致，
   失败分类在「脚本 kind / Rust 字段 / 前端 FAILURE_HINTS」三处必须一致
@@ -628,8 +637,10 @@ workbuddy2api.exe (GUI)
   发到 GitHub Release。
   - 发版前必须把 `src-tauri/tauri.conf.json` 的 `version` 改成与 tag 相同（`v0.2.1` ↔ `0.2.1`），
     否则工作流 fail-closed 直接拒绝，不会发出版本号说谎的安装包。
-  - **边界**：GitHub Release 只是「安装包分发渠道」（给没有 Rust/Node 工具链的用户），
-    应用内自动更新仍走 commit SHA 比对（第 4 节），两者互不依赖；`update.rs` 依旧不得请求 Release API。
+  - **边界**：GitHub Release 是**安装包分发渠道**（给没有 Rust/Node 工具链的用户）。
+    源码检出仍走 commit SHA 比对 + 就地重建；无 `.git` 的安装包只查 latest Release
+    并引导下载覆盖安装（`reason="release-install"`），**不启用 Tauri updater、不自动安装**。
+    `update.rs` 源码分支仍不得请求 Release API；两条路径由 `check_app_update` 分流。
   - 契约锁定：`tests/test_release_workflow_contract.test.js`，其中一条是**反向断言**
     `ci.yml` 不得出现 `tauri build` / NSIS 产物路径 —— 想「顺手」把打包挪回 CI 会立刻变红。
 
@@ -749,6 +760,17 @@ workbuddy2api.exe (GUI)
   设计约束（仍然有效）：**必须 opt-in 且默认关闭**，不做定时/自动的上游交互
   （09-08 用户裁定）；参考 `IceeAn/codebuddy2api`（MIT，看门条目 `c2api-upstream-iceean`），
   只借思路不搬文件，取代码须出自其当前树并署名（合规红线见第 5 节）。
+
+  ⚠️ **OAuth 登录与手动刷新落盘前必须把相对 TTL 归一成绝对时间戳（#41）**：
+  `auth/token` 与 refresh 响应给的是 `expiresIn` / `refreshExpiresIn`（相对秒数），
+  而 Rust 账号卡片、Python `_auth_is_expired()`、`token_refresher.py` 都只认
+  `expiresAt` / `refreshExpiresAt`；缺失会被当成 0，刚签发的新 token 立即显示「已过期」。
+  `auth_poll` 必须经 `auth_session_for_save()`、`accounts_refresh_token` 必须经
+  `merge_refreshed_auth()` 调用 `normalize_auth_expiry()`；刷新响应带新相对 TTL 时，
+  必须覆盖旧 token 的绝对过期时间（不能只 insert 缺失字段）。
+  账号列表统一走 `auth_token_expiry()`（保留 60s 宽限）。契约锁定：
+  `commands::auth::tests::auth_poll_persists_absolute_expiry_for_relative_token_ttl`、
+  `refresh_uses_new_relative_ttl_instead_of_stale_absolute_expiry` 与接线断言。
 
 - **桌面端 at-rest 加密凭据（`wb_atrest.py`，issue #37，改动必读）**：
   新版桌面端把 `.info` 的 `auth.accessToken` / `auth.refreshToken` 与 `account.nickname`
