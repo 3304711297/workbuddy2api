@@ -33,6 +33,69 @@ pub struct AccountItem {
     pub last_updated: i64,
 }
 
+/// 把上游下发的相对有效期（expiresIn / refreshExpiresIn）归一成绝对时间戳。
+///
+/// auth/token 与刷新响应给的是「从签发时刻起多少秒」，而账号列表、内核
+/// `_auth_is_expired()`、`token_refresher.py` 都只认 `expiresAt`。缺字段会被
+/// 当成 0 → 刚签发的新凭据立即显示「token 已过期」。刷新路径也不能保留旧
+/// 绝对时间：响应里的相对 TTL 属于新 token，旧 expiresAt 已经失效。
+fn normalize_auth_expiry(auth: &mut serde_json::Value, now_ms: i64) {
+    let Some(obj) = auth.as_object_mut() else {
+        return;
+    };
+    let mut saw_relative_ttl = false;
+    if let Some(seconds) = obj.get("expiresIn").and_then(|v| v.as_i64()).filter(|v| *v > 0) {
+        obj.insert(
+            "expiresAt".into(),
+            serde_json::json!(now_ms.saturating_add(seconds.saturating_mul(1_000))),
+        );
+        saw_relative_ttl = true;
+    }
+    if let Some(seconds) = obj
+        .get("refreshExpiresIn")
+        .and_then(|v| v.as_i64())
+        .filter(|v| *v > 0)
+    {
+        obj.insert(
+            "refreshExpiresAt".into(),
+            serde_json::json!(now_ms.saturating_add(seconds.saturating_mul(1_000))),
+        );
+        saw_relative_ttl = true;
+    }
+    if saw_relative_ttl {
+        obj.insert("lastRefreshTime".into(), serde_json::json!(now_ms));
+    }
+}
+
+fn auth_session_for_save(
+    acct_data: &serde_json::Value,
+    auth_val: &serde_json::Value,
+    now_ms: i64,
+) -> serde_json::Value {
+    let mut saved_auth = auth_val.clone();
+    normalize_auth_expiry(&mut saved_auth, now_ms);
+    serde_json::json!({ "account": acct_data, "auth": saved_auth })
+}
+
+fn merge_refreshed_auth(session: &mut serde_json::Value, new_data: &serde_json::Value, now_ms: i64) {
+    if let Some(auth_mut) = session.get_mut("auth") {
+        if let Some(obj) = auth_mut.as_object_mut() {
+            if let Some(new_obj) = new_data.as_object() {
+                for (k, v) in new_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        normalize_auth_expiry(auth_mut, now_ms);
+    }
+}
+
+/// 与账号卡片现有 60 秒宽限保持一致；缺失/非法 expiresAt 维持「已过期」。
+fn auth_token_expiry(auth: &serde_json::Value, now_ms: i64) -> (i64, bool) {
+    let exp = auth.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    (exp, now_ms >= exp.saturating_sub(60_000))
+}
+
 // ---------------------------------------------------------------------------
 // 登录与授权 (OAuth)
 // ---------------------------------------------------------------------------
@@ -96,6 +159,7 @@ pub async fn auth_poll(state: String) -> Result<TokenPollResult, String> {
         if let Some(auth_val) = d.get("auth").or(Some(d)) {
             let token = auth_val.get("accessToken").and_then(|v| v.as_str()).unwrap_or_default();
             if !token.is_empty() {
+                let auth_received_at_ms = chrono::Utc::now().timestamp_millis();
                 // 请求 account 接口以获取详细资料 (nickname, uid 等)
                 let acct_url = "https://copilot.tencent.com/v2/plugin/account";
                 let acct_resp = client
@@ -110,10 +174,11 @@ pub async fn auth_poll(state: String) -> Result<TokenPollResult, String> {
                         if let Some(acct_data) = acct_json.get("data") {
                             let uid = acct_data.get("uid").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                             if !uid.is_empty() {
-                                let full_session = serde_json::json!({
-                                    "account": acct_data,
-                                    "auth": auth_val
-                                });
+                                let full_session = auth_session_for_save(
+                                    acct_data,
+                                    auth_val,
+                                    auth_received_at_ms,
+                                );
                                 let mut st = load_accounts_state();
                                 st.active_uid = uid.clone();
                                 st.accounts.insert(uid, full_session);
@@ -143,8 +208,10 @@ pub fn accounts_list() -> Result<Vec<AccountItem>, String> {
         let nickname = val.pointer("/account/nickname").and_then(|v| v.as_str()).unwrap_or("—").to_string();
         let phone = val.pointer("/account/phoneNumber").and_then(|v| v.as_str()).map(|s| s.to_string());
         let enterprise = val.pointer("/account/enterpriseName").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let exp = val.pointer("/auth/expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
-        let expired = now_ms >= (exp - 60_000);
+        let (exp, expired) = val
+            .get("auth")
+            .map(|auth| auth_token_expiry(auth, now_ms))
+            .unwrap_or((0, true));
         let is_active = uid == &st.active_uid;
 
         list.push(AccountItem {
@@ -219,16 +286,121 @@ pub async fn accounts_refresh_token(uid: Option<String>) -> Result<String, Strin
     }
 
     if let Some(new_data) = body.get("data") {
-        if let Some(auth_mut) = session.get_mut("auth") {
-            if let Some(obj) = auth_mut.as_object_mut() {
-                for (k, v) in new_data.as_object().unwrap_or(&serde_json::Map::new()) {
-                    obj.insert(k.clone(), v.clone());
-                }
-                obj.insert("lastRefreshTime".into(), serde_json::json!(chrono::Utc::now().timestamp_millis()));
-            }
-        }
+        merge_refreshed_auth(session, new_data, chrono::Utc::now().timestamp_millis());
     }
 
     save_accounts_state(&st)?;
     Ok("Token 刷新成功".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn login_and_refresh_paths_are_wired_to_expiry_normalization() {
+        // 归一函数本身正确，但调用点被绕开时新登录仍会缺 expiresAt。
+        // 用生产源码切片锁定两条写入路径的接线（网络命令本身难以在单测里驱动）。
+        let src = include_str!("auth.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let poll_start = production.find("pub async fn auth_poll").expect("缺少 auth_poll");
+        let poll_end = production[poll_start..]
+            .find("// 多账号管理")
+            .map(|i| poll_start + i)
+            .expect("缺少 auth_poll 结束边界");
+        let poll = &production[poll_start..poll_end];
+        assert!(
+            poll.contains("auth_session_for_save("),
+            "auth_poll 未在落盘前调用有效期归一化"
+        );
+        assert!(
+            poll.contains("auth_received_at_ms"),
+            "auth_poll 必须使用接收时刻作为相对 TTL 的锚点"
+        );
+
+        let refresh_start = production
+            .find("pub async fn accounts_refresh_token")
+            .expect("缺少 accounts_refresh_token");
+        let refresh = &production[refresh_start..];
+        assert!(
+            refresh.contains("merge_refreshed_auth("),
+            "手动刷新未调用有效期归一化，会保留旧 token 的绝对过期时间"
+        );
+
+        let list_start = production.find("pub fn accounts_list").expect("缺少 accounts_list");
+        let list_end = production[list_start..]
+            .find("pub fn accounts_switch")
+            .map(|i| list_start + i)
+            .expect("缺少 accounts_list 结束边界");
+        let list = &production[list_start..list_end];
+        assert!(
+            list.contains("auth_token_expiry("),
+            "账号列表未复用统一的过期判定"
+        );
+    }
+
+    #[test]
+    fn auth_poll_persists_absolute_expiry_for_relative_token_ttl() {
+        let received_at_ms = 1_793_947_135_517_i64;
+        let account = json!({ "uid": "uid-login", "nickname": "新登录账号" });
+        // auth/token 的真实形状：只有相对秒数，没有 expiresAt / refreshExpiresAt。
+        let auth = json!({
+            "accessToken": "new-access-token",
+            "refreshToken": "new-refresh-token",
+            "expiresIn": 2_592_000,
+            "refreshExpiresIn": 5_183_999,
+        });
+
+        let session = auth_session_for_save(&account, &auth, received_at_ms);
+
+        assert_eq!(
+            session.pointer("/auth/expiresAt").and_then(|v| v.as_i64()),
+            Some(received_at_ms + 2_592_000_000),
+            "登录落盘前必须把 expiresIn 换算成绝对 expiresAt"
+        );
+        assert_eq!(
+            session.pointer("/auth/refreshExpiresAt").and_then(|v| v.as_i64()),
+            Some(received_at_ms + 5_183_999_000),
+            "refreshExpiresIn 同理，缺字段会让后台续期与账号卡片各自误判"
+        );
+        let (exp, expired) = auth_token_expiry(session.get("auth").unwrap(), received_at_ms + 1_000);
+        assert_eq!(exp, received_at_ms + 2_592_000_000);
+        assert!(!expired, "刚签发的新 token 不得被账号列表判为已过期");
+    }
+
+    #[test]
+    fn refresh_uses_new_relative_ttl_instead_of_stale_absolute_expiry() {
+        let refreshed_at_ms = 1_793_950_000_000_i64;
+        let mut session = json!({
+            "account": { "uid": "uid-refresh" },
+            "auth": {
+                "accessToken": "old-access-token",
+                "refreshToken": "old-refresh-token",
+                "expiresIn": 60,
+                "expiresAt": 1_000,
+                "refreshExpiresAt": 2_000,
+            }
+        });
+        let new_data = json!({
+            "accessToken": "rotated-access-token",
+            "refreshToken": "rotated-refresh-token",
+            "expiresIn": 3_600,
+            "refreshExpiresIn": 7_200,
+        });
+
+        merge_refreshed_auth(&mut session, &new_data, refreshed_at_ms);
+
+        assert_eq!(
+            session.pointer("/auth/expiresAt").and_then(|v| v.as_i64()),
+            Some(refreshed_at_ms + 3_600_000),
+            "刷新响应给的是新 token 的相对 TTL，不能保留旧 token 的绝对过期时间"
+        );
+        assert_eq!(
+            session.pointer("/auth/refreshExpiresAt").and_then(|v| v.as_i64()),
+            Some(refreshed_at_ms + 7_200_000)
+        );
+        let (_, expired) = auth_token_expiry(session.get("auth").unwrap(), refreshed_at_ms + 1_000);
+        assert!(!expired);
+    }
 }
