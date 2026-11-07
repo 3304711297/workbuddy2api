@@ -124,10 +124,10 @@
       "name": "multi2api 熔断与会话粘性版（Practice019，原 workbuddy2api，借鉴雷达）",
       "repo": "Practice019/multi2api",
       "branch": "master",
-      "last_synced_commit": "6d349a68",
-      "last_synced_sha": "6d349a68c238d94bfded79fbe4bcf02b05f6f9fb",
+      "last_synced_commit": "14145fae",
+      "last_synced_sha": "14145fae30b46cd006df22425d53177589bd827c",
       "absorbed": "借鉴雷达（横向对比与会话粘性/熔断模型参考）",
-      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；原 workbuddy2api 更名为 multi2api。监控整仓新提交。本轮评估 def0fb9f→147d96a2（299 项提交，发布 1.9.0 至 1.9.10）：涉及控制台重做为 new-api 风格、多 Key 渠道聚合存储、缓存命中率双轴折线与按天用量图、管理端登录与反滥用限速、tool_result 断言重构等。**未采纳**：本仓为本地个人网关，UI 采用现代双列极客控制中心，统计指标由 snapshots 与 usage 日志驱动，无需 new-api 式多渠道多用户管理系统。\n\n本轮评估 147d96a2→9e02dca4（824 项，Go+SQLite 全量重构）：核心是看板统计口径（纯输出 token / tok/s 分母 / 热力图 / 时间桶边界）与日志采集器。**未采纳**：与本仓 Tauri 桌面端 + 单独的用量统计插件不是同一套呈现层；口径类改动无消费端可落。基线推进以避免看门噪声。 【2026-11-06 评估 9e02dca4→6d349a68（5 项）】45ed6ce6 为被同名遮蔽的模型补「渠道/模型」名称；c3ec6048 建立静态 OpenAPI 文档；6d349a68 修表单 label/aria 与重复 ID。**未采纳**：本仓模型清单刻意跨来源去重，无独立多渠道目录；OpenAPI 由 FastAPI 按本仓端点生成；a11y 改动仅可作为后续独立前端增强。"
+      "note": "Go 实现的多账号池、熔断退避、会话粘性与本地控制台分支；原 workbuddy2api 更名为 multi2api。监控整仓新提交。本轮评估 def0fb9f→147d96a2（299 项提交，发布 1.9.0 至 1.9.10）：涉及控制台重做为 new-api 风格、多 Key 渠道聚合存储、缓存命中率双轴折线与按天用量图、管理端登录与反滥用限速、tool_result 断言重构等。**未采纳**：本仓为本地个人网关，UI 采用现代双列极客控制中心，统计指标由 snapshots 与 usage 日志驱动，无需 new-api 式多渠道多用户管理系统。\n\n本轮评估 147d96a2→9e02dca4（824 项，Go+SQLite 全量重构）：核心是看板统计口径（纯输出 token / tok/s 分母 / 热力图 / 时间桶边界）与日志采集器。**未采纳**：与本仓 Tauri 桌面端 + 单独的用量统计插件不是同一套呈现层；口径类改动无消费端可落。基线推进以避免看门噪声。 【2026-11-06 评估 9e02dca4→6d349a68（5 项）】45ed6ce6 为被同名遮蔽的模型补「渠道/模型」名称；c3ec6048 建立静态 OpenAPI 文档；6d349a68 修表单 label/aria 与重复 ID。**未采纳**：本仓模型清单刻意跨来源去重，无独立多渠道目录；OpenAPI 由 FastAPI 按本仓端点生成；a11y 改动仅可作为后续独立前端增强。\n\n【2026-11-07 评估 6d349a68→14145fae（4 项）】fb85b0c1 修 codearts 对齐官方实现（1 P0 + 4 P1）；63963205 加 ManualLoginExt 与会话心跳续期；e317c4bd 把 truncate 上提 gateway 共享件；14145fae 把 codearts 模型目录改为探测上游、修前端 loginProvider 未赋值导致轮询走错上游、查明 qoder 探测受 WASM 签名入口限制。**未采纳**：均为 Go 多上游聚合网关的 codearts/qoder 供应商内部实现与其自带 WebUI 逻辑；本仓是 Tauri+Python 单上游网关，模型清单已动态拉取、token 续期由 token_refresher 处理，无对应 provider/heartbeat/truncate 分层，也无多 provider 登录态。仅推进基线以避免看门噪声。"
     },
     "wb2api-upstream-sliverkiss": {
       "name": "workbuddy2api Go 核心延续版（HanawaBanana，原 Sliverkiss，借鉴雷达）",
