@@ -392,12 +392,12 @@ pub async fn models_fetch_all() -> Result<Vec<ModelMetaItem>, String> {
     let token = auth.get("accessToken").and_then(|v| v.as_str()).ok_or("缺少 accessToken")?;
     let acct_uid = account.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
 
-    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    // 上游出口按账号区域选（国际版 token 打国内站会被边缘 401），绕过环境代理避免节点故障
     let client = super::shared::upstream_client(30);
 
-    // 双端并发请求：CodeBuddy 国内端 + WorkBuddy 国际/前沿端
+    // 双端并发请求：账号所属区域的 CodeBuddy/WorkBuddy 端 + 国际版公开配置端
     let cb_future = client
-        .get("https://copilot.tencent.com/v2/enterprises/personal/models")
+        .get(format!("{}/v2/enterprises/personal/models", super::shared::upstream_base_for(auth)))
         .header("Authorization", format!("Bearer {token}"))
         .header("X-User-Id", acct_uid)
         .header("User-Agent", "WorkBuddy/2.0.0")
@@ -621,10 +621,10 @@ pub async fn usage_query(uid: Option<String>) -> Result<UsageSummary, String> {
     let acct_uid = account.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
     let nickname = account.get("nickname").and_then(|v| v.as_str()).unwrap_or("—").to_string();
 
-    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    // 上游出口按账号区域选（国际版 token 打国内站会被边缘 401），绕过环境代理避免节点故障
     let client = super::shared::upstream_client(30);
     let resp = client
-        .post("https://copilot.tencent.com/billing/meter/get-user-resource-summary")
+        .post(format!("{}/billing/meter/get-user-resource-summary", super::shared::upstream_base_for(auth)))
         .header("Authorization", format!("Bearer {token}"))
         .header("X-User-Id", acct_uid)
         .header("Content-Type", "application/json")

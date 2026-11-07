@@ -643,6 +643,12 @@ workbuddy2api.exe (GUI)
     `update.rs` 源码分支仍不得请求 Release API；两条路径由 `check_app_update` 分流。
   - 契约锁定：`tests/test_release_workflow_contract.test.js`，其中一条是**反向断言**
     `ci.yml` 不得出现 `tauri build` / NSIS 产物路径 —— 想「顺手」把打包挪回 CI 会立刻变红。
+  - **发版前必须验未压缩主 exe 非空壳**：`scripts/verify_build_artifact.py`
+    在 `npm run tauri build` 之后、生成 `SHA256SUMS.txt` 之前运行，检查主 exe
+    `>10MB`、`dist/assets/*.js` 文件名已内嵌、`build.rs` 烘焙的 HEAD SHA 存在。
+    10MB 常量只许留在脚本里，不许内联进 YAML（既有反向断言会红）；日志纯 ASCII，
+    Windows runner 的 cp1252 控制台打印中文会假失败。契约：
+    `tests/test_verify_build_artifact.py` 与 `tests/test_release_workflow_contract.test.js`。
 
 ## 7. 已知待办（未实现，别重复造）
 
@@ -771,6 +777,19 @@ workbuddy2api.exe (GUI)
   账号列表统一走 `auth_token_expiry()`（保留 60s 宽限）。契约锁定：
   `commands::auth::tests::auth_poll_persists_absolute_expiry_for_relative_token_ttl`、
   `refresh_uses_new_relative_ttl_instead_of_stale_absolute_expiry` 与接线断言。
+
+  ⚠️ **上游出口按账号区域路由（2026-11-07 吸收 Leexunhuan743 fork `637c9d6d`）**：
+  国际版账号（`realm=global` 或 `domain` 属于 `workbuddy.ai` / `codebuddy.ai` 家族）
+  必须走 `https://www.workbuddy.ai`；国内账号继续 `copilot.tencent.com`。
+  Python 侧统一用 `_backend_for_auth` / `_upstream_url` / `_resolve_upstream_url`，
+  三协议入口、非流式重试、流式 failover、刷新、模型、计费、签到全部覆盖；
+  Rust 侧统一用 `commands::shared::upstream_base_for(auth)`。
+  国际版出站头用 `X-No-Enterprise-Id: 1` + 同域 `Origin/Referer`，首条非 system 时补中性兜底；
+  CN 分支逐字保持原样。换号后必须按新 headers 重算主机（池内可同时有两区域账号）。
+  `realm` 目前全仓无写入方，实际靠 `domain` 回退；legacy `.info` 无 domain 时保守走国内站。
+  真实国际版 token 端到端未验证（无凭据），改动此逻辑须用真实账号复验。
+  契约锁定：`tests/test_realm_backend_routing.py`、`tests/test_realm_routing_wiring.py`、
+  `commands::shared::tests::upstream_base_follows_realm_then_domain`。
 
 - **桌面端 at-rest 加密凭据（`wb_atrest.py`，issue #37，改动必读）**：
   新版桌面端把 `.info` 的 `auth.accessToken` / `auth.refreshToken` 与 `account.nickname`

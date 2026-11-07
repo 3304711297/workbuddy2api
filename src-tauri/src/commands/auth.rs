@@ -265,10 +265,10 @@ pub async fn accounts_refresh_token(uid: Option<String>) -> Result<String, Strin
     let acct = session.get("account").ok_or("缺少 account 节点")?;
     let uid_str = acct.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
 
-    // 腾讯上游国内直连即可，绕过环境代理，避免受 Karing 节点故障影响
+    // 上游出口按账号区域选（国际版 token 打国内站会被边缘 401），绕过环境代理避免节点故障
     let client = super::shared::upstream_client(30);
     let resp = client
-        .post("https://copilot.tencent.com/v2/plugin/auth/token/refresh")
+        .post(format!("{}/v2/plugin/auth/token/refresh", super::shared::upstream_base_for(auth)))
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {access_token}"))
         .header("X-Refresh-Token", refresh_token)

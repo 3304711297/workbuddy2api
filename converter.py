@@ -114,7 +114,89 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 BACKEND = "https://copilot.tencent.com"
+BACKEND_INTL = "https://www.workbuddy.ai"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
+INTL_DOMAIN = "www.workbuddy.ai"
+
+# 上游 chat 补全路径（主机按账号区域拼，见 _upstream_url）
+UPSTREAM_CHAT_PATH = "/v2/chat/completions"
+
+# 国际版首条消息必须是 system；客户端没给时前置这条最小兜底（口径同 panel 的
+# ensureConsoleSystem，措辞刻意中性、不注入任何客户端身份）。
+INTL_FALLBACK_SYSTEM = "You are a helpful assistant."
+
+
+def _normalize_domain(domain) -> str:
+    """把 domain / URL 归一成小写 hostname（去端口、路径与首尾点）。"""
+    value = str(domain or "").strip().lower()
+    if not value:
+        return ""
+    if "://" in value:
+        value = urlsplit(value).hostname or ""
+    else:
+        value = value.split("/", 1)[0]
+        if value.count(":") == 1 and value.rsplit(":", 1)[1].isdigit():
+            value = value.rsplit(":", 1)[0]
+    return value.strip(".")
+
+
+def _is_intl_domain(domain) -> bool:
+    """域名是否属于国际版家族（workbuddy.ai / codebuddy.ai 及其子域）。"""
+    host = _normalize_domain(domain)
+    return any(host == base or host.endswith("." + base)
+               for base in ("workbuddy.ai", "codebuddy.ai"))
+
+
+def _backend_for_domain(domain) -> str:
+    """按账号域名选上游出口：国际版域名走 www.workbuddy.ai，其余走国内站。"""
+    return BACKEND_INTL if _is_intl_domain(domain) else BACKEND
+
+
+def _backend_for_auth(auth: dict | None) -> str:
+    """按凭据选上游出口：realm 优先（global=国际版），缺 realm 时回退 domain 判定。"""
+    realm = str((auth or {}).get("realm") or "").strip().lower()
+    if realm:
+        return BACKEND_INTL if realm == "global" else BACKEND
+    return _backend_for_domain((auth or {}).get("domain"))
+
+
+def _upstream_url(path: str, headers: dict | None = None) -> str:
+    """按当前账号区域拼上游 URL。
+
+    换号（failover）后**必须重算**：同一个池子里可能同时有国内版与国际版账号，
+    拿旧账号的主机去发新账号的 token 会被边缘 401。
+    """
+    return _backend_for_domain((headers or {}).get("X-Domain")) + path
+
+
+def _resolve_upstream_url(url: str, headers: dict | None = None) -> str:
+    """只对已知上游主机重算区域；自定义 URL（测试/Mock）原样保留。"""
+    parts = urlsplit(url)
+    known_hosts = {urlsplit(BACKEND).netloc, urlsplit(BACKEND_INTL).netloc}
+    if parts.netloc not in known_hosts:
+        return url
+    path = parts.path or UPSTREAM_CHAT_PATH
+    if parts.query:
+        path += "?" + parts.query
+    return _upstream_url(path, headers)
+
+
+def _ensure_intl_system(body: dict, headers: dict | None) -> None:
+    """国际版要求首条消息是 system，否则上游以 `11-128 first message is not system prompt` 拒绝。
+
+    仅在首条不是 system 时前置一条最小兜底 system，绝不覆盖客户端已有的 system。
+    幂等，可重复调用（换号后按新账号区域再判一次是安全的）；国内版不做任何改写。
+    """
+    if _backend_for_domain((headers or {}).get("X-Domain")) != BACKEND_INTL:
+        return
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    first = messages[0]
+    if isinstance(first, dict) and str(first.get("role") or "").strip().lower() == "system":
+        return
+    body["messages"] = [{"role": "system", "content": INTL_FALLBACK_SYSTEM}, *messages]
+
 
 # ---------------------------------------------------------------------------
 # 平台相关：定位 auth 目录与 WSL 宿主穿透
@@ -291,7 +373,7 @@ def _get_user_agent(domain: str | None = None) -> str:
     env_ua = _env_compat("USER_AGENT", "")
     if env_ua:
         return env_ua.strip()
-    if domain and "workbuddy.ai" in domain:
+    if _is_intl_domain(domain):
         return DEFAULT_UA_INTL
     return DEFAULT_UA_CN
 
@@ -743,7 +825,7 @@ class CredentialManager:
         headers = self._build_headers_from(auth, s.get("account") or {})
         headers["X-Refresh-Token"] = auth.get("refreshToken", "")
         headers["X-Auth-Refresh-Source"] = "plugin"
-        url = f"{BACKEND}/v2/plugin/auth/token/refresh"
+        url = f"{_backend_for_auth(auth)}/v2/plugin/auth/token/refresh"
         try:
             with httpx.Client(timeout=15) as c:
                 r = c.post(url, headers=headers, json={})
@@ -764,17 +846,26 @@ class CredentialManager:
         self._save_tokens(s, new_auth)
 
     def _build_headers_from(self, auth: dict, account: dict) -> dict:
-        domain = auth.get("domain") or DEFAULT_DOMAIN
+        intl = _backend_for_auth(auth) == BACKEND_INTL
+        domain = auth.get("domain") or (INTL_DOMAIN if intl else DEFAULT_DOMAIN)
         h = {
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Authorization": f"Bearer {auth.get('accessToken','')}",
             "X-User-Id": account.get("uid", ""),
-            "X-Enterprise-Id": account.get("enterpriseId", ""),
-            "X-Tenant-Id": account.get("enterpriseId", ""),
             "X-Domain": domain,
             "User-Agent": _get_user_agent(domain),
         }
+        if intl:
+            # 国际版个人号没有企业 ID：官方客户端形态是显式声明 X-No-Enterprise-Id: 1，
+            # 而不是发一个空的 X-Enterprise-Id（空值属可疑指纹）；Origin/Referer 需与
+            # X-Domain 同域。国内版分支保持原样（零回归）。
+            h["X-No-Enterprise-Id"] = "1"
+            h["Origin"] = BACKEND_INTL
+            h["Referer"] = f"{BACKEND_INTL}/"
+        else:
+            h["X-Enterprise-Id"] = account.get("enterpriseId", "")
+            h["X-Tenant-Id"] = account.get("enterpriseId", "")
         # 设备风控头：桌面端所有敏感请求均携带（Turing Shield SDK 生成）。
         # 取不到时优雅降级为不带该头（借鉴 xiaofan6ya/workbuddy2api，MIT）。
         tok = _get_turing_device_token()
@@ -864,7 +955,7 @@ class CredentialManager:
             headers = self._build_headers_from(auth, account)
             headers["X-Refresh-Token"] = refresh_token
             headers["X-Auth-Refresh-Source"] = "plugin"
-            url = f"{BACKEND}/v2/plugin/auth/token/refresh"
+            url = f"{_backend_for_auth(auth)}/v2/plugin/auth/token/refresh"
             try:
                 with httpx.Client(timeout=15) as c:
                     r = c.post(url, headers=headers, json={})
@@ -1171,7 +1262,6 @@ DEFAULT_MODELS = [
     "default",
 ]
 
-_MODELS_URL = f"{BACKEND}/v2/enterprises/personal/models"
 _WORKBUDDY_MODELS_URL = "https://www.codebuddy.ai/v3/config"
 _MODELS_TRANSPORT_OVERRIDE = None
 _MODELS_CACHE: dict[str, dict] = {}  # uid -> {"models": list[str], "expires_at": float}
@@ -1229,6 +1319,7 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
 
     token = ""
     uid = ""
+    auth: dict = {}
     cred = CONFIG.get("cred")
     if cred is not None:
         try:
@@ -1264,10 +1355,11 @@ async def _fetch_remote_models(*, transport=None) -> list[str]:
     headers = {
         "Authorization": f"Bearer {token}" if token else "",
         "X-User-Id": str(uid),
-        "User-Agent": USER_AGENT,
+        "User-Agent": _get_user_agent(auth.get("domain")),
     }
     endpoints = [
-        ("CodeBuddy", _MODELS_URL),
+        # 国内站取 30 个模型、国际站 18 个；主机必须按活跃账号区域选（国际版 token 打国内站 401）
+        ("CodeBuddy", f"{_backend_for_auth(auth)}/v2/enterprises/personal/models"),
         ("WorkBuddy", _WORKBUDDY_MODELS_URL),
     ]
 
@@ -2448,7 +2540,9 @@ def health():
 # is_paid_user/packages）；任何失败一律返回 {"error": "..."}，由调用方优雅降级。
 # ---------------------------------------------------------------------------
 
-_BILLING_URL = f"{BACKEND}/billing/meter/get-user-resource-summary"
+# 计费域按账号区域切换（见 _backend_for_auth）：国内 copilot.tencent.com、国际 www.workbuddy.ai。
+# 路径常量保持单一定义，避免新增同路径硬编码。
+BILLING_SUMMARY_PATH = "/billing/meter/get-user-resource-summary"
 
 # 测试注入点：pytest 通过 monkeypatch 注入 httpx.MockTransport；生产恒为 None
 _BILLING_TRANSPORT_OVERRIDE = None
@@ -2495,13 +2589,17 @@ def _parse_usage_payload(data: dict) -> dict:
     }
 
 
-async def _fetch_billing_usage(access_token: str, uid: str, *, transport=None) -> dict:
-    """服务端直查腾讯计费接口；返回 UsageSummary 对齐 dict（不含身份字段）或 {"error": ...}。"""
+async def _fetch_billing_usage(access_token: str, uid: str, *, auth: dict | None = None,
+                               transport=None) -> dict:
+    """服务端直查腾讯计费接口；返回 UsageSummary 对齐 dict（不含身份字段）或 {"error": ...}。
+
+    计费域按账号区域切换：国内 copilot.tencent.com、国际 www.workbuddy.ai。
+    """
     headers = {
         "Authorization": f"Bearer {access_token}",
         "X-User-Id": uid,
         "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": _get_user_agent((auth or {}).get("domain")),
     }
     use_transport = transport or _BILLING_TRANSPORT_OVERRIDE
     try:
@@ -2509,7 +2607,7 @@ async def _fetch_billing_usage(access_token: str, uid: str, *, transport=None) -
         if use_transport is not None:
             client_kwargs["transport"] = use_transport
         async with httpx.AsyncClient(**client_kwargs) as c:
-            r = await c.post(_BILLING_URL, headers=headers, json={})
+            r = await c.post(f"{_backend_for_auth(auth)}{BILLING_SUMMARY_PATH}", headers=headers, json={})
     except httpx.HTTPError as e:
         return {"error": f"计费接口网络失败: {e}"}
     if r.status_code != 200:
@@ -2538,6 +2636,7 @@ async def api_usage_summary(
     token = ""
     uid = ""
     nickname = ""
+    auth: dict = {}
 
     cred = CONFIG.get("cred")
     if cred is not None:
@@ -2570,7 +2669,7 @@ async def api_usage_summary(
             return {"error": "活跃账号缺少 accessToken（请在桌面控制台重新授权或刷新 Token）"}
         nickname = account.get("nickname") or ""
 
-    summary = await _fetch_billing_usage(token, uid)
+    summary = await _fetch_billing_usage(token, uid, auth=auth)
     if "error" in summary:
         return summary
     # token 过期时腾讯侧会以 code!=0/HTTP 401 返回，已归一为上面的 error 路径
@@ -4283,7 +4382,7 @@ async def chat_completions(request: Request,
             },
         )
     active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
-    url = f"{BACKEND}/v2/chat/completions"
+    url = _upstream_url(UPSTREAM_CHAT_PATH, headers)
     t0 = time.time()
 
     has_tools = bool(payload.get("tools"))
@@ -4354,6 +4453,9 @@ async def chat_completions(request: Request,
     ttft_ms = None
 
     for attempt in range(max_attempts):
+        # 换号后按新账号的区域重算主机（池内可能同时有国内版与国际版账号）
+        url = _upstream_url(UPSTREAM_CHAT_PATH, headers)
+        _ensure_intl_system(body, headers)
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
                 async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
@@ -4591,7 +4693,7 @@ async def anthropic_messages(
             },
         )
     active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
-    url = f"{BACKEND}/v2/chat/completions"
+    url = _upstream_url(UPSTREAM_CHAT_PATH, headers)
     t0 = time.time()
 
     _pacer = _get_pacer()
@@ -4662,6 +4764,9 @@ async def anthropic_messages(
     ttft_ms = None
 
     for attempt in range(max_attempts):
+        # 换号后按新账号的区域重算主机（池内可能同时有国内版与国际版账号）
+        url = _upstream_url(UPSTREAM_CHAT_PATH, headers)
+        _ensure_intl_system(body, headers)
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
                 async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
@@ -4871,7 +4976,7 @@ async def openai_responses(
         )
     active_hdr = {"X-WorkBuddy-Active-Account": uid} if uid else {}
 
-    url = f"{BACKEND}/v2/chat/completions"
+    url = _upstream_url(UPSTREAM_CHAT_PATH, headers)
     t0 = time.time()
 
     _pacer = _get_pacer()
@@ -4963,6 +5068,9 @@ async def openai_responses(
     ttft_ms = None
 
     for attempt in range(max_attempts):
+        # 换号后按新账号的区域重算主机（池内可能同时有国内版与国际版账号）
+        url = _upstream_url(UPSTREAM_CHAT_PATH, headers)
+        _ensure_intl_system(body, headers)
         try:
             async with (pacer_ctx if pacer_ctx else asyncio.nullcontext()):
                 async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
@@ -5451,6 +5559,8 @@ async def _safe_stream_upstream(url: str, headers: dict, body: dict,
     curr_headers = dict(headers)
 
     for attempt in range(max_attempts):
+        url = _resolve_upstream_url(url, curr_headers)
+        _ensure_intl_system(body, curr_headers)
         try:
             async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                 async with c.stream("POST", url, headers=curr_headers, json=body) as r:
@@ -6238,6 +6348,8 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
 
     try:
         for attempt in range(max_attempts):
+            url = _resolve_upstream_url(url, curr_headers)
+            _ensure_intl_system(body, curr_headers)
             try:
                 async with _shared_client_ctx(timeout=_SHARED_TIMEOUT_DEFAULT) as c:
                     async with c.stream("POST", url, headers=curr_headers, json=body) as r:
@@ -6487,8 +6599,8 @@ def _err_event(msg: bytes, status: int) -> bytes:
 # 风控要点：请求经 CredentialManager 注入 X-Device-Token，与桌面端一致。
 # ---------------------------------------------------------------------------
 
-_CHECKIN_STATUS_URL = f"{BACKEND}/v2/billing/meter/checkin-activity-status"
-_CHECKIN_CLAIM_URL = f"{BACKEND}/v2/billing/meter/daily-checkin"
+_CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
+_CHECKIN_CLAIM_PATH = "/v2/billing/meter/daily-checkin"
 
 _CHECKIN_CODE_MAP = {
     1001: "already_claimed",     # 逆向文档口径
@@ -6538,7 +6650,7 @@ async def checkin_status(
     try:
         cred = _get_checkin_cred()
         headers = cred.get_headers()
-        body = _checkin_post(_CHECKIN_STATUS_URL, headers)
+        body = _checkin_post(_upstream_url(_CHECKIN_STATUS_PATH, headers), headers)
     except Exception as e:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
     if body.get("code") not in (0, None):
@@ -6557,7 +6669,7 @@ async def checkin_claim(
         cred = _get_checkin_cred()
         headers = cred.get_headers()
         # 先查活动状态：今日已签到则不再发领取请求（幂等 + 减少无效风控暴露）
-        st_body = _checkin_post(_CHECKIN_STATUS_URL, headers)
+        st_body = _checkin_post(_upstream_url(_CHECKIN_STATUS_PATH, headers), headers)
         st = (st_body.get("data") or {}) if st_body.get("code") in (0, None) else {}
         if st.get("today_checked_in"):
             return {
@@ -6568,7 +6680,7 @@ async def checkin_claim(
                 "streak_days": st.get("streak_days") or 0,
                 "activity": {"active": st.get("active"), "end_time": st.get("end_time")},
             }
-        body = _checkin_post(_CHECKIN_CLAIM_URL, headers)
+        body = _checkin_post(_upstream_url(_CHECKIN_CLAIM_PATH, headers), headers)
     except Exception as e:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
     code = body.get("code")

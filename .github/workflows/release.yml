@@ -48,6 +48,11 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -90,6 +95,12 @@ jobs:
         # 必须走 tauri CLI：裸 cargo build 会产出无前端的空壳 exe（见 AGENTS.md）
         # tauri.conf.json 的 beforeBuildCommand 会自动先跑 npm run build
         run: npm run tauri build
+
+      - name: 校验主程序不是无前端空壳
+        # 安装包是 LZMA 压缩体，1MB 下限挡不住空壳；压缩前先验主 exe 的尺寸、
+        # dist/assets 资源内嵌与 build.rs 烘焙的 HEAD SHA（日志纯 ASCII，防 cp1252）。
+        shell: bash
+        run: python scripts/verify_build_artifact.py
 
       - name: 校验产物并生成校验和
         shell: bash

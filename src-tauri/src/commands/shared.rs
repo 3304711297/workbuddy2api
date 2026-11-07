@@ -43,9 +43,9 @@ pub(super) fn local_client(timeout_secs: u64) -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
-/// 构造访问腾讯上游（copilot.tencent.com）的客户端。
+/// 构造访问腾讯上游（copilot.tencent.com / www.workbuddy.ai）的客户端。
 ///
-/// 该域名国内可直连，无需也不应经过代理；同样显式绕过环境代理，
+/// 两个域名均可直连，无需也不应经过代理；同样显式绕过环境代理，
 /// 避免因代理节点故障导致账号刷新 / 配额查询失败。
 pub(super) fn upstream_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
@@ -53,6 +53,45 @@ pub(super) fn upstream_client(timeout_secs: u64) -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// 上游出口基址：国内站（copilot.tencent.com）与国际版（www.workbuddy.ai）。
+///
+/// 国际版 token 打国内站会被边缘直接 401；凡带账号凭据的上游请求都必须按账号区域选基址。
+pub(super) const UPSTREAM_BASE_CN: &str = "https://copilot.tencent.com";
+pub(super) const UPSTREAM_BASE_INTL: &str = "https://www.workbuddy.ai";
+
+fn is_intl_domain(domain: &str) -> bool {
+    let host = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = host.split(':').next().unwrap_or("");
+    ["workbuddy.ai", "codebuddy.ai"].iter().any(|base| {
+        host == *base
+            || host
+                .strip_suffix(*base)
+                .map_or(false, |prefix| prefix.ends_with('.'))
+    })
+}
+
+/// 按账号凭据选上游出口：显式 `realm == "global"` 优先，缺 realm 时回退
+/// `domain` 是否落在 workbuddy.ai / codebuddy.ai 家族；两者都缺 → 国内站（老凭据零回归）。
+pub(super) fn upstream_base_for(auth: &serde_json::Value) -> &'static str {
+    let realm = auth
+        .get("realm")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !realm.is_empty() {
+        return if realm == "global" {
+            UPSTREAM_BASE_INTL
+        } else {
+            UPSTREAM_BASE_CN
+        };
+    }
+    match auth.get("domain").and_then(|v| v.as_str()) {
+        Some(d) if is_intl_domain(d) => UPSTREAM_BASE_INTL,
+        _ => UPSTREAM_BASE_CN,
+    }
 }
 
 /// %LOCALAPPDATA%（优先环境变量；缺省时从 USERPROFILE 派生；最终回退系统已知目录，不再硬编码用户目录）
@@ -205,6 +244,19 @@ pub(super) fn save_accounts_state(st: &AccountsState) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_base_follows_realm_then_domain() {
+        // 显式 realm 优先
+        assert_eq!(upstream_base_for(&serde_json::json!({"realm": "global"})), UPSTREAM_BASE_INTL);
+        assert_eq!(upstream_base_for(&serde_json::json!({"realm": "cn", "domain": "www.workbuddy.ai"})), UPSTREAM_BASE_CN);
+        // 缺 realm 回退 domain（含 codebuddy.ai 国际版家族）
+        assert_eq!(upstream_base_for(&serde_json::json!({"domain": "www.workbuddy.ai"})), UPSTREAM_BASE_INTL);
+        assert_eq!(upstream_base_for(&serde_json::json!({"domain": "www.codebuddy.ai"})), UPSTREAM_BASE_INTL);
+        assert_eq!(upstream_base_for(&serde_json::json!({"domain": "www.codebuddy.cn"})), UPSTREAM_BASE_CN);
+        // 两者都缺 → 国内站（老凭据零回归）
+        assert_eq!(upstream_base_for(&serde_json::json!({})), UPSTREAM_BASE_CN);
+    }
 
     #[test]
     fn test_atomic_write_file_normal() {

@@ -109,6 +109,30 @@ test('产物尺寸判据必须是安装包量级，不得套用主 exe 的 10MB'
   );
 });
 
+test('打包后必须校验主程序不是无前端空壳（尺寸 + dist/assets 内嵌 + 构建 SHA）', () => {
+  assert.match(
+    releaseCode,
+    /python scripts\/verify_build_artifact\.py/,
+    'release.yml 未调用 scripts/verify_build_artifact.py：1MB 安装包下限挡不住空壳 exe'
+  );
+  assert.match(releaseCode, /actions\/setup-python@v6/, '缺少 setup-python，Windows runner 上 python 版本不可控');
+  const buildAt = releaseCode.indexOf('npm run tauri build');
+  const verifyAt = releaseCode.indexOf('python scripts/verify_build_artifact.py');
+  const sumsAt = releaseCode.indexOf('SHA256SUMS.txt');
+  assert.ok(
+    verifyAt > buildAt && verifyAt < sumsAt,
+    '校验步骤必须夹在 tauri build 与生成 SHA256SUMS.txt 之间：压缩前验主 exe、通过后生成校验和'
+  );
+  const script = readFileSync(join(root, 'scripts', 'verify_build_artifact.py'), 'utf8');
+  assert.match(script, /src-tauri\/target\/release\/workbuddy2api\.exe/, '脚本目标必须是未压缩的主 exe');
+  assert.match(script, /10\s*\*\s*1024\s*\*\s*1024/, '主 exe 的 10MB 下限必须留在脚本里，不得内联进 YAML');
+  assert.match(script, /dist\/assets|assets_dir/, '脚本必须校验 dist/assets 下的资源文件名已内嵌');
+  assert.ok(
+    !/10485760/.test(releaseCode),
+    '10MB 常量只能存在于校验脚本；写进 release.yml 会触发既有反向断言'
+  );
+});
+
 test('产物文件名必须与版本号绑定，防止传错包', () => {
   assert.match(
     releaseCode,
