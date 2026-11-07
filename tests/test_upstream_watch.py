@@ -38,6 +38,30 @@ def test_lint_sources_invalid():
     assert any("缺少必填字段 'last_synced_commit'" in e for e in errs)
 
 
+def test_check_source_archived_is_not_queried(monkeypatch):
+    """归档源（上游停更、看门移交下游）不查 API，也不计入待评估/查询失败。"""
+    calls = []
+
+    def fake_api(url, token):
+        calls.append(url)
+        return None, 500
+
+    monkeypatch.setattr(check_upstream, "api_get", fake_api)
+    cfg = {
+        "repo": "owner/retired",
+        "branch": "main",
+        "archived": True,
+        "last_synced_commit": "73a7560e",
+        "name": "已停更上游",
+    }
+    res = check_upstream.check_source("archived", cfg, "fake-token")
+    assert res["status"] == "archived"
+    assert res["has_update"] is False
+    assert res["latest_commit"] == "N/A"
+    assert res["last_commit"] == "73a7560e"
+    assert calls == [], "归档源不得再打 GitHub API（避免制造 404/查询失败噪声）"
+
+
 def test_check_source_handles_query_failure(monkeypatch):
     # 模拟 api_get 全部返回 None（例如网络异常或 API 403 限额）
     monkeypatch.setattr(check_upstream, "api_get", lambda url, token: None)

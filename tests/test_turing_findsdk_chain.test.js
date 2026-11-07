@@ -130,7 +130,9 @@ test('turing_helper 生产链路（findSdkDir 选择与优先级）', async (t) 
 
   await t.test('C. 仅显式路径可用时回退到宽松接受（两轮的兜底作用）', () => {
     const looseOnly = writeLooseOnly(makeDir(sandbox, 'loose-c'));
-    withEnv({ ...redirectBases(sandbox), WORKBUDDY_TURING_SDK_DIR: looseOnly }, () => {
+    // 必须一并清掉 WORKBUDDY_TURING_DRIVES：用户级环境变量可能指向真实盘根
+    // （本机实测 D），盘根命中强特征目录会抢在显式路径之前，让断言依赖测试机装没装 WorkBuddy。
+    withEnv({ ...redirectBases(sandbox), WORKBUDDY_TURING_DRIVES: undefined, WORKBUDDY_TURING_SDK_DIR: looseOnly }, () => {
       assert.strictEqual(findSdkDir(), looseOnly,
         '无强特征候选时应回退到用户显式信任目录（否则显式配置功能失效）');
     });
@@ -138,7 +140,7 @@ test('turing_helper 生产链路（findSdkDir 选择与优先级）', async (t) 
 
   await t.test('D. 显式目录若连 index.cjs 都没有，绝不接受（宽松 ≠ 无门槛）', () => {
     const empty = makeDir(sandbox, 'empty-d'); // 空目录：无 index.cjs
-    withEnv({ ...redirectBases(sandbox), WORKBUDDY_TURING_SDK_DIR: empty }, () => {
+    withEnv({ ...redirectBases(sandbox), WORKBUDDY_TURING_DRIVES: undefined, WORKBUDDY_TURING_SDK_DIR: empty }, () => {
       assert.strictEqual(findSdkDir(), null,
         '宽松模式仍需 index.cjs 入口；否则 require 一个空目录会抛错或落进意外行为');
     });

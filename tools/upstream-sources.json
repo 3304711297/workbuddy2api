@@ -43,10 +43,29 @@
       "name": "workbuddy2api-panel（linguo2625469，借鉴雷达）",
       "repo": "linguo2625469/workbuddy2api-panel",
       "branch": "main",
+      "archived": true,
       "last_synced_commit": "73a7560e",
       "last_synced_sha": "73a7560efc7a88ebd9865db4c71ae7f6d85859f8",
       "absorbed": "借鉴雷达（workbuddy2api 已吸收其 413 请求体上限保护中间件机制）",
       "note": "基于 Sliverkiss 分支的多账号网关+Web控制台；已借鉴其 413 Payload Too Large 请求体上限保护中间件机制；监控整仓新提交。本轮评估 d66384d9→6b31db6d（9 项提交）：包含还原模型原生工具调用标记防 Codex 回合空转、无 conversation_id 时 prompt_cache_key 回退会话 key、到期提醒改为按需拉取、剔除 function.name 为空的 tool_call 防止 11133 等。**未采纳**：本仓 converter.py 与 anthropic_compat 状态机原本即具备严格的工具调用合法性校验与空参数过滤，且 prompt cache 键与 conversation_id 逻辑由专用契约保障，无对应线上缺陷。\n\n本轮评估 6b31db6d→73a7560e（60 项，Go + SQLite 面板）：主要为积分历史逐账号记录、手机端抽屉/宽表卡片化、按地区独立轮询调度、企业切换会话识别、补偿状态可观测化、搜索端点 POST /v1/search/messages。**未采纳**：面板与统计是另一套 Go 技术栈；按地区调度依赖其多租户模型，本仓单机个人网关用不上。**记录待观测**：`f14f374` 把 6021 queue.full 归为渠道级 busy（不触发全池冷却）——本仓从未采到 6021 真实样本，按「无真实样本不动错误码词表」的既有纪律暂不落地，等真样本再评估；`dea68c4` 剥离 content 内 reasoning_text 片段修 11101，本仓 `_reasoning_text`/`_sanitize_delta_obj` 已覆盖 reasoning 与 content 的分离。"
+    },
+    "wb2api-upstream-misakano": {
+      "name": "workbuddy2api-panel 独立增强分支（misakano7545，linguo 停更后的主下游）",
+      "repo": "misakano7545/workbuddy2api-panel",
+      "branch": "main",
+      "last_synced_commit": "97d3f259",
+      "last_synced_sha": "97d3f259a59eb8f07674ca5caf54eed84d2795d1",
+      "absorbed": "借鉴雷达（2026-11-07 起接替已停更的 linguo 条目作为主下游看门：已吸收其 11140 风控连坐保护与「国际版兜底 system 只写行为约定」；入站请求体上限本仓已有 413 中间件）",
+      "note": "独立起库（非 fork，与 linguo 无共同 commit，compare 不可用），2026-09-14 同步到上游 ea8b1e5 后独立演进，覆盖面已超过 linguo 停更版。本轮基线取 HEAD 97d3f259（2026-11-07）。评估 2026-10-20 至 11-07 的 320 项提交，按主题归类：① **已采纳** `b494426a` 的 11140 风控连坐保护——11140 除「内容审核」外还有「账号存在异常行为，已被限制使用 / unusual activity」形态，判据在上游是设备/出口级，命中即停手不换号，同窗 ≥2 个不同账号被限制则全池暂停；② **已采纳** `e4e6f5ce` 兜底 system 只写行为约定（本仓 INTL_FALLBACK_SYSTEM 原为 \"You are a helpful assistant.\"，会与客户端 harness 人设冲突）；③ **不适用**：出站 TLS ClientHello/JA3-JA4、请求头逐字节序、Accept-Encoding 四段等指纹对齐工程依赖 Go uTLS + 自定义 transport，本仓 Python/httpx 栈无同等能力且不宣称官方客户端同构；视频/图片/MCP/盲盒/任务中心/账号分组属其 Go 面板产品范围。④ **不适用** `97d3f259` 的「同一 uid 多文件按 mtime 最新胜出」与 `$wbEncrypted` 回写清单——本仓 accounts.json 是单一真源、.info 仅兼容镜像，且回写明文是 AGENTS.md 已论证的刻意取舍。⑤ **待真实样本**：流式关闭前读流尾（连接复用）、慢上传可见性与在途名额释放，本仓连接层与并发模型不同，先记录不落地。"
+    },
+    "wb2api-upstream-zxyk": {
+      "name": "workbuddy2api-panel integrated 分支（zx-yk，linguo 的直接 fork）",
+      "repo": "zx-yk/workbuddy2api-panel",
+      "branch": "integrated",
+      "last_synced_commit": "568f73e1",
+      "last_synced_sha": "568f73e126fd1108855fefde39caacd7403df089",
+      "absorbed": "借鉴雷达（已吸收其官方 CLI classifyErrorDetail 错误码表：14001/14002/14012/14013/14014/14019 归额度耗尽，14015/14016 归账号态故障，11142 归账号受限；其余为 Go 面板/出站指纹工程）",
+      "note": "linguo 的直接 fork（默认分支 integrated），2026-10-21 起接续演进，与本题基线 73a7560e 历史连续。本轮基线取 HEAD 568f73e1（2026-11-06）。评估 73a7560e→568f73e1 的 70 项提交：① **已采纳** `304aa5e3` 按官方内置 CLI 的 classifyErrorDetail 码表分流——本仓此前只认 14018（额度耗尽）与 14017（账号态故障），其余额度/授权/未激活码全会落到 `status==429 → 软限流`，额度耗尽白等 5 分钟、授权过期冷却→恢复→再失败的无限循环；已按其码表扩族并保留「无真实样本不动文案词表」的既有纪律；② `5288575b` 的 6001-6008 模型级限流本仓已覆盖；③ **不适用**：设备标识 UUID v4 / sessionId 生命周期、CLI/UI 事件字段白名单、57 条硬件画像、出站头逐名对齐、请求体顶层键序、JA3/JA4 均属官方客户端同构工程，本仓不走行为上报也不宣称同构；④ **待评估**：`069cf05c` 11158 独立 24h 负缓存、`e8558f7d` 排队命中即终止轮转与丢弃上游必拒的 tools 声明、`2e5298d7` 兜底选号遵守模型冷冻与调用方断开记 499——本仓已有部分等价机制，需真实样本或单独任务验证。"
     },
     "wb2api-upstream-turbomind": {
       "name": "workbuddy2api-python（turbomind66，借鉴雷达）",

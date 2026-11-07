@@ -563,8 +563,13 @@ workbuddy2api.exe (GUI)
   - **413 防护**：`MAX_BODY_MB`（环境变量 `WORKBUDDY2API_MAX_BODY_MB`，默认 16MB）。中间件为**纯 ASGI receive 层按块熔断**（`RequestBodyLimitMiddleware`，非 BaseHTTPMiddleware）：① `Content-Length` 快速拒绝（零读取）；② 分块累计一旦超限立即中止读取并返回 413，**不放任 chunked 大包读完进内存**。超限不转发上游、不触发切号、不罚账号。
   - **出站 User-Agent**：出站请求（计费、对话、模型）统一调用 `_get_user_agent(domain)` 仿真官方客户端（国服 `CLI/2.63.2 CodeBuddy/2.63.2` / 国际版 `WorkBuddy/5.5.2...`），规避非标 UA 导致的 10085 违规拦截，并使官网使用端归因正常。亦支持 `WORKBUDDY2API_USER_AGENT`（兼容旧名 `CODEBUDDY2OPENAI_USER_AGENT`）自定义。
   - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。**安全边界（P0，改动此逻辑必读）**：下载前经 `_url_is_safe_for_fetch` 做 SSRF 校验——仅允许 http(s)，拒绝回环/私网/链路本地/云元数据地址与 CGNAT 共享地址段（100.64.0.0/10、127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、::1、fe80::/10、0.0.0.0 等），域名解析后逐个 IP 校验；**重定向逐跳重新校验**（防「公网跳内网」）；**TCP/TLS 连接地址强制与已校验公网 IP 绑定**（直连 IP 搭配 Host 头与 sni_hostname 扩展，根除 DNS rebinding 窗口）；单图默认 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`，设 0 则完全禁用远程下载），按 `Content-Length` 预判 + 流式累计双保险；响应必须为 `image/*`，否则拒绝内联。
-  - **11140 内容安全审核拦截防误判（借鉴 `icebears111/workbuddy2api`）**：上游错误码 `11140`（`request illegal` / “内容未通过安全审核，请调整后重试”）为用户 Prompt 命中上游安全策略，与账号配额和网络可用性无关。网关统一经 `_is_content_policy_violation` 识别（显式 code 优先判定，防止包含安全审核文案的其他业务错误码误判），**严禁将其判定为限流或故障切号重试**（换号重试必失败且增加全池账号关联风控风险），**严禁记入账号冷却池**。
-    - **非流式 (stream=false)**: 秒级返回 HTTP 400 JSON (`invalid_request_error`)；
+  - **11140 三形态分流（2026-11-07 扩展，改动必读；原借鉴 `icebears111/workbuddy2api`，连坐保护借鉴 `misakano7545/workbuddy2api-panel`）**：上游同一个错误码 `11140` 承载三种语义，必须按 **code + 文案双条件**分流，不能只看 code（旧实现只看 code，会把模型限流误判成内容审核）：
+    - `content`（`request illegal` / 「内容未通过安全审核」/ 无文案）：用户 Prompt 命中上游安全策略，与账号配额和网络可用性无关。**严禁切号重试、严禁记入账号冷却池**，按 HTTP 400 返回。
+    - `account_restricted`（「账号存在异常行为，已被限制使用」/ `unusual activity`）：判据在上游是**设备/出口级**，换号会把下一个号也送进去。**命中即停手、不换号**；写 30 分钟账号冷却 `_ACCOUNT_COOLDOWNS[(uid, model)]`（`kind="account_restricted"`），并喂 `_note_account_restriction`。同一 15 分钟窗口内 ≥2 个**不同** uid 命中 → `RestrictionHoldMiddleware` 全池暂停 30 分钟，三条对话入口回 503 + `Retry-After` + `account_restricted_hold`；同一 uid 重复命中不凑数。
+    - `model_rate`（`rate-limiting requests`）：同一 code 承载的模型级限流，可自愈，必须走限流分支而不是被当成确定性拒绝。
+    - ⚠️ `request illegal` 仍归 `content`：这是本仓历史实测口径，**不要**按下游另一条抓包口径改写成账号受限。
+    - 契约锁定：`tests/test_upstream_restriction_hold.py`。
+    - **非流式 (stream=false)**: 内容审核秒级返回 HTTP 400 JSON (`invalid_request_error`)；
     - **流式 (stream=true)**: 遵循 SSE 协议标准（HTTP 200 `text/event-stream` 保持连接，首帧下发协议级 error 事件并立即闭合流：OpenAI 下发 `data: {"error": {"type": "invalid_request_error", "code": 11140, ...}}`；Anthropic 下发 `event: error`；Responses 下发 `event: response.failed`），严禁在 generator 内部抛 HTTPException(400)（FastAPI/Starlette 会因 headers 已发无法回滚并触发内部异常）；
     - **调度与用量**: 无论流式或非流式，usage 记录唯一归属 `HTTP 400 (11140 content rejected)`。
   - **借鉴项目看门巡检与故障降级守卫 (`tools/check-upstream.py` + `upstream-watch.yml`)**：巡检脚本区分「发现更新（`has_updates`）」与「查询失败（`has_query_failures`）」，仅在**全部查询成功且全部基线一致**（`has_updates == 'false' && has_query_failures == 'false'`）时才自动收口关闭 Issue。出现网络波动或 API 限额导致 `query_failed` 时，自动进入 `Watch degraded` 降级状态保留 Issue 并追加警告说明，根除「上游查询失败却被误当成无更新而误关 Issue」的假收口漏洞。
@@ -622,6 +627,7 @@ workbuddy2api.exe (GUI)
 - **借鉴源合规**（详见 `THIRD_PARTY_NOTICES.md`）：
   - `xiaofan6ya/workbuddy2api`、`DistPub/workbuddy2api` — MIT，可借鉴
   - `IceeAn/codebuddy2api` — MIT，**但仅覆盖其自 `bce86ded` 起独立重写的当前树**
+  - `misakano7545/workbuddy2api-panel`、`zx-yk/workbuddy2api-panel` — MIT，linguo2625469 停更后的两个活跃下游；后者是直接 fork，前者独立起库
   - ⚠️ **`xueyue33/codebuddy2api` 无 LICENSE = all rights reserved，禁止取用代码**。
     从 IceeAn 取代码须出自其当前树并署名；一律「借思路不搬文件」。
 

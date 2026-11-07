@@ -123,7 +123,11 @@ UPSTREAM_CHAT_PATH = "/v2/chat/completions"
 
 # 国际版首条消息必须是 system；客户端没给时前置这条最小兜底（口径同 panel 的
 # ensureConsoleSystem，措辞刻意中性、不注入任何客户端身份）。
-INTL_FALLBACK_SYSTEM = "You are a helpful assistant."
+#
+# 2026-11-07 吸收 misakano7545 e4e6f5ce（issue #187）：兜底只写**行为约定**，不声明身份。
+# 原文案 "You are a helpful assistant." 会在客户端 harness 已有人设时并列出现，模型把它
+# 当成外部注入而拒绝执行。上游只校验角色、不校验正文，多写一句身份没有任何收益。
+INTL_FALLBACK_SYSTEM = "Follow the user's instructions and respond in the language they use."
 
 
 def _normalize_domain(domain) -> str:
@@ -2166,6 +2170,54 @@ class RequestBodyLimitMiddleware:
 
 app.add_middleware(LocalHostOnlyMiddleware)
 app.add_middleware(RequestBodyLimitMiddleware)
+
+
+class RestrictionHoldMiddleware:
+    """11140 风控连坐：全池暂停期间快速失败，不再拿账号去试。
+
+    背景见 `_note_account_restriction` 的注释。只挂三条对话入口（11140 是 chat 返回的，
+    /health、/api/* 与模型清单不受影响），返回 503 + Retry-After，按协议各自成形：
+    Anthropic 客户端不认 OpenAI 错误体，混用会被当成协议错误。
+    """
+
+    _PATHS = {"/v1/chat/completions", "/v1/messages", "/v1/responses"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") not in self._PATHS:
+            return await self.app(scope, receive, send)
+        remain = _restriction_hold_remaining()
+        if remain <= 0:
+            return await self.app(scope, receive, send)
+        secs = int(remain + 0.999)
+        message = (
+            f"upstream restricted several accounts recently (code 11140); dispatch paused "
+            f"for {secs}s to avoid further bans — do not rotate accounts or retry in a loop"
+        )
+        if scope.get("path") == "/v1/messages":
+            payload = {"type": "error", "error": {"type": "api_error", "message": message}}
+        else:
+            payload = {
+                "error": {
+                    "message": message,
+                    "type": "api_error",
+                    "code": "account_restricted_hold",
+                }
+            }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = [
+            (b"content-type", b"application/json; charset=utf-8"),
+            (b"retry-after", str(secs).encode("ascii")),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"x-workbuddy-restriction-hold", b"1"),
+        ]
+        await send({"type": "http.response.start", "status": 503, "headers": headers})
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+app.add_middleware(RestrictionHoldMiddleware)
 # 最后注册 = 最外层（Starlette 后注册者先执行）：跨站请求在读取 body 之前就被拒绝
 app.add_middleware(OriginGuardMiddleware)
 
@@ -2689,6 +2741,105 @@ _RATE_LIMIT_CAP = 64
 _ACCOUNT_COOLDOWN_CAP = 256
 _RATE_LIMIT_LOCK = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# 11140 风控连坐状态机（2026-11-07 吸收 misakano7545 b494426a）
+#
+# 上游把「账号存在异常行为，已被限制使用」判在**设备/出口**上，不是判在单个账号上。
+# 本仓的既有处置是「命中 11140 就地返回、不换号」，这一层已经避免单个请求顺着轮转
+# 扫全池；但连续的用户请求仍会一个个撞过去。因此再加一道全池暂停：
+#   - 同一 15 分钟窗口内 ≥2 个**不同** uid 命中账号风控 → 判定为连坐扫荡；
+#   - 全池暂停派发 30 分钟（期间 /v1/* 直接 503 + Retry-After，不再拿账号去试）；
+#   - 同一 uid 重复命中只更新时间、不增加计数（否则一个号反复重试就能骗出暂停）；
+#   - 进程内状态、重启清零——「暂停」是「现在先别打」，重启后重新判定即可。
+# ---------------------------------------------------------------------------
+_RESTRICTION_WINDOW_SEC = 900.0
+_RESTRICTION_HOLD_SEC = 1800.0
+_RESTRICTION_MIN_ACCOUNTS = 2
+_RESTRICTION_LOCK = threading.Lock()
+_RESTRICTION_HITS: dict[str, float] = {}
+_RESTRICTION_HOLD_UNTIL = 0.0
+
+
+def _note_account_restriction(uid: str) -> float:
+    """记一次账号级风控限制，返回本次触发的全池暂停剩余秒数（0 = 未触发）。"""
+    global _RESTRICTION_HOLD_UNTIL
+    if not uid:
+        return 0.0
+    now = time.monotonic()
+    with _RESTRICTION_LOCK:
+        for u, ts in list(_RESTRICTION_HITS.items()):
+            if now - ts > _RESTRICTION_WINDOW_SEC:
+                _RESTRICTION_HITS.pop(u, None)
+        _RESTRICTION_HITS[uid] = now
+        if len(_RESTRICTION_HITS) < _RESTRICTION_MIN_ACCOUNTS:
+            return 0.0
+        _RESTRICTION_HOLD_UNTIL = now + _RESTRICTION_HOLD_SEC
+        _RESTRICTION_HITS.clear()
+    _log(
+        f"⚠️ [风控连坐] {_RESTRICTION_WINDOW_SEC / 60:.0f} 分钟内 ≥{_RESTRICTION_MIN_ACCOUNTS} 个账号"
+        f"被上游限制，全池暂停派发 {_RESTRICTION_HOLD_SEC / 60:.0f} 分钟（期间不换号、不重试）"
+    )
+    return _RESTRICTION_HOLD_SEC
+
+
+def _restriction_hold_remaining() -> float:
+    """全池暂停剩余秒数（0 = 未暂停，可正常派发）。"""
+    with _RESTRICTION_LOCK:
+        remain = _RESTRICTION_HOLD_UNTIL - time.monotonic()
+    return max(0.0, remain)
+
+
+def _reset_restriction_state() -> None:
+    """清空连坐状态（测试与将来「一键解冻」用）。"""
+    global _RESTRICTION_HOLD_UNTIL
+    with _RESTRICTION_LOCK:
+        _RESTRICTION_HITS.clear()
+        _RESTRICTION_HOLD_UNTIL = 0.0
+
+
+def _record_account_restriction(uid: str, model: str, err_text: str,
+                                hold_sec: float | None = None) -> None:
+    """账号被上游风控限制：写账号级冷却（按 uid+model），避免同一模型反复撞同一号。
+
+    只写 `_ACCOUNT_COOLDOWNS`，不写 `_RATE_LIMIT_STATE[model]`——后者是模型级观测面，
+    写入会让面板把「某账号被限制」误显示成「整个模型都在冷却」。
+    """
+    if not uid:
+        return
+    hold = float(hold_sec if hold_sec is not None else _RESTRICTION_HOLD_SEC)
+    now_ms = int(time.time() * 1000)
+    mono_now = time.monotonic()
+    reset_ms = now_ms + int(hold * 1000)
+    reset_local = time.strftime("%H:%M:%S", time.localtime(reset_ms / 1000))
+    entry = {
+        "code": 11140,
+        "kind": "account_restricted",
+        "message": (err_text or "")[:300],
+        "resetAtMs": reset_ms,
+        "resetLocal": reset_local,
+        "monotonic_until": mono_now + hold,
+        "firstSeenMs": now_ms,
+        "lastSeenMs": now_ms,
+        "uid": uid,
+        "nickname": "",
+    }
+    with _RATE_LIMIT_LOCK:
+        if ((uid, model) not in _ACCOUNT_COOLDOWNS
+                and len(_ACCOUNT_COOLDOWNS) >= _ACCOUNT_COOLDOWN_CAP):
+            oldest = min(_ACCOUNT_COOLDOWNS,
+                         key=lambda k: _ACCOUNT_COOLDOWNS[k].get("lastSeenMs", 0))
+            _ACCOUNT_COOLDOWNS.pop(oldest, None)
+        old = _ACCOUNT_COOLDOWNS.get((uid, model))
+        if isinstance(old, dict):
+            if isinstance(old.get("resetAtMs"), (int, float)) and old["resetAtMs"] > entry["resetAtMs"]:
+                entry["resetAtMs"] = int(old["resetAtMs"])
+                entry["resetLocal"] = old.get("resetLocal", entry["resetLocal"])
+            if isinstance(old.get("monotonic_until"), (int, float)) and old["monotonic_until"] > entry["monotonic_until"]:
+                entry["monotonic_until"] = float(old["monotonic_until"])
+            entry["firstSeenMs"] = old.get("firstSeenMs", entry["firstSeenMs"])
+        _ACCOUNT_COOLDOWNS[(uid, model)] = entry
+
+
 # 上游重置墙钟报文（限流与每日额度都会下发精确时刻）：
 #   {"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-08 22:11:33 UTC+8 重置，…"}
 #   {"code":6008,"msg":"…将在 <t> UTC+8 重置…"}
@@ -2759,29 +2910,72 @@ def _is_unauthorized_model_error(status_code: int, err_text: str) -> bool:
     )
 
 
+def _classify_11140(status_code: int, err_text: str) -> str:
+    """把上游 11140 按「文案形态」分成三类（2026-11-07 吸收 misakano7545 b494426a）。
+
+    同一个 code 11140 承载三种完全不同的语义，混为一谈会两头出错：
+
+      - ``content``：内容审核拒绝（「内容未通过安全审核」/ 无文案）。属用户输入问题，
+        不换号、不冷却、不重试（既有行为，保持不变）。
+      - ``account_restricted``：账号风控文书（「账号存在异常行为，已被限制使用」/
+        ``unusual activity``）。上游判据在**设备/出口**上，换号只会把下一个号也送进去
+        （社区实测一次任务 7 个号全封）。命中就地停手 + 写账号冷却 + 喂全池暂停状态机。
+      - ``model_rate``：同一 code 承载的模型级限流（``The model provider is
+        rate-limiting requests.``）。它是可自愈的软限流，必须走限流分支而不是被当成
+        内容审核（旧实现只看 code，会把它判成确定性拒绝，既不重试也不冷却）。
+
+    ⚠️ 判据纪律：``account_restricted`` / ``model_rate`` 都要求 **code + 文案双条件**——
+    只按 code 判会把 11140 的模型限流误判成账号终态；只按文案判会让正文里恰好讨论
+    这些词的请求被误伤。``request illegal`` 仍归 ``content``：本仓历史实测它是内容
+    审核形态，下游把它归账号受限属于另一条抓包口径，不据此改写本仓既有语义。
+    """
+    t = (err_text or "").strip()
+    if not t:
+        return ""
+    try:
+        data = json.loads(t)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        auth_code = _authoritative_code(data)
+        if auth_code is not None:
+            if auth_code != "11140":
+                return ""  # 顶层已是别的确定码（50001/6004/11102 等），不按 11140 处理
+        elif not _find_code_anywhere(data, {"11140"}):
+            msg = _semantic_text(data)
+            if ("内容未通过安全审核" in msg) or ("未通过安全审核" in msg) or ("request illegal" in msg.lower()):
+                return "content"
+            return ""
+        msg = _semantic_text(data)
+    else:
+        if ("内容未通过安全审核" in t) or ("未通过安全审核" in t) or ("request illegal" in t.lower()):
+            return "content"
+        if "11140" not in t:
+            return ""
+        msg = t
+    low = msg.lower()
+    if any(m in msg for m in ("账号存在异常行为", "已被限制")) or ("unusual activity" in low):
+        return "account_restricted"
+    if ("rate-limiting" in low) or ("rate limiting" in low):
+        return "model_rate"
+    return "content"
+
+
+def _is_account_restriction(status_code: int, err_text: str) -> bool:
+    """上游是否明确判「账号被风控限制」（11140 + 限制文书，双条件）。"""
+    return _classify_11140(status_code, err_text) == "account_restricted"
+
+
 def _is_content_policy_violation(status_code: int, err_text: str) -> bool:
     """上游 11140 内容审核拒绝（"内容未通过安全审核，请调整后重试" / request illegal）。
 
     此类错误为用户侧输入命中上游安全策略，与账号额度/网络无关。
     严禁触发切号重试（换号重试同样被拦且增加账号风险），严禁计入账号冷却。
+
+    11140 的另外两种形态（账号风控 / 模型限流）由 `_classify_11140` 分流，
+    不再走本函数——旧实现只按 code 判定，会把模型限流也当成确定性拒绝。
     """
-    t = (err_text or "").strip()
-    if not t:
-        return False
-    try:
-        data = json.loads(t)
-        if isinstance(data, dict):
-            code = data.get("code")
-            if code is not None:
-                if code == 11140 or str(code) == "11140":
-                    return True
-                # 若存在其他明确业务错误码（如 50001、6004、11102 等），绝不按文本模糊误判为 11140
-                return False
-            msg = str(data.get("msg") or data.get("message") or "")
-            return ("内容未通过安全审核" in msg) or ("未通过安全审核" in msg) or ("request illegal" in msg.lower())
-    except Exception:
-        pass
-    return ("11140" in t) or ("内容未通过安全审核" in t) or ("未通过安全审核" in t) or ("request illegal" in t.lower())
+    return _classify_11140(status_code, err_text) == "content"
 
 
 # ---------------------------------------------------------------------------
@@ -3067,14 +3261,28 @@ def _semantic_text(data: dict) -> str:
 #   14018            → ErrHardCredit （余额/额度耗尽）        → 长冷却等恢复
 #   {200,code:1,"model usage limit exceeded"} → ErrSoftRate（模型频控，**不是**硬额度）
 #   {200,"quota exceeded"}                    → ErrHardCredit
+#
+# 2026-11-07 按官方内置 CLI 的 classifyErrorDetail 码表扩族（来源：
+# zx-yk/workbuddy2api-panel 304aa5e3，一手取自 codebuddy-lite-wb.mjs）：
+#   [14001,14002,14012,14013,14014,14018,14019] → quota/quota_balance_exhausted
+#   [14015]                                     → auth/auth_expired
+#   [14016,14017]                               → quota/quota_not_activated
+# 上游把这些错误全套在 HTTP 429 上返回；429 只说明「这次没成」，不说明原因。只按状态码
+# 兜底会把额度耗尽当软限流（5 分钟后回来还是空）、把授权过期当软限流（冷却→恢复→再失败
+# 的无限循环）。因此这几类必须「业务码优先于状态码」。
+# 仍不动的：10105（活跃会话过多，可自愈，保持软限流）、6000-6008（模型级限流）、
+# 14003（模型繁忙）、6020/6021（渠道容量）。
 # ---------------------------------------------------------------------------
 
-# ① 额度耗尽（硬额度）：只有 14018。14017 是账号态故障，语义不同，不得合并。
-_CREDIT_EXHAUSTED_CODES = {"14018"}
+# ① 额度耗尽（硬额度）：官方 subcategory = quota_balance_exhausted。
+#    14001 UsageLimitExceeded / 14002 同族变体 / 14012 企业版 / 14013 腾讯侧 /
+#    14014 企业额度耗尽 / 14018 用户额度耗尽 / 14019 无 token 预算。
+_CREDIT_EXHAUSTED_CODES = {"14001", "14002", "14012", "14013", "14014", "14018", "14019"}
 
-# ② 账号态故障（可自愈）：14017 = 试用未激活 / 账号未完整开通，短冷却 + 换号即可，
-#    账号完成开通后应能恢复，绝不能按「额度耗尽」停到次日。
-_ACCOUNT_FAULT_CODES = {"14017"}
+# ② 账号态故障（可自愈）：14015 授权过期 / 14016 企业未激活 / 14017 试用未激活。
+#    重登、补完 register 或开通流程后可能恢复，故**短冷却 + 换号**，绝不按额度耗尽
+#    停到次日（那会让用户补完流程后仍然用不了）。
+_ACCOUNT_FAULT_CODES = {"14015", "14016", "14017"}
 
 # ③ 每日额度码（TPD/RPD）：恢复边界是**日**而非小时，冷却须对齐上游 reset 墙钟，
 #    无 reset 时才退化为保守按日；不得与瞬时频控共用 2h 封顶。
@@ -3836,6 +4044,12 @@ class AccountRotator:
           使用当前请求自身的 attempt 次数判断，禁止复用进程全局计数器导致多请求互相消耗；
         - 从候选账号池中选出下一个可用账号。
         """
+        if _is_account_restriction(status_code, err_text):
+            # 11140 风控文书：上游判的是设备/出口，换号只会把下一个号也送进去。
+            # 就地停手：写账号冷却（同模型 30 分钟内不再选它）+ 喂全池连坐状态机。
+            _record_account_restriction(current_uid, model, err_text)
+            _note_account_restriction(current_uid)
+            return None
         if _is_content_policy_violation(status_code, err_text):
             return None
         is_rate_limited = (

@@ -181,6 +181,10 @@ def test_intl_system_guard_only_rewrites_intl_without_system():
     converter._ensure_intl_system(body, intl_hdr)
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
     assert body["messages"][0]["content"] == converter.INTL_FALLBACK_SYSTEM
+    # 兜底只写行为约定，不声明身份（misakano7545 e4e6f5ce / issue #187）：
+    # 与客户端 harness 自带人设并列时，"you are ..." 会被当成外部注入。
+    assert "you are" not in converter.INTL_FALLBACK_SYSTEM.lower()
+    assert "assistant" not in converter.INTL_FALLBACK_SYSTEM.lower()
 
     # 幂等：换号后重复判定不叠加兜底 system
     converter._ensure_intl_system(body, intl_hdr)

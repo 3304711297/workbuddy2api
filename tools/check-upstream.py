@@ -92,6 +92,24 @@ def check_source(sid: str, cfg: dict, token: str) -> dict:
     last_sha = cfg.get("last_synced_sha", "").strip()
     baseline = (last_sha or last_commit)[:8]
 
+    # 归档源（上游停更、看门已移交下游）：不查询 API，也不计入待评估/查询失败。
+    # 保留条目只为历史溯源——直接删掉会让「为什么基线停在这里」失去记录。
+    if cfg.get("archived"):
+        return {
+            "id": sid,
+            "name": cfg.get("name", sid),
+            "repo": repo,
+            "status": "archived",
+            "last_commit": baseline,
+            "latest_commit": "N/A",
+            "commit_msg": "已归档：上游停更，看门移交下游（保留基线作历史溯源）",
+            "commit_date": "",
+            "has_update": False,
+            "compare_url": "",
+            "absorbed": cfg.get("absorbed", ""),
+            "note": cfg.get("note", ""),
+        }
+
     # 口径：直接取**配置分支的真实 HEAD**。早期用 `commits?path=.` 取到的是「最近触及仓库
     # 根目录的提交」，比分支 HEAD 旧 —— 基线一旦记成真实 HEAD 就永远对不上，每天误报「有新提交」。
     branch = (cfg.get("branch") or "").strip()
@@ -192,12 +210,16 @@ def main():
     updates = []
     not_found_list = []
     failures = []
+    archived_list = []
     for sid, cfg in sources.items():
         res = check_source(sid, cfg, token)
         results.append(res)
         if res["has_update"]:
             updates.append(res)
             icon = "🔴"
+        elif res["status"] == "archived":
+            archived_list.append(res)
+            icon = "🗄️"
         elif res["status"] == "not_found":
             not_found_list.append(res)
             icon = "⚠️"
@@ -208,7 +230,7 @@ def main():
             icon = "✅"
         print(f"{icon} [{res['name']}] {res['repo']}: {res['last_commit']} -> {res['latest_commit']} ({res['commit_msg']})")
 
-    print(f"\n巡检结束：共发现 {len(updates)} 项存在上游新提交待评估，{len(not_found_list)} 项仓库 404 挂起，{len(failures)} 项查询失败。")
+    print(f"\n巡检结束：共发现 {len(updates)} 项存在上游新提交待评估，{len(not_found_list)} 项仓库 404 挂起，{len(failures)} 项查询失败，{len(archived_list)} 项已归档。")
 
     # 生成 Markdown 报告
     report_lines = [
@@ -231,6 +253,8 @@ def main():
     for r in results:
         if r["has_update"]:
             st = "🔴 有新提交"
+        elif r["status"] == "archived":
+            st = "🗄️ 已归档（停更）"
         elif r["status"] == "not_found":
             st = "⚠️ 404（挂起保留基线）"
         elif r["status"] == "query_failed":
@@ -253,6 +277,11 @@ def main():
             report_lines.append(f"- 本地已吸收：{r['absorbed'] or '无'}")
             report_lines.append(f"- 监控关注点：{r['note'] or '无'}")
             report_lines.append(f"- 跟进方式：审查 Diff；若有采纳落地，将 `tools/upstream-sources.json` 中该项的 `last_synced_commit` 推进为 `{r['latest_commit']}` 并提交推送。")
+        elif r["status"] == "archived":
+            report_lines.append("- 🗄️ **已归档**：上游已停止维护，看门移交下游；基线锁定，不参与待评估计数。")
+            report_lines.append(f"- 本地基线：`{r['last_commit']}`（历史溯源）")
+            report_lines.append(f"- 本地已吸收：{r['absorbed'] or '无'}")
+            report_lines.append(f"- 监控关注点：{r['note'] or '无'}")
         elif r["status"] == "not_found":
             report_lines.append("- ⚠️ **上游仓库不可访问 (404 Not Found)**：疑似已删库、更名或设为私有。")
             report_lines.append(f"- 本地基线：`{r['last_commit']}` → 🔒 锁定保留（不作误报；若上游后续恢复公开，将自动恢复看门并比对新提交）。")
@@ -267,7 +296,7 @@ def main():
         report_lines.append("")
 
     report_lines.append("---")
-    report_lines.append(f"**待跟进项目数：{len(updates)}** · **404 挂起数：{len(not_found_list)}** · **查询失败数：{len(failures)}**")
+    report_lines.append(f"**待跟进项目数：{len(updates)}** · **404 挂起数：{len(not_found_list)}** · **查询失败数：{len(failures)}** · **已归档数：{len(archived_list)}**")
 
     report_text = "\n".join(report_lines)
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
