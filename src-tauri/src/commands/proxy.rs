@@ -599,28 +599,84 @@ fn spawn_kill_tree(_pid: u32) -> Result<(), String> {
 mod orphan_killer {
     use super::*;
 
-    /// 用 PowerShell Get-NetTCPConnection 找监听端口的 PID（Rust 无标准库方案，
-    /// netstat 解析脆弱；Get-NetTCPConnection 自 Win8 起内置且输出结构化）。
+    /// 原生读取 Windows TCP 表拿监听者 PID。
+    ///
+    /// 算法：`GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)` 一次拿到全部 LISTEN
+    /// 记录（表头 4 字节为条目数，随后紧跟 `MIB_TCPROW_OWNER_PID` 数组），按本地端口匹配。
+    /// `dwLocalPort` 的低 16 位是**网络字节序**，必须 `from_be` 还原成主机端口号。
+    ///
+    /// ⚠️ 为什么不再用 `Get-NetTCPConnection`（2026-11-09 实测，本机）：
+    /// powershell -NoProfile 冷启动 1035ms + 该 cmdlet 844ms ≈ **1.7s/次**；
+    /// 本实现是进程内一次 syscall 级别的查询（<1ms）。这条路径同时挂在「停止」按钮
+    /// 与孤儿清理上，原来那 1.7s 全部转嫁成了用户点击后的等待。
     fn find_listener_pid(port: u16) -> Result<Option<u32>, String> {
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let script = format!(
-                "(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"
-            );
-            let output = Command::new("powershell")
-                .creation_flags(CREATE_NO_WINDOW)
-                .args(["-NoProfile", "-Command", &script])
-                .output()
-                .map_err(|e| format!("查询端口监听者失败: {e}"))?;
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text.is_empty() {
+            use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+            use windows_sys::Win32::NetworkManagement::IpHelper::{
+                GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+            };
+            use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+            // 第一次调用只为探所需缓冲区大小，ERROR_INSUFFICIENT_BUFFER 是预期返回值
+            let mut size: u32 = 0;
+            let probe = unsafe {
+                GetExtendedTcpTable(
+                    std::ptr::null_mut(),
+                    &mut size,
+                    0,
+                    AF_INET as u32,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                )
+            };
+            if probe != ERROR_INSUFFICIENT_BUFFER && probe != NO_ERROR {
+                return Err(format!(
+                    "GetExtendedTcpTable 预查询失败（Win32 错误 {probe}）"
+                ));
+            }
+            if size == 0 {
                 return Ok(None);
             }
-            text.parse::<u32>()
-                .map(Some)
-                .map_err(|e| format!("端口监听者 PID 解析失败（{text:?}）: {e}"))
+
+            let mut buf = vec![0u8; size as usize];
+            let ret = unsafe {
+                GetExtendedTcpTable(
+                    buf.as_mut_ptr() as *mut core::ffi::c_void,
+                    &mut size,
+                    0,
+                    AF_INET as u32,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                )
+            };
+            if ret != NO_ERROR {
+                return Err(format!("GetExtendedTcpTable 查询失败（Win32 错误 {ret}）"));
+            }
+
+            if buf.len() < 4 {
+                return Err("GetExtendedTcpTable 返回的表为空，已中止".into());
+            }
+            let entries = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            let header = std::mem::size_of::<u32>();
+            let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+            if buf.len() < header + entries * row_size {
+                return Err(format!(
+                    "GetExtendedTcpTable 返回的表长度不足（声明 {entries} 条，缓冲区 {} 字节），已中止",
+                    buf.len()
+                ));
+            }
+
+            for i in 0..entries {
+                let offset = header + i * row_size;
+                // read_unaligned：buf 是 Vec<u8>，其对齐不保证满足 u32 结构体
+                let row: MIB_TCPROW_OWNER_PID =
+                    unsafe { std::ptr::read_unaligned(buf[offset..].as_ptr() as *const _) };
+                if u16::from_be((row.dwLocalPort & 0xFFFF) as u16) == port && row.dwOwningPid != 0 {
+                    return Ok(Some(row.dwOwningPid));
+                }
+            }
+            Ok(None)
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -642,12 +698,14 @@ mod orphan_killer {
             return Ok(None);
         };
         kill_process_tree_by_pid(orphan_root)?;
-        // 有界等待确认端口释放（孤儿死后子进程/句柄释放可能有延迟）
-        for _ in 0..10 {
+        // 有界等待确认端口释放（孤儿死后子进程/句柄释放可能有延迟）。
+        // 端口查询已换成原生 TCP 表读取（<1ms），轮询间隔缩到 100ms：
+        // 原来的 10×500ms 里绝大部分时间是 shell 冷启动，不是真正的等待。
+        for _ in 0..20 {
             if matches!(find_listener_pid(port)?, None) {
                 return Ok(Some(orphan_root));
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         Err(format!("孤儿内核根（PID {orphan_root}）已终止但端口 {port} 仍未释放"))
     }
@@ -656,12 +714,16 @@ mod orphan_killer {
     pub(crate) enum ProcessLookup {
         Alive { cmdline: String, parent_pid: Option<u32> },
         NotFound,
+        /// 查询本身失败（≠ 进程不存在）。生产路径改用原子快照后已不再产生此变体，
+        /// 但 `climb_to_orphan_root_with` 仍必须保留「查询失败 → Fail-Closed 不误杀」
+        /// 的契约，测试也依赖它注入失败场景。
+        #[allow(dead_code)]
         QueryFailed(String),
     }
 
     /// 沿祖先链向上爬，返回链顶「父进程已死」的 converter.py 进程 PID。
     /// 若链顶父进程仍活着（= 有活 GUI 在管理），返回 Ok(None)。
-    /// 若关键查询失败（WMI/PowerShell 报错、解析异常），严格 Fail-Closed 返回 Err，绝不误杀。
+    /// 若注入的 lookup 报 `QueryFailed`（快照读取异常等），严格 Fail-Closed 返回 Err，绝不误杀。
     pub(crate) fn climb_to_orphan_root_with<F>(start_pid: u32, mut lookup: F) -> Result<Option<u32>, String>
     where
         F: FnMut(u32) -> ProcessLookup,
@@ -708,50 +770,112 @@ mod orphan_killer {
     }
 
     fn climb_to_orphan_root(start_pid: u32) -> Result<Option<u32>, String> {
-        climb_to_orphan_root_with(start_pid, process_info)
-    }
-
-    /// 取进程的命令行 + 父 PID；区分存活、不存在（__DEAD__）与查询失败（Fail-Closed）。
-    fn process_info(pid: u32) -> ProcessLookup {
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let script = format!(
-                "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction SilentlyContinue; \
-                 if (-not $p) {{ '__DEAD__' }} \
-                 else {{ $p.ParentProcessId.ToString() + '|' + $p.CommandLine }}"
-            );
-            let output = match Command::new("powershell")
-                .creation_flags(CREATE_NO_WINDOW)
-                .args(["-NoProfile", "-Command", &script])
-                .output()
-            {
-                Ok(o) => o,
-                Err(e) => return ProcessLookup::QueryFailed(format!("执行 powershell 查询失败: {e}")),
-            };
-
-            if !output.status.success() {
-                let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return ProcessLookup::QueryFailed(format!("powershell 查询退出码非零: {err}"));
-            }
-
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text == "__DEAD__" {
-                return ProcessLookup::NotFound;
-            }
-            match text.split_once('|') {
-                Some((pp, cmd)) => ProcessLookup::Alive {
-                    cmdline: cmd.to_string(),
-                    parent_pid: pp.parse::<u32>().ok().filter(|&x| x != 0),
-                },
-                None => ProcessLookup::QueryFailed(format!("进程 {pid} 信息解析失败: {text:?}")),
-            }
+            let table = snapshot_process_table()?;
+            climb_to_orphan_root_with(start_pid, |pid| {
+                table.get(&pid).cloned().unwrap_or(ProcessLookup::NotFound)
+            })
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = pid;
-            ProcessLookup::QueryFailed("非 Windows 平台不支持".into())
+            let _ = start_pid;
+            Ok(None)
+        }
+    }
+
+    /// 一次进程表快照：PID → (命令行, 父 PID)。
+    ///
+    /// 取代原先「每查一个进程起一次 PowerShell 跑 Get-CimInstance」的实现——单次实测
+    /// 1.2s（其中约 1s 是 shell 冷启动），而孤儿链上爬最多 8 层，旧实现最坏 10s+。
+    /// `sysinfo` 刷新整表约 20ms，而且是一次性原子快照：快照里没有的 PID 就是真的没了，
+    /// 不会像逐次查询那样把「进程恰好在两次查询之间退出」误判成查询失败。
+    ///
+    /// 读不到命令行的进程（受保护进程 / 权限不足）得到空 cmdline → 上层判据不匹配
+    /// → 不杀，仍然保持 Fail-Closed 语义。
+    #[cfg(target_os = "windows")]
+    fn snapshot_process_table() -> Result<std::collections::HashMap<u32, ProcessLookup>, String> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+
+        let mut sys = sysinfo::System::new().map_err(|e| format!("初始化进程快照失败: {e}"))?;
+        // ⚠️ refresh_processes 的默认 kind **不含命令行**，必须显式 with_cmd，
+        // 否则 cmd() 恒为空、判据全部落空（会把真孤儿判成「不是 converter」而漏清理）
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet),
+        );
+
+        let mut table = std::collections::HashMap::with_capacity(sys.processes().len());
+        for (pid, entry) in sys.processes() {
+            // 空格拼接即可：上层判据只做 `contains("converter.py")` 子串匹配
+            let cmdline = entry
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            table.insert(
+                pid.as_u32(),
+                ProcessLookup::Alive {
+                    cmdline,
+                    parent_pid: entry.parent().map(|p| p.as_u32()).filter(|&x| x != 0),
+                },
+            );
+        }
+        Ok(table)
+    }
+
+    #[cfg(test)]
+    mod native_query_tests {
+        use super::*;
+
+        /// 真实开一个监听端口，验证 TCP 表结构偏移与端口字节序都对：
+        /// `dwLocalPort` 是网络字节序，若漏了 `from_be` 这里必然解析不到。
+        #[test]
+        #[cfg(target_os = "windows")]
+        fn find_listener_pid_resolves_own_listener() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 失败");
+            let port = listener.local_addr().unwrap().port();
+            let pid = find_listener_pid(port).expect("TCP 表查询不应失败");
+            assert_eq!(
+                pid,
+                Some(std::process::id()),
+                "端口 {port} 的监听者应解析为本测试进程自身"
+            );
+        }
+
+        #[test]
+        #[cfg(target_os = "windows")]
+        fn find_listener_pid_returns_none_for_idle_port() {
+            // 先占一个端口再释放，随后立刻查询：空隙内几乎不会被别人抢走
+            let port = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                l.local_addr().unwrap().port()
+            };
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+                return; // 端口已被抢占，环境不确定，跳过
+            }
+            assert_eq!(find_listener_pid(port).unwrap(), None);
+        }
+
+        /// 快照必须真的带上命令行（`refresh_processes` 默认 kind 不含 cmd，
+        /// 一旦漏了 `with_cmd`，孤儿判据会全部落空，测试在这里就能挡住）。
+        #[test]
+        #[cfg(target_os = "windows")]
+        fn snapshot_process_table_sees_self_with_cmdline() {
+            let table = snapshot_process_table().expect("进程快照不应失败");
+            let me = table.get(&std::process::id()).expect("快照应包含当前进程");
+            match me {
+                ProcessLookup::Alive {
+                    cmdline,
+                    parent_pid,
+                } => {
+                    assert!(!cmdline.is_empty(), "当前进程应能读到命令行");
+                    assert!(parent_pid.is_some(), "测试进程应当有父进程");
+                }
+                other => panic!("当前进程应被识别为存活，实际 {other:?}"),
+            }
         }
     }
 }

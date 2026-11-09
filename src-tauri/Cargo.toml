@@ -24,6 +24,18 @@ tokio = { version = "1", features = ["time"] }
 # 系统已知目录解析（%LOCALAPPDATA% / 用户主目录的通用回退；依赖树中已有 6.0.0）
 dirs = "6"
 
+# Windows 原生进程/端口查询：替代「每次 1.7s 的 PowerShell 冷启动」（实测
+# powershell -NoProfile 启动 1035ms + Get-NetTCPConnection 844ms）。
+# - windows-sys: GetExtendedTcpTable 直接读 TCP 表取监听者 PID（微秒级）
+# - sysinfo:     一次快照拿全量进程的 cmdline + 父 PID，供孤儿链上爬（一次 ~20ms）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
