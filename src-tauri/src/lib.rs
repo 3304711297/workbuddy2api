@@ -439,9 +439,13 @@ pub fn run_app() {
                             }
                         }
                         "quit" => {
-                            // 退出前停止反代
+                            // ⚠️ 退出路径全程非阻塞（on_menu_event 在主线程执行，
+                            // 任何同步等待都表现为「窗口卡住几秒才消失」）：只对
+                            // **本进程持有的**内核发 taskkill 后立即返回，不走带孤儿
+                            // 探测的完整 proxy_stop（句柄为空时它会起 PowerShell 查
+                            // 端口，本机实测 1.7s/次，端口有孤儿时更久）。
                             if let Some(handle) = proxy_opt {
-                                let _ = commands::proxy_stop(handle, app_handle.clone());
+                                commands::stop_for_exit(&handle);
                             }
                             app_handle.exit(0);
                         }
@@ -527,9 +531,9 @@ pub fn run_app() {
                         let _ = window.hide();
                     }
                     CloseAction::Quit => {
-                        // 关闭窗口且自动停用反代服务并退出应用
+                        // 关闭窗口即退出：同样不能阻塞主线程，理由见托盘 "quit" 分支
                         if let Some(handle) = app.try_state::<ProxyHandle>() {
-                            let _ = commands::proxy_stop(handle, app.clone());
+                            commands::stop_for_exit(&handle);
                         }
                         // 允许正常关闭与退出
                     }

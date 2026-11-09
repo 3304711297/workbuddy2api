@@ -536,6 +536,63 @@ pub fn proxy_stop(handle: State<'_, ProxyHandle>, app: tauri::AppHandle) -> Resu
     }
 }
 
+/// 退出路径专用的轻量停止：只回收**本进程持有的**内核句柄，不做孤儿探测，也不等待。
+///
+/// ⚠️ 为什么不能直接复用 `proxy_stop`（2026-11-09 修复「托盘退出卡好几秒」）：
+/// 托盘「退出」与「关闭窗口即退出」都跑在 Tauri 主线程上（`on_menu_event` /
+/// `on_window_event`），任何同步等待都会直接表现为「窗口卡住 N 秒才消失」。
+/// 而 `proxy_stop` 在 `ProxyHandle` 为空时会调 `orphan_killer::find_and_kill_orphan`，
+/// 其第一步是起一个 PowerShell 跑 `Get-NetTCPConnection`——本机实测 powershell
+/// 冷启动 1035ms + 该 cmdlet 844ms ≈ **1.7s/次**；若端口上真有孤儿，
+/// `climb_to_orphan_root` 每层再加 1.2s（最多 8 层），之后还有 10 轮
+/// 「查询 + 500ms 睡眠」等端口释放，最坏 20s+。
+///
+/// 那套探测是「停止」按钮该付的代价（用户愿意等、且需要知道结果），退出路径不该付：
+/// 本 GUI 没持有句柄 = 没有需要回收的东西，孤儿留给用户下次点「停止」清理。
+///
+/// 有句柄时只拉起 `taskkill /F /T`（实测 33ms）并**立即返回**：taskkill 是独立进程，
+/// 本进程随后退出不会中断它，内核会在几十毫秒内被它带走。刻意不用 `.output()`——
+/// 退出路径上多等 600ms，用户感知到的就是「点了退出没反应」。
+pub fn stop_for_exit(handle: &ProxyHandle) {
+    let Ok(mut guard) = handle.0.lock() else {
+        return; // 锁中毒（持锁线程已 panic）：已无法安全操作子进程，交给 OS 收尾
+    };
+    let Some(child) = guard.as_mut() else {
+        return; // 本 GUI 从未启动过内核：无句柄可回收，跳过孤儿探测
+    };
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = guard.take(); // 早已自行退出，只回收句柄
+        return;
+    }
+
+    let pid = child.id();
+    if let Err(err) = spawn_kill_tree(pid) {
+        // 极罕见：taskkill 拉不起来。退回原生 kill（同为同步调用，但无等待）
+        eprintln!("[stop_for_exit] taskkill 启动失败，退回 child.kill(): {err}");
+        let _ = child.kill();
+    }
+}
+
+/// fire-and-forget 版进程树查杀：只负责把 taskkill 拉起来，不等它跑完。
+#[cfg(target_os = "windows")]
+fn spawn_kill_tree(pid: u32) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new("taskkill")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动 taskkill 失败: {e}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_kill_tree(_pid: u32) -> Result<(), String> {
+    Ok(())
+}
+
 /// 孤儿内核清理：找到监听指定端口、命令行含 converter.py、且父进程已死的 python
 /// 进程并杀掉整个进程树。三重校验缺一不可——只按端口杀会误伤无辜监听者，
 /// 只按命令行杀会误杀别的 GUI 的正常子进程。
@@ -1987,6 +2044,75 @@ mod usage_tests {
 
         // 有界等待确认退出
         assert!(wait_timeout(&mut child, std::time::Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn test_stop_for_exit_without_child_is_immediate() {
+        // 句柄为空 = 本 GUI 从未启动过内核。退出路径必须立刻返回：一旦这里退化成
+        // 孤儿探测（起 PowerShell 查端口），耗时就是 1.7s 起的秒级开销。
+        let handle = crate::ProxyHandle(std::sync::Mutex::new(None));
+        let start = std::time::Instant::now();
+        stop_for_exit(&handle);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "空句柄的退出路径不应阻塞，实测 {elapsed:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_stop_for_exit_reaps_already_exited_child() {
+        let mut child = Command::new("cmd").args(["/C", "exit"]).spawn().unwrap();
+        assert!(wait_timeout(
+            &mut child,
+            std::time::Duration::from_millis(3000)
+        ));
+        let handle = crate::ProxyHandle(std::sync::Mutex::new(Some(child)));
+        stop_for_exit(&handle);
+        assert!(
+            handle.0.lock().unwrap().is_none(),
+            "已自行退出的子进程应被回收句柄"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_stop_for_exit_kills_running_child_without_blocking() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let child = Command::new("python")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-c", "import time; time.sleep(30)"])
+            .spawn()
+            .expect("failed to spawn test python process");
+        let pid = child.id();
+        let handle = crate::ProxyHandle(std::sync::Mutex::new(Some(child)));
+
+        let start = std::time::Instant::now();
+        stop_for_exit(&handle);
+        let elapsed = start.elapsed();
+        // 关键断言：退出路径只负责「把 taskkill 拉起来」，不等它跑完
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "退出路径不应等待 taskkill，实测 {elapsed:?}"
+        );
+
+        // taskkill 异步生效：轮询确认子进程确实被带走（证明 fire-and-forget 真的杀到了）
+        let mut waited = 0u64;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            waited += 50;
+            let mut guard = handle.0.lock().unwrap();
+            if let Some(c) = guard.as_mut() {
+                if matches!(c.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+            }
+            if waited > 5000 {
+                panic!("taskkill 未在 5s 内结束子进程 (PID {pid})");
+            }
+        }
     }
 
     #[test]

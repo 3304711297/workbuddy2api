@@ -634,7 +634,11 @@ fn phase_is_handoff_ready_or_later(phase: &str) -> bool {
 /// 注释也确认了这点）：GUI 进程消失后它会变孤儿继续监听端口，而更新脚本第 7 步的
 /// `Wait-PortReleased` 依赖「端口先消失再出现」来证明新版确实起来了 —— 孤儿占着端口
 /// 会让这步 30s 超时并 `Throw-Failure 'port-not-released'` 中止更新。
-/// 走托盘「退出」（lib.rs 的 "quit" 分支）时是显式停内核的，更新路径必须同口径。
+/// 与托盘「退出」的口径差异（2026-11-09）：托盘退出跑在 Tauri 主线程上，只能
+/// fire-and-forget（`proxy::stop_for_exit`，仅发 taskkill 不等待、且不做孤儿探测），
+/// 否则窗口会卡住数秒；更新路径则有一个可见的控制台进度窗口，且脚本强依赖
+/// 「端口先消失再出现」来证明新版起来了，因此这里仍用同步的 `proxy_stop`
+/// 把「内核确实停了」确认下来。
 ///
 /// 失败不阻断退出：清理是尽力而为，脚本侧另有孤儿清理兜底（proxy.rs::climb_to_orphan_root）。
 fn stop_proxy_before_exit(app: &tauri::AppHandle) {
