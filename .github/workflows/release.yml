@@ -98,6 +98,10 @@ jobs:
         # 失败即中止 —— 绝不产出一个缺内核的安装包。
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          # Windows runner 的 bash 步骤 stdout 默认 cp1252，脚本内含中文日志，
+          # 不设 UTF-8 会在第一条打印处 UnicodeEncodeError（v0.3.1 首次发版实测）。
+          PYTHONIOENCODING: utf-8
         run: python scripts/prepare_bundle_runtime.py
 
       - name: 构建安装包（NSIS，必须带 bundle）

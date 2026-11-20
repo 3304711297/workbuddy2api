@@ -380,7 +380,26 @@ def prepare(runtime_dir: Path, cache_dir: Path, *, archive: Path | None = None) 
     return runtime_dir
 
 
+def _force_utf8_stdio() -> None:
+    """强制 stdout/stderr 走 UTF-8。
+
+    GitHub Actions 的 Windows runner 用 bash 跑本脚本时，stdout 默认是 cp1252，
+    打印中文直接 UnicodeEncodeError 崩在第一条日志上（2026-11-20 v0.3.1 发版实测）。
+    无法重新配置时退化为「不可编码字符替换」，绝不因为日志编码问题中断构建。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        # getattr 而非直接调用：静态类型上 TextIO 没有 reconfigure（运行时对象是
+        # TextIOWrapper），且被重定向到非文件流时也可能没有该方法。
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except ValueError:
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(
         description="准备 NSIS 安装包内置的 Python 运行时（钉版 + sha256 + 运行期依赖）",
     )
