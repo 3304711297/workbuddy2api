@@ -18,7 +18,7 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：844 passed 为当前基线 (含长思考超时、防惊群与「安装包内置运行时」契约)
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：868 passed 为当前基线 (含长思考超时、防惊群与「安装包内置运行时」契约)
 ./.venv/Scripts/python.exe tests/run_isolated_tests.py   # 同上，但在「禁真实 DNS/socket + 用户目录指向临时目录 + 清空 WORKBUDDY* 环境变量」下再跑一遍
 npm test                                          # 前端：272 passed（node --test）
 cd src-tauri && cargo test --quiet                # Rust：130 passed
@@ -528,6 +528,7 @@ workbuddy2api.exe (GUI)
   是否符合 SSE 规范，不要反向去掉注释行。
 - **Anthropic Messages 兼容层 (`POST /v1/messages`)**：
   采用解耦模块设计（`anthropic_compat.py` 请求响应双向翻译、`anthropic_stream.py` SSE 事件状态机）。支持 Claude Code CLI、Cline、Roo Code 等工具原生直连。错误返回标准 Anthropic `{"type": "error", "error": {...}}` 格式。
+  ⚠️ **结构化输出必须映射，不能丢**：`translate_anthropic_request` 是白名单构造，`output_config.format` 需经 `response_format_from_output_config()` 翻成 OpenAI 形状 `{"type":"json_schema","json_schema":{"name":"response","strict":true,"schema":…}}`；非 `json_schema` / 空 schema / 畸形结构一律忽略（凭空造 `response_format` 会把自由输出强约束成 JSON）。转发层 `PASSTHROUGH_BODY_KEYS` 已含 `response_format`，漏登记会二次丢弃。契约：`tests/test_anthropic_compat.py::TestOutputConfigResponseFormat`。
 
 - **请求健壮性四条（2026-09-18 修复，改三端点入口/错误路径前必读）**：
 
@@ -569,6 +570,7 @@ workbuddy2api.exe (GUI)
   契约锁定：`tests/test_models_copy_and_subtitle.test.js`。
 - **OpenAI Responses 兼容层 (`POST /v1/responses`) 与 Codex 投影压缩**：
   采用解耦模块设计（`responses_compat.py` 请求双向转换与 Responses 语义事件流状态机，`responses_projection.py` 最小语义闭包投影压缩）。支持 Codex CLI（`wire_api="responses"`）、OpenCode 等长上下文 Agent 原生直连；自动过滤 harness 模板与冗余 schema description，大幅削减 token 消耗。
+  ⚠️ **Chat 形状回放必须字段保真**：客户端会把历史以 `{"role":"assistant","content":…,"tool_calls":[…],"reasoning_content":…}` 与 `{"role":"tool","tool_call_id":…,"name":…}` 塞回 `input`。`_convert_input_items` 必须保留内联 `tool_calls`（去重追加）与 `reasoning_content`（同一段不重复拼接），tool 项必须回填 `tool_call_id`/`name` 且缺失时不得凭空造 id；否则调用与结果成孤儿对被出站清理一起删掉，模型会「忘记刚调用过工具」并反复重试。契约：`tests/test_responses_chat_shape_fidelity.py`。
 - **DeepSeek 思维链注入与历史一致性回填 (`deepseek_thinking.py`)**：
   对 `deepseek*` 模型自动注入 `thinking: {"type": "enabled"}` 与 effort 档位（默认 high）；多轮对话检测到任一 assistant 含有 reasoning 时，自动为缺少该字段的 assistant 补齐 `reasoning_content: ""`，根除上游 `11133 model_param_invalid` 错误。
 - **按积分到期日分层选号（先烧快过期额度，借鉴 momo0410/workbuddy-switch-gateway）**：
@@ -583,7 +585,8 @@ workbuddy2api.exe (GUI)
   - **多模态远程图片转 Data-URI**：腾讯后端对 `image_url` 仅接受 `data:image/...;base64,...`，直接传 http 链接报错 400。网关 `_inline_remote_images` 自动异步下载远程图片并内联为 base64 data URI，彻底解除视觉模型的多模态输入限制（借鉴 `neipor/codebuddy-cli2api`）。**安全边界（P0，改动此逻辑必读）**：下载前经 `_url_is_safe_for_fetch` 做 SSRF 校验——仅允许 http(s)，拒绝回环/私网/链路本地/云元数据地址与 CGNAT 共享地址段（100.64.0.0/10、127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、::1、fe80::/10、0.0.0.0 等），域名解析后逐个 IP 校验；**重定向逐跳重新校验**（防「公网跳内网」）；**TCP/TLS 连接地址强制与已校验公网 IP 绑定**（直连 IP 搭配 Host 头与 sni_hostname 扩展，根除 DNS rebinding 窗口）；单图默认 8MB 上限（`WORKBUDDY2API_MAX_IMAGE_MB`，设 0 则完全禁用远程下载），按 `Content-Length` 预判 + 流式累计双保险；响应必须为 `image/*`，否则拒绝内联。
   - **11140 三形态分流（2026-11-07 扩展，改动必读；原借鉴 `icebears111/workbuddy2api`，连坐保护借鉴 `misakano7545/workbuddy2api-panel`）**：上游同一个错误码 `11140` 承载三种语义，必须按 **code + 文案双条件**分流，不能只看 code（旧实现只看 code，会把模型限流误判成内容审核）：
     - `content`（`request illegal` / 「内容未通过安全审核」/ 无文案）：用户 Prompt 命中上游安全策略，与账号配额和网络可用性无关。**严禁切号重试、严禁记入账号冷却池**，按 HTTP 400 返回。
-    - `account_restricted`（「账号存在异常行为，已被限制使用」/ `unusual activity`）：判据在上游是**设备/出口级**，换号会把下一个号也送进去。**命中即停手、不换号**；写 30 分钟账号冷却 `_ACCOUNT_COOLDOWNS[(uid, model)]`（`kind="account_restricted"`），并喂 `_note_account_restriction`。同一 15 分钟窗口内 ≥2 个**不同** uid 命中 → `RestrictionHoldMiddleware` 全池暂停 30 分钟，三条对话入口回 503 + `Retry-After` + `account_restricted_hold`；同一 uid 重复命中不凑数。
+    - `account_restricted`（「账号存在异常行为，已被限制使用」/ `unusual activity`）：判据在上游是**设备/出口级**，换号会把下一个号也送进去。**命中即停手、不换号**；写 30 分钟账号冷却 `_ACCOUNT_COOLDOWNS[(uid, model)]`（`kind="account_restricted"`），并喂 `_note_account_restriction`。连坐暂停按 **realm（cn/global）分桶**，阈值 = `max(2, 本域健康号 // 10)`；首次暂停 **30s**，连续触发 2 倍退避至 **600s**，平静 30 分钟清零 streak；只有**所有**已知域都在暂停时才落下全池闸，三条对话入口才回 503 + `Retry-After` + `account_restricted_hold`（CN 扫荡不连坐 global）。同一 uid 重复命中不凑数。
+      ⚠️ **`_RESTRICTION_HOLD_SEC=1800` 只属于账号级冷却**，全池/单域暂停用独立的 `_RESTRICTION_PAUSE_BASE_SEC/_MAX_SEC/_CALM_RESET_SEC`；两个语义不得合并（曾有固定「2 个号 → 全池停 30 分钟」在 340 号池造成连续停派、4,036 条请求 503）。
     - `model_rate`（`rate-limiting requests`）：同一 code 承载的模型级限流，可自愈，必须走限流分支而不是被当成确定性拒绝。
     - ⚠️ `request illegal` 仍归 `content`：这是本仓历史实测口径，**不要**按下游另一条抓包口径改写成账号受限。
     - 契约锁定：`tests/test_upstream_restriction_hold.py`。

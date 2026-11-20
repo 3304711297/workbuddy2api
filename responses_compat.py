@@ -113,6 +113,21 @@ def responses_request_to_chat(body: dict) -> dict:
     return chat
 
 
+def _merge_reasoning(existing: str, text: str) -> str:
+    """拼接连思维链，但同一段不重复落地。
+
+    Chat 形状回放时客户端可能既带 `reasoning` item、又把同一段文本内联在
+    assistant 的 `reasoning_content` 里；照单全收会让模型看到重复思维链。
+    """
+    if not text:
+        return existing
+    if not existing:
+        return text
+    if existing == text:
+        return existing
+    return f"{existing}\n{text}"
+
+
 def _convert_input_items(items: list) -> list[dict]:
     """将 Responses API 的 input 项数组转换为 Chat messages。"""
     messages: list[dict] = []
@@ -167,6 +182,17 @@ def _convert_input_items(items: list) -> list[dict]:
             _flush_assistant()
             content = _extract_content(item.get("content", ""))
             pending_assistant_content = content
+            # Chat 形状回放：客户端会把上一轮 assistant 的 `tool_calls` 与
+            # `reasoning_content` 内联回来。只取 content 会让调用变孤儿，出站清理
+            # 随即把「调用 + 结果」成对删掉（模型表现为忘记刚调过工具、反复重试）。
+            inline_calls = item.get("tool_calls")
+            if isinstance(inline_calls, list):
+                pending_tool_calls.extend(
+                    tc for tc in inline_calls if isinstance(tc, dict)
+                )
+            inline_reasoning = item.get("reasoning_content")
+            if isinstance(inline_reasoning, str) and inline_reasoning:
+                pending_reasoning = _merge_reasoning(pending_reasoning, inline_reasoning)
             continue
 
         # 3. reasoning -> 暂存，随所属 assistant 轮次一并落地（多轮思维链回传）
@@ -177,7 +203,7 @@ def _convert_input_items(items: list) -> list[dict]:
             text = _extract_reasoning_text(item)
             if not text:
                 continue
-            pending_reasoning = f"{pending_reasoning}\n{text}" if pending_reasoning else text
+            pending_reasoning = _merge_reasoning(pending_reasoning, text)
             continue
 
         # 4. function_call -> 归集至前驱 assistant 消息的 tool_calls
@@ -223,7 +249,16 @@ def _convert_input_items(items: list) -> list[dict]:
         if role:
             _flush_assistant()
             content = _extract_content(item.get("content", ""))
-            messages.append({"role": role, "content": content})
+            msg: dict[str, Any] = {"role": role, "content": content}
+            # Chat 形状的 tool 结果：必须保留 tool_call_id / name，否则与前面的
+            # assistant.tool_calls 无法按 id 配对，出站清理会把两者一起删掉。
+            # 缺失时保持缺失（不凭空编 id —— 编错只会让上游 400）。
+            if role == "tool":
+                if item.get("tool_call_id"):
+                    msg["tool_call_id"] = item["tool_call_id"]
+                if item.get("name"):
+                    msg["name"] = item["name"]
+            messages.append(msg)
 
     _flush_assistant()
     return messages

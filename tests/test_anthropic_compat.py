@@ -1192,4 +1192,79 @@ class TestAnthropicStreamTranslator:
         assert message_deltas[0]["data"]["delta"]["stop_reason"] == "end_turn"
 
 
+# ============================================================================
+# 4. output_config.format -> response_format（结构化输出透传）
+# ============================================================================
+
+class TestOutputConfigResponseFormat:
+    """Anthropic `output_config.format` 必须映射成 OpenAI `response_format`。
+
+    旧实现是白名单构造请求体，`output_config` 被整段丢弃 ⇒ Claude 侧 json_schema
+    结构化输出静默失效（上游拿不到 schema，只能自由发挥），客户端也拿不到可校验的
+    JSON。非 json_schema 或空 schema 保持原「忽略」行为，不得凭空造 response_format。
+    """
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    def _body(self, output_config):
+        return {
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 256,
+            "output_config": output_config,
+        }
+
+    def test_json_schema_is_wrapped_into_openai_shape(self):
+        out = translate_anthropic_request(
+            self._body({"format": {"type": "json_schema", "schema": self.SCHEMA}})
+        )
+        assert out["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "strict": True, "schema": self.SCHEMA},
+        }
+        # 上游 chat/completions 契约里没有 output_config，不得原样透出
+        assert "output_config" not in out
+
+    def test_non_json_schema_format_is_ignored(self):
+        # 带合法 schema 但 type 不是 json_schema：必须按 type 门忽略，
+        # 而不是因为「碰巧没有 schema」才不生效。
+        out = translate_anthropic_request(
+            self._body({"format": {"type": "text", "schema": self.SCHEMA}})
+        )
+        assert "response_format" not in out
+
+    def test_empty_schema_is_ignored(self):
+        out = translate_anthropic_request(
+            self._body({"format": {"type": "json_schema", "schema": {}}})
+        )
+        assert "response_format" not in out
+
+    def test_non_dict_schema_is_ignored(self):
+        out = translate_anthropic_request(
+            self._body({"format": {"type": "json_schema", "schema": "not-a-schema"}})
+        )
+        assert "response_format" not in out
+
+    def test_malformed_output_config_does_not_raise(self):
+        for output_config in (
+            "json_schema",                       # 不是 dict
+            {"format": "json_schema"},           # format 不是 dict
+            {"format": {"schema": self.SCHEMA}},  # 缺 type
+            {"format": None},
+        ):
+            out = translate_anthropic_request(self._body(output_config))
+            assert "response_format" not in out
+
+    def test_converter_whitelist_keeps_response_format(self):
+        """/v1/messages 转发层是白名单构造，字段漏登记会把刚映射的值再丢一次。"""
+        import converter
+
+        assert "response_format" in converter.PASSTHROUGH_BODY_KEYS
+
+
 

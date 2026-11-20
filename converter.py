@@ -2742,44 +2742,138 @@ _ACCOUNT_COOLDOWN_CAP = 256
 _RATE_LIMIT_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# 11140 风控连坐状态机（2026-11-07 吸收 misakano7545 b494426a）
+# 11140 风控连坐状态机（2026-11-07 吸收 misakano7545 b494426a；
+# 2026-11-20 吸收 de24d38f/d3edea90 的小步退避 + 阈值按池缩放 + 按域分桶）
 #
 # 上游把「账号存在异常行为，已被限制使用」判在**设备/出口**上，不是判在单个账号上。
 # 本仓的既有处置是「命中 11140 就地返回、不换号」，这一层已经避免单个请求顺着轮转
-# 扫全池；但连续的用户请求仍会一个个撞过去。因此再加一道全池暂停：
-#   - 同一 15 分钟窗口内 ≥2 个**不同** uid 命中账号风控 → 判定为连坐扫荡；
-#   - 全池暂停派发 30 分钟（期间 /v1/* 直接 503 + Retry-After，不再拿账号去试）；
+# 扫全池；但连续的用户请求仍会一个个撞过去。因此再加一道全池暂停。
+#
+# 上游 340 号池的真实事故：固定「2 个号 → 全池停 30 分钟」造成连续停派、4,036 条
+# 请求 503；且单一全局闸让 CN 扫荡把 global 账号一起停掉。现语义：
+#   - 阈值 = max(2, 本域健康号 // 10)：号越多，越要多个号同时被限制才判定扫荡；
+#   - 首次暂停 30s，连续触发 2 倍退避至 600s；平静 30 分钟清零 streak；
+#   - 状态按 realm（cn/global）分桶，只有**所有**域都被暂停时才落下全池闸，
+#     CN 扫荡不再连坐 global 账号；
 #   - 同一 uid 重复命中只更新时间、不增加计数（否则一个号反复重试就能骗出暂停）；
 #   - 进程内状态、重启清零——「暂停」是「现在先别打」，重启后重新判定即可。
 # ---------------------------------------------------------------------------
 _RESTRICTION_WINDOW_SEC = 900.0
+# 账号级冷却时长（uid+model）：命中账号风控后 30 分钟内不再选它。
+# ⚠️ 与下面的全池暂停常量语义分离，禁止合并或挪作他用。
 _RESTRICTION_HOLD_SEC = 1800.0
 _RESTRICTION_MIN_ACCOUNTS = 2
+# 全池/单域暂停：首次 30s，连续触发 2 倍退避至 600s，平静 30 分钟清零 streak。
+_RESTRICTION_PAUSE_BASE_SEC = 30.0
+_RESTRICTION_PAUSE_MAX_SEC = 600.0
+_RESTRICTION_CALM_RESET_SEC = 1800.0
 _RESTRICTION_LOCK = threading.Lock()
-_RESTRICTION_HITS: dict[str, float] = {}
+# realm -> {"hits": {uid: ts}, "hold_until": monotonic, "streak": int, "last_trigger": monotonic}
+_RESTRICTION_BUCKETS: dict[str, dict] = {}
 _RESTRICTION_HOLD_UNTIL = 0.0
 
 
-def _note_account_restriction(uid: str) -> float:
-    """记一次账号级风控限制，返回本次触发的全池暂停剩余秒数（0 = 未触发）。"""
+def _restriction_realm_key(realm) -> str:
+    """realm 归一：global/intl → "global"，其余（含未知）→ "cn"（与出站兜底一致）。"""
+    text = str(realm or "").strip().lower()
+    return "global" if text in ("global", "intl", "international") else "cn"
+
+
+def _restriction_threshold(realm_pool_size=None) -> int:
+    """本域触发阈值 = max(2, 本域健康号数 // 10)。
+
+    池规模未知/非法时退化为最小值 2（保持「至少两个不同账号」的语义）。
+    """
+    try:
+        size = int(realm_pool_size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return max(_RESTRICTION_MIN_ACCOUNTS, size // 10)
+
+
+def _note_account_restriction(uid: str, realm: str = "", *,
+                              realm_pool_size=None,
+                              known_realms=None) -> float:
+    """记一次账号级风控限制，返回本次触发的**本域**暂停秒数（0 = 未触发）。
+
+    - realm: 该账号所属区域（cn/global）；空 = 未分区，等价旧行为（单域即全池）；
+    - realm_pool_size: 本域健康号数，用于把阈值放大到 max(2, healthy // 10)；
+    - known_realms: 当前账号池覆盖的区域。给全时，只有**所有**区域都在暂停中
+      才落下全池闸（中间件据此 503）；单域暂停不影响其它区域。
+    """
     global _RESTRICTION_HOLD_UNTIL
     if not uid:
         return 0.0
     now = time.monotonic()
+    key = _restriction_realm_key(realm)
     with _RESTRICTION_LOCK:
-        for u, ts in list(_RESTRICTION_HITS.items()):
+        bucket = _RESTRICTION_BUCKETS.setdefault(
+            key, {"hits": {}, "hold_until": 0.0, "streak": 0, "last_trigger": 0.0}
+        )
+        for u, ts in list(bucket["hits"].items()):
             if now - ts > _RESTRICTION_WINDOW_SEC:
-                _RESTRICTION_HITS.pop(u, None)
-        _RESTRICTION_HITS[uid] = now
-        if len(_RESTRICTION_HITS) < _RESTRICTION_MIN_ACCOUNTS:
+                bucket["hits"].pop(u, None)
+        bucket["hits"][uid] = now
+        threshold = _restriction_threshold(realm_pool_size)
+        if len(bucket["hits"]) < threshold:
             return 0.0
-        _RESTRICTION_HOLD_UNTIL = now + _RESTRICTION_HOLD_SEC
-        _RESTRICTION_HITS.clear()
+        if bucket["last_trigger"] and now - bucket["last_trigger"] >= _RESTRICTION_CALM_RESET_SEC:
+            bucket["streak"] = 0
+        pause = min(
+            _RESTRICTION_PAUSE_MAX_SEC,
+            _RESTRICTION_PAUSE_BASE_SEC * (2 ** min(int(bucket["streak"]), 8)),
+        )
+        bucket["hold_until"] = max(float(bucket["hold_until"]), now + pause)
+        streak = int(bucket["streak"]) + 1
+        bucket["streak"] = streak
+        bucket["last_trigger"] = now
+        bucket["hits"].clear()
+        realms = sorted({_restriction_realm_key(r) for r in (known_realms or ())} | {key})
+        if known_realms:
+            holds = [_RESTRICTION_BUCKETS.get(r, {}).get("hold_until", 0.0) for r in realms]
+            # 全池闸 = 所有已知域都在暂停时才落下；时长取「最早解除」的那个域，
+            # 因为只要有任一域恢复可派发，就不该继续 503。
+            _RESTRICTION_HOLD_UNTIL = min(holds) if all(h > now for h in holds) else 0.0
+        else:
+            _RESTRICTION_HOLD_UNTIL = max(_RESTRICTION_HOLD_UNTIL, float(bucket["hold_until"]))
     _log(
-        f"⚠️ [风控连坐] {_RESTRICTION_WINDOW_SEC / 60:.0f} 分钟内 ≥{_RESTRICTION_MIN_ACCOUNTS} 个账号"
-        f"被上游限制，全池暂停派发 {_RESTRICTION_HOLD_SEC / 60:.0f} 分钟（期间不换号、不重试）"
+        f"⚠️ [风控连坐] {_RESTRICTION_WINDOW_SEC / 60:.0f} 分钟内 {key} 域 ≥{threshold} 个账号"
+        f"被上游限制，本域暂停派发 {pause:.0f}s"
+        f"（streak={streak}，期间不换号、不重试）"
     )
-    return _RESTRICTION_HOLD_SEC
+    return pause
+
+
+def _restriction_pause_remaining(realm: str = "") -> float:
+    """指定域的全池暂停剩余秒数（0 = 该域未暂停）。"""
+    key = _restriction_realm_key(realm)
+    with _RESTRICTION_LOCK:
+        until = float(_RESTRICTION_BUCKETS.get(key, {}).get("hold_until", 0.0))
+        remain = until - time.monotonic()
+    return max(0.0, remain)
+
+
+def _restriction_scope_for_accounts(accounts, uid: str, model: str = "") -> tuple[str, int, tuple[str, ...]]:
+    """从账号池推导「该 uid 的区域 / 本域健康号数 / 池内所有区域」。
+
+    realm 判定复用 `_backend_for_auth`（realm 优先、domain 回退），与出站路由同源，
+    避免「路由走 global、风控却记到 cn」的分裂。健康 = 未处于该模型账号级冷却；
+    当前 uid 通常刚落冷却，因此天然被排除 —— 这正是「还有多少个号能替它去探」。
+    """
+    counts = {"cn": 0, "global": 0}
+    known: set[str] = set()
+    found = None
+    for u, session in accounts or []:
+        session_auth = session.get("auth") if isinstance(session, dict) else None
+        r = "global" if _backend_for_auth(session_auth) == BACKEND_INTL else "cn"
+        known.add(r)
+        if u == uid:
+            found = r
+        if model and _is_account_cooldown(u, model):
+            continue
+        counts[r] += 1
+    realm = found or "cn"
+    return realm, counts.get(realm, 0), tuple(sorted(known))
 
 
 def _restriction_hold_remaining() -> float:
@@ -2793,7 +2887,7 @@ def _reset_restriction_state() -> None:
     """清空连坐状态（测试与将来「一键解冻」用）。"""
     global _RESTRICTION_HOLD_UNTIL
     with _RESTRICTION_LOCK:
-        _RESTRICTION_HITS.clear()
+        _RESTRICTION_BUCKETS.clear()
         _RESTRICTION_HOLD_UNTIL = 0.0
 
 
@@ -4047,8 +4141,18 @@ class AccountRotator:
         if _is_account_restriction(status_code, err_text):
             # 11140 风控文书：上游判的是设备/出口，换号只会把下一个号也送进去。
             # 就地停手：写账号冷却（同模型 30 分钟内不再选它）+ 喂全池连坐状态机。
+            # 连坐状态按 realm 分桶：CN 扫荡不得把 global 账号一起停掉；
+            # 阈值按本域健康号规模缩放，避免大号池被两三个号骗出全池暂停。
             _record_account_restriction(current_uid, model, err_text)
-            _note_account_restriction(current_uid)
+            realm, healthy, known_realms = _restriction_scope_for_accounts(
+                self.get_all_accounts(), current_uid, model=model
+            )
+            _note_account_restriction(
+                current_uid,
+                realm,
+                realm_pool_size=healthy,
+                known_realms=known_realms,
+            )
             return None
         if _is_content_policy_violation(status_code, err_text):
             return None

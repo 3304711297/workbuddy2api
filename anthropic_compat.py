@@ -386,6 +386,33 @@ def _translate_tool_choice(choice: Any) -> Any:
     return choice
 
 
+def response_format_from_output_config(output_config: Any) -> Optional[dict]:
+    """把 Anthropic `output_config.format` 翻译成 OpenAI `response_format`。
+
+    Anthropic 侧结构化输出的形状是
+    `{"format": {"type": "json_schema", "schema": {...}}}`，OpenAI chat/completions
+    要的是 `{"type": "json_schema", "json_schema": {"name", "strict", "schema"}}`。
+
+    非 json_schema、空 schema、schema 不是对象或结构畸形一律返回 None，保持历史
+    「忽略该字段」行为 —— 凭空补一个 response_format 会把本该自由输出的请求强行
+    约束成 JSON，属于比丢弃更严重的语义错误。
+    """
+    if not isinstance(output_config, dict):
+        return None
+    fmt = output_config.get("format")
+    if not isinstance(fmt, dict):
+        return None
+    if fmt.get("type") != "json_schema":
+        return None
+    schema = fmt.get("schema")
+    if not isinstance(schema, dict) or not schema:
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "response", "strict": True, "schema": schema},
+    }
+
+
 def translate_anthropic_request(body: dict) -> dict:
     """Translate an Anthropic /v1/messages request body to OpenAI /v1/chat/completions format.
 
@@ -461,6 +488,12 @@ def translate_anthropic_request(body: dict) -> dict:
                     openai_req["reasoning_effort"] = "high"
             else:
                 openai_req["reasoning_effort"] = "high"
+
+    # 结构化输出：Anthropic output_config.format → OpenAI response_format。
+    # 此前 output_config 被整段丢弃，Claude 侧 json_schema 约束静默失效。
+    rf = response_format_from_output_config(body.get("output_config"))
+    if rf is not None:
+        openai_req["response_format"] = rf
 
     # Stream flag
     openai_req["stream"] = bool(body.get("stream", False))
