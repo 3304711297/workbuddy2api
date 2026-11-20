@@ -51,5 +51,11 @@ fn main() {
         }
     }
 
+    // 内置运行时目录由 scripts/prepare_bundle_runtime.py 在构建前落地。监视**目录**本身：
+    // tauri-build 只对「它上次运行时就已存在的资源文件」逐發 rerun-if-changed，新增文件
+    // （首次 prepare 落下的 python.exe 等）不会触发重跑 → copy_resources 漏拷 →
+    // 安装包里没有运行时，而构建日志一切正常。目录 mtime 变化可覆盖新增/删除。
+    println!("cargo:rerun-if-changed=../runtime");
+
     tauri_build::build()
 }

@@ -212,6 +212,11 @@ flowchart TD
 
 ### 方式一：直接运行桌面客户端（推荐）
 
+> **安装包已自带内核与 Python 运行时**：NSIS 安装包（`workbuddy2api_x.y.z_x64-setup.exe`）内置了
+> `converter.py` 及其全部依赖模块，以及一套 Python 3.12 运行时（`runtime/python.exe`）。
+> 因此在**没有源码、没有安装 Python** 的干净 Windows 机器上，装完直接点「启动服务」即可，
+> 无需另行 `pip install`。
+
 双击桌面生成的 **`WorkBuddy2API`** 快捷方式，或直接运行编译产物：
 ```bash
 src-tauri/target/release/workbuddy2api.exe
@@ -228,7 +233,7 @@ src-tauri/target/release/workbuddy2api.exe
 #### 环境要求
 - Node.js 20+（推荐 LTS 20 或 22+）与 npm
 - Rust 1.77+ 与 Cargo
-- Python 3.10+（需安装依赖 `httpx fastapi uvicorn[standard]`）
+- Python 3.10+（需安装依赖 `httpx fastapi uvicorn[standard]`；仅**源码调试**需要，构建安装包时代码会改用内置运行时）
 
 ```bash
 # 1. 克隆本项目
@@ -238,7 +243,11 @@ cd workbuddy2api
 # 2. 安装前端依赖
 npm install
 
-# 3. 运行 Tauri 开发模式或构建 Release 版本（走已内置的 @tauri-apps/cli）
+# 3. 准备安装包内置的 Python 运行时（只有要打 NSIS 安装包时才必须；
+#    运行时约 80MB、不入库，脚本钉版下载 + sha256 校验 + 装运行期依赖，可重复执行）
+python scripts/prepare_bundle_runtime.py
+
+# 4. 运行 Tauri 开发模式或构建 Release 版本（走已内置的 @tauri-apps/cli）
 npm run tauri -- dev                     # 调试模式（自动编译并拉起桌面窗口）
 npm run tauri -- build --no-bundle       # 仅编译 Release 可执行程序（产物：src-tauri/target/release/workbuddy2api.exe）
 npm run tauri build                      # 完整构建（含 NSIS 独立安装包，产物在 src-tauri/target/release/bundle/nsis/）
@@ -246,6 +255,11 @@ npm run tauri build                      # 完整构建（含 NSIS 独立安装�
 # 亦可直接双击运行仓库自带的一键构建脚本：
 .\build.cmd                              # 或 PowerShell 执行 .\build.ps1
 ```
+
+> **打安装包前必须先跑准备脚本**：`tauri.conf.json` 的 `bundle.resources` 会把
+> `src-tauri/runtime/` 整体打进安装包；跳过第 3 步虽然仍能构建成功，但安装包里只有占位说明、
+> 没有 `python.exe`，用户装完点「启动服务」会失败。
+> 只做源码调试（`dev` / `--no-bundle`）可以跳过它 —— 内核会优先用仓库根的 `.venv`。
 
 > **提示**：若习惯使用 Cargo 原生 CLI，需先执行 `cargo install tauri-cli --version "^2"`，随后可在 `src-tauri` 目录下执行 `cargo tauri dev` 或 `cargo tauri build --no-bundle`。
 

@@ -65,6 +65,13 @@ src-tauri/target/
 src-tauri/target-*/
 target-*/
 
+# 安装包内置的 Python 运行时（scripts/prepare_bundle_runtime.py 下载落地，解包后约 70MB）
+# 用 `src-tauri/runtime/*` 而不是 `src-tauri/runtime/`：git 无法反选被忽略目录内的文件，
+# 而 `src-tauri/runtime/README.md` 必须入库——tauri-build 对不存在的资源路径 fail-closed，
+# 干净 clone 上 cargo test 会直接失败。
+src-tauri/runtime/*
+!src-tauri/runtime/README.md
+
 # worktrees (superpowers workflow)
 .worktrees/
 

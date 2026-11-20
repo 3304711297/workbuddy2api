@@ -75,6 +75,24 @@
 
 ---
 
+## 6. 随安装包分发的运行时与依赖（issue #47）
+
+NSIS 安装包内置 Python 运行时与内核依赖，使「没有源码、没有装 Python」的机器装完即可启动服务。
+运行时由 `scripts/prepare_bundle_runtime.py` 钉版拉取（tag 与 sha256 写死在脚本里），
+各组件的许可证原文随运行时一起分发，不改变本仓库的 MIT 许可：
+
+| 组件 | 版本 | 许可证 | 许可原文位置 |
+|---|---|---|---|
+| CPython（`astral-sh/python-build-standalone`，tag `20261110`，`x86_64-pc-windows-msvc-install_only_stripped`） | 3.12.16 | PSF-2.0 | `src-tauri/runtime/LICENSE.txt` |
+| fastapi | 0.142.4 | MIT | `src-tauri/runtime/Lib/site-packages/fastapi-*.dist-info/` |
+| starlette | 1.7.0 | BSD-3-Clause | 同上（`starlette-*.dist-info/`） |
+| uvicorn[standard]（含 httptools / watchfiles / websockets / python-dotenv / PyYAML / click 等 extras） | 0.54.0 | BSD-3-Clause / MIT / Apache-2.0 等 | 同上（各 `*.dist-info/`） |
+| httpx（含 httpcore / certifi / idna / anyio / h11 / sniffio） | 0.28.1 | BSD-3-Clause | 同上（各 `*.dist-info/`） |
+
+> 这些文件位于 `src-tauri/runtime/`（被 `.gitignore` 排除、不入库），只在构建安装包时存在。
+
+---
+
 ## 许可证说明
 
 - 上述上游项目均以 **MIT License** 发布，本仓库同样以 MIT License 开源（见 [LICENSE](LICENSE)）。

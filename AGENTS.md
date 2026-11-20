@@ -18,10 +18,10 @@ Tauri v2 桌面应用 + Python 反代内核。
 ## 2. 改完怎么验证（缺一不可）
 
 ```bash
-./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：551 passed 为当前基线 (含长思考超时与防惊群契约)
+./.venv/Scripts/python.exe -m pytest tests/ -q   # Python：844 passed 为当前基线 (含长思考超时、防惊群与「安装包内置运行时」契约)
 ./.venv/Scripts/python.exe tests/run_isolated_tests.py   # 同上，但在「禁真实 DNS/socket + 用户目录指向临时目录 + 清空 WORKBUDDY* 环境变量」下再跑一遍
-npm test                                          # 前端：219 passed（node --test）
-cd src-tauri && cargo test --quiet                # Rust：90 passed
+npm test                                          # 前端：272 passed（node --test）
+cd src-tauri && cargo test --quiet                # Rust：130 passed
 ```
 
 ⚠️ **裸 `python -m pytest` 会失败**（`No module named pytest`）——`python` 命中的是
@@ -52,6 +52,24 @@ CI 的 `checks-linux`（LF + 禁网）一档就是为守这条而加。
 ```bash
 npm run build && cd src-tauri && cargo tauri build --no-bundle
 ```
+
+⚠️ **打 NSIS 安装包前必须先跑 `python scripts/prepare_bundle_runtime.py`**（issue #47 的修复）：
+v0.3.0 的安装包解包后只有 `workbuddy2api.exe` + `uninstall.exe`，没有任何 Python 运行时与
+`converter.py`，「无源码、无 Python」的机器装完点「启动服务」必然失败。现在
+`src-tauri/tauri.conf.json` 的 `bundle.resources` 以 **map 形态**显式登记内核模块（目标路径是
+资源根，不是 `_up_/`）与 `runtime/`；运行时由准备脚本从 astral-sh/python-build-standalone
+下载**钉版** Windows x64 `install_only` 资产、校验 sha256、解包到 `src-tauri/runtime/`，再把
+运行期依赖（fastapi / starlette / uvicorn[standard] / httpx，版本与 `.venv` 一致）装进去。
+- `src-tauri/runtime/` **不入库**（解包后约 80MB），但 `src-tauri/runtime/README.md` 必须保留：
+  tauri-build 的 `copy_resources()` 对**不存在的**资源路径 fail-closed，删掉占位文件会让干净
+  clone 上的 `cargo test` 直接报 `ResourcePathNotFound`。
+- `release.yml` 已在 `npm run tauri build` **之前**自动跑该脚本（`if: runner.os == 'Windows'`）；
+  `ci.yml` 刻意不跑（保持「只检查、不打包」——每次 push 下载 22MB + pip 装依赖不值当）。
+- 内核解释器解析顺序（改动必读，`proxy.rs::python_resolver_tests` 锁定）：
+  仓库/脚本目录的 `.venv`（开发）→ 内置 `runtime/python.exe`（安装包）→
+  `%USERPROFILE%\.workbuddy\...`（官方客户端）→ 裸 `python`。`.venv` 在**所有**候选目录里
+  先扫一遍，否则源码构建（`runtime/` 被拷进 `target/release/`）会悄悄绕过 `.venv`。
+- 契约：`tests/test_bundle_runtime_contract.py`、`tests/test_bundle_runtime_workflow_contract.test.js`。
 
 ⚠️ **`windows.ps1` 必须带 UTF-8 BOM（真实踩过的无声闪退）**：Windows PowerShell 5.1
 读无 BOM 的 UTF-8 文件时按 ANSI/GBK 解码，中文注释变乱码打散引号配对 → **19 个解析
@@ -651,7 +669,9 @@ workbuddy2api.exe (GUI)
     `ci.yml` 不得出现 `tauri build` / NSIS 产物路径 —— 想「顺手」把打包挪回 CI 会立刻变红。
   - **发版前必须验未压缩主 exe 非空壳**：`scripts/verify_build_artifact.py`
     在 `npm run tauri build` 之后、生成 `SHA256SUMS.txt` 之前运行，检查主 exe
-    `>10MB`、`dist/assets/*.js` 文件名已内嵌、`build.rs` 烘焙的 HEAD SHA 存在。
+    `>10MB`、`dist/assets/*.js` 文件名已内嵌、`build.rs` 烘焙的 HEAD SHA 存在，
+    以及 `src-tauri/target/release/` 下确有 `converter.py` 与 `runtime/python.exe`
+    （v0.3.0 的缺陷正是「exe 正常、内核与运行时都不在」，构建日志全程无异常）。
     10MB 常量只许留在脚本里，不许内联进 YAML（既有反向断言会红）；日志纯 ASCII，
     Windows runner 的 cp1252 控制台打印中文会假失败。契约：
     `tests/test_verify_build_artifact.py` 与 `tests/test_release_workflow_contract.test.js`。

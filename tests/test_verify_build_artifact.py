@@ -30,6 +30,37 @@ def _make_artifact(tmp_path: Path, payload: bytes, asset_name: str = "index-ABC1
     return exe, assets
 
 
+def _make_staging(tmp_path: Path) -> Path:
+    """模拟 tauri-build 拷好 bundle.resources 的 staging 目录（target/<profile>/）。"""
+    staging = tmp_path / "staging"
+    (staging / "runtime").mkdir(parents=True)
+    (staging / "converter.py").write_text("# kernel", encoding="utf-8")
+    (staging / "runtime" / "python.exe").write_bytes(b"MZ")
+    return staging
+
+
+def test_verify_bundle_payload_accepts_staged_kernel_and_runtime(tmp_path):
+    module = _load_module()
+    assert module.verify_bundle_payload(_make_staging(tmp_path)) is None
+
+
+def test_verify_bundle_payload_rejects_missing_kernel(tmp_path):
+    module = _load_module()
+    staging = _make_staging(tmp_path)
+    (staging / "converter.py").unlink()
+    with pytest.raises(module.ArtifactError, match="converter.py"):
+        module.verify_bundle_payload(staging)
+
+
+def test_verify_bundle_payload_rejects_missing_runtime(tmp_path):
+    """v0.3.0 安装包的真实缺陷：exe 在、内核与运行时都不在。"""
+    module = _load_module()
+    staging = _make_staging(tmp_path)
+    (staging / "runtime" / "python.exe").unlink()
+    with pytest.raises(module.ArtifactError, match="runtime/python.exe"):
+        module.verify_bundle_payload(staging)
+
+
 def test_verify_artifact_accepts_sized_binary_with_embedded_asset(tmp_path):
     module = _load_module()
     exe, assets = _make_artifact(tmp_path, b"x" * 256 + b"index-ABC123.js")
@@ -75,6 +106,7 @@ def test_main_uses_ascii_logs_and_exits_zero_for_good_artifact(monkeypatch, tmp_
     monkeypatch.setattr(module, "DEFAULT_EXE", exe)
     monkeypatch.setattr(module, "DEFAULT_ASSETS_DIR", assets)
     monkeypatch.setattr(module, "DEFAULT_MIN_SIZE", 128)
+    monkeypatch.setattr(module, "DEFAULT_STAGING", _make_staging(tmp_path))
     monkeypatch.setattr(module, "_current_git_sha", lambda: None)
     assert module.main() == 0
     out = capsys.readouterr().out
@@ -88,8 +120,26 @@ def test_main_exits_nonzero_for_empty_shell(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(module, "DEFAULT_EXE", exe)
     monkeypatch.setattr(module, "DEFAULT_ASSETS_DIR", assets)
     monkeypatch.setattr(module, "DEFAULT_MIN_SIZE", 128)
+    monkeypatch.setattr(module, "DEFAULT_STAGING", _make_staging(tmp_path))
     monkeypatch.setattr(module, "_current_git_sha", lambda: None)
     assert module.main() != 0
     err = capsys.readouterr().err
     assert "[FAIL]" in err
     assert err.isascii(), "失败日志也必须纯 ASCII，避免 cp1252 把构建判死"
+
+
+def test_main_fails_when_kernel_or_runtime_is_not_staged(monkeypatch, tmp_path, capsys):
+    """安装包里没有 converter.py / runtime 时，构建必须失败而不是静默发版。"""
+    module = _load_module()
+    exe, assets = _make_artifact(tmp_path, b"x" * 256 + b"index-ABC123.js")
+    staging = _make_staging(tmp_path)
+    (staging / "runtime" / "python.exe").unlink()
+    monkeypatch.setattr(module, "DEFAULT_EXE", exe)
+    monkeypatch.setattr(module, "DEFAULT_ASSETS_DIR", assets)
+    monkeypatch.setattr(module, "DEFAULT_MIN_SIZE", 128)
+    monkeypatch.setattr(module, "DEFAULT_STAGING", staging)
+    monkeypatch.setattr(module, "_current_git_sha", lambda: None)
+    assert module.main() != 0
+    err = capsys.readouterr().err
+    assert "runtime/python.exe" in err
+    assert err.isascii()

@@ -91,6 +91,15 @@ jobs:
           echo "version=$CONF_VER" >> "$GITHUB_OUTPUT"
           echo "发版版本：$TAG（tauri.conf.json=$CONF_VER）"
 
+      - name: 准备内置 Python 运行时（仅 Windows）
+        # 安装包必须自带 runtime/python.exe 与内核依赖：v0.3.0 的包里只有 exe，
+        # 「无源码、无 Python」的机器装完点「启动服务」必然失败（issue #47）。
+        # 脚本钉版下载 python-build-standalone + sha256 校验 + pip 装依赖，
+        # 失败即中止 —— 绝不产出一个缺内核的安装包。
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/prepare_bundle_runtime.py
+
       - name: 构建安装包（NSIS，必须带 bundle）
         # 必须走 tauri CLI：裸 cargo build 会产出无前端的空壳 exe（见 AGENTS.md）
         # tauri.conf.json 的 beforeBuildCommand 会自动先跑 npm run build

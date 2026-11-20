@@ -32,6 +32,20 @@
     "targets": [
       "nsis"
     ],
+    "resources": {
+      "../converter.py": "converter.py",
+      "../anthropic_compat.py": "anthropic_compat.py",
+      "../anthropic_stream.py": "anthropic_stream.py",
+      "../responses_compat.py": "responses_compat.py",
+      "../responses_projection.py": "responses_projection.py",
+      "../deepseek_thinking.py": "deepseek_thinking.py",
+      "../desensitize.py": "desensitize.py",
+      "../request_pacer.py": "request_pacer.py",
+      "../token_refresher.py": "token_refresher.py",
+      "../wb_atrest.py": "wb_atrest.py",
+      "../turing_helper.cjs": "turing_helper.cjs",
+      "runtime": "runtime"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

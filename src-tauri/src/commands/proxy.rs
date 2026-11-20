@@ -3,7 +3,7 @@
 use crate::ProxyHandle;
 use futures_util::StreamExt; // 流式读取 SSE 字节块（配合 reqwest "stream" feature）
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{Manager, State};
 
@@ -23,11 +23,22 @@ pub struct TestChatResult {
     pub protocol: String,
 }
 
-/// Python 解释器定位：
+/// Python 解释器定位（顺序即契约，改动必须同步 `python_resolver_tests`）：
+///
 /// 1. `WORKBUDDY2API_PYTHON`（兼容旧名 `C2O_PYTHON`）环境变量显式指定优先
-/// 2. converter.py 所在目录、可执行文件祖先目录或当前工作目录下的 `.venv` 虚拟环境
-/// 3. 用户主目录下 .workbuddy 内置解释器（按 USERPROFILE 派生，保留官方安装兼容）
-/// 4. PATH 中的 python 兜底
+/// 2. 候选目录下的 `.venv` 虚拟环境（**开发路径**：源码检出的仓库根 `.venv`）
+/// 3. 候选目录下的内置运行时 `runtime/python.exe`（**安装包路径**：`bundle.resources`
+///    把 `src-tauri/runtime` 放到资源根，Windows 下资源根 = converter.py 所在目录）
+/// 4. 用户主目录下 `.workbuddy` 的官方 Python（按 USERPROFILE 派生，保留官方安装兼容）
+/// 5. PATH 中的 python 兜底
+///
+/// 候选目录 = converter.py 所在目录、可执行文件祖先目录（≤6 层）、当前工作目录。
+///
+/// ⚠️ 为什么 `.venv` 要在**所有**候选目录里先扫一遍、再扫内置运行时：源码构建会把
+/// `runtime/` 一起拷进 `target/release/`，若按「每个目录内先 .venv 再 runtime」的
+/// 单遍顺序，`target/release/runtime` 会抢先命中，仓库根 `.venv`（跑测试的那套依赖）
+/// 就被绕过了 —— 开发时验证过的依赖与内核实际用的依赖分了家，症状是「单测全绿、
+/// 应用里 import/行为不对」。
 fn resolve_python_interpreter(script_dir: Option<&std::path::Path>) -> PathBuf {
     if let Some(p) = env_compat("PYTHON").map(PathBuf::from).filter(|p| p.exists()) {
         return p;
@@ -48,23 +59,80 @@ fn resolve_python_interpreter(script_dir: Option<&std::path::Path>) -> PathBuf {
         search_dirs.push(cwd);
     }
 
-    for dir in search_dirs {
-        #[cfg(target_os = "windows")]
-        let venv_py = dir.join(".venv").join("Scripts").join("python.exe");
-        #[cfg(not(target_os = "windows"))]
-        let venv_py = dir.join(".venv").join("bin").join("python");
+    let home = user_home();
+    pick_python_interpreter(&search_dirs, Some(&home))
+}
 
+/// 按 [`resolve_python_interpreter`] 文档注释的顺序挑解释器；都没有时返回裸 `python`。
+///
+/// 与 `resolve_python_interpreter` 拆开是为了能用临时目录**锁死顺序**，
+/// 不依赖真实机器上是否装了 WorkBuddy 官方 Python。
+fn pick_python_interpreter(search_dirs: &[PathBuf], home: Option<&Path>) -> PathBuf {
+    for dir in search_dirs {
+        let venv_py = venv_python(dir);
         if venv_py.exists() {
             return venv_py;
         }
     }
-
-    // 内置解释器路径从用户主目录派生，等价于原开发机绝对路径但不再硬编码用户名
-    let bundled = user_home().join(".workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe");
-    if bundled.exists() {
-        return bundled;
+    for dir in search_dirs {
+        let runtime_py = bundled_runtime_python(dir);
+        if runtime_py.exists() {
+            return runtime_py;
+        }
+    }
+    if let Some(home) = home {
+        let official = official_runtime_python(home);
+        if official.exists() {
+            return official;
+        }
     }
     PathBuf::from("python")
+}
+
+#[cfg(target_os = "windows")]
+fn venv_python(dir: &Path) -> PathBuf {
+    dir.join(".venv").join("Scripts").join("python.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn venv_python(dir: &Path) -> PathBuf {
+    dir.join(".venv").join("bin").join("python")
+}
+
+/// 安装包内置运行时的解释器（与 `src-tauri/runtime/README.md`、tauri.conf.json 的
+/// `bundle.resources` 三者必须一致）。
+#[cfg(target_os = "windows")]
+fn bundled_runtime_python(dir: &Path) -> PathBuf {
+    dir.join("runtime").join("python.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bundled_runtime_python(dir: &Path) -> PathBuf {
+    dir.join("runtime").join("bin").join("python3")
+}
+
+/// WorkBuddy 官方客户端自带的 Python。路径逐段 join：写成 `.workbuddy\\binaries\\...`
+/// 单段字面量在 POSIX 上会拼出一个带反斜杠的假文件名（单测会因此永远命中不了）。
+#[cfg(target_os = "windows")]
+fn official_runtime_python(home: &Path) -> PathBuf {
+    home.join(".workbuddy")
+        .join("binaries")
+        .join("python")
+        .join("envs")
+        .join("default")
+        .join("Scripts")
+        .join("python.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn official_runtime_python(home: &Path) -> PathBuf {
+    home.join(".workbuddy")
+        .join("binaries")
+        .join("python")
+        .join("envs")
+        .join("default")
+        .join("bin")
+        .join("python")
 }
 
 // ---------------------------------------------------------------------------
@@ -2689,28 +2757,135 @@ mod orphan_climb_tests {
 mod python_resolver_tests {
     use super::*;
 
-    #[test]
-    fn test_resolve_python_prefers_local_venv() {
+    /// 建一个本用例独占的临时目录（不碰真实用户目录，避免并行用例互相踩）。
+    fn unique_temp_dir(tag: &str) -> PathBuf {
         let unique = format!(
-            "wb2a_venv_test_{}_{}",
+            "wb2a_py_{}_{}_{}",
+            tag,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         );
-        let temp = std::env::temp_dir().join(unique);
-        #[cfg(target_os = "windows")]
-        let venv_py = temp.join(".venv").join("Scripts").join("python.exe");
-        #[cfg(not(target_os = "windows"))]
-        let venv_py = temp.join(".venv").join("bin").join("python");
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-        std::fs::create_dir_all(venv_py.parent().unwrap()).unwrap();
-        std::fs::write(&venv_py, b"fake-python").unwrap();
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"fake-python").unwrap();
+    }
+
+    #[test]
+    fn test_resolve_python_prefers_local_venv() {
+        let temp = unique_temp_dir("venv");
+        let venv_py = venv_python(&temp);
+        touch(&venv_py);
 
         let resolved = resolve_python_interpreter(Some(&temp));
         assert_eq!(resolved, venv_py);
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// 契约第 2→3 步：同一目录里 .venv 与内置运行时都在时，.venv（开发路径）胜出。
+    #[test]
+    fn venv_beats_bundled_runtime_in_the_same_dir() {
+        let temp = unique_temp_dir("venv_vs_runtime");
+        let venv_py = venv_python(&temp);
+        let runtime_py = bundled_runtime_python(&temp);
+        touch(&venv_py);
+        touch(&runtime_py);
+
+        let resolved = pick_python_interpreter(&[temp.clone()], None);
+        assert_eq!(resolved, venv_py, ".venv 是开发路径，必须优先于内置运行时");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// 契约第 3 步：没有 .venv 时，脚本目录下的 runtime/python.exe 就是安装包该用的解释器。
+    #[test]
+    fn bundled_runtime_is_used_when_no_venv_exists() {
+        let temp = unique_temp_dir("runtime_only");
+        let runtime_py = bundled_runtime_python(&temp);
+        touch(&runtime_py);
+
+        let resolved = pick_python_interpreter(&[temp.clone()], None);
+        assert_eq!(resolved, runtime_py);
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// 源码构建会把 runtime/ 拷进 target/release/：仓库根 .venv 仍必须胜出，
+    /// 否则「测试用的依赖」和「内核实际用的依赖」会分家（见 resolve 的文档注释）。
+    #[test]
+    fn repo_venv_beats_runtime_copied_into_build_output() {
+        let repo = unique_temp_dir("repo");
+        let build_dir = repo.join("src-tauri").join("target").join("release");
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        let venv_py = venv_python(&repo);
+        let runtime_py = bundled_runtime_python(&build_dir);
+        touch(&venv_py);
+        touch(&runtime_py);
+
+        // 候选目录顺序 = 脚本目录（build_dir）→ exe 祖先（repo 等）
+        let resolved = pick_python_interpreter(&[build_dir.clone(), repo.clone()], None);
+        assert_eq!(
+            resolved, venv_py,
+            "仓库根 .venv 必须优先于 target/release/runtime：源码构建不该悄悄改用内置运行时"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// 契约第 3→4 步：内置运行时优先于 %USERPROFILE% 下 WorkBuddy 官方 Python。
+    #[test]
+    fn bundled_runtime_beats_user_home_official_python() {
+        let temp = unique_temp_dir("runtime_vs_home");
+        let home = unique_temp_dir("home");
+        let runtime_py = bundled_runtime_python(&temp);
+        let official = official_runtime_python(&home);
+        touch(&runtime_py);
+        touch(&official);
+
+        let resolved = pick_python_interpreter(&[temp.clone()], Some(&home));
+        assert_eq!(
+            resolved, runtime_py,
+            "安装包自带的运行时必须优先于官方客户端目录里的 Python"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 契约第 4 步：本地什么都没有时回退到 %USERPROFILE% 官方 Python。
+    #[test]
+    fn user_home_official_python_is_used_when_nothing_local_exists() {
+        let temp = unique_temp_dir("empty_dirs");
+        let home = unique_temp_dir("home_only");
+        let official = official_runtime_python(&home);
+        touch(&official);
+
+        let resolved = pick_python_interpreter(&[temp.clone()], Some(&home));
+        assert_eq!(resolved, official);
+
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 契约第 5 步：全都找不到时返回裸 `python`（PATH 兜底）。
+    #[test]
+    fn bare_python_is_the_last_resort() {
+        let temp = unique_temp_dir("nothing");
+        let home = unique_temp_dir("empty_home");
+
+        let resolved = pick_python_interpreter(&[temp.clone()], Some(&home));
+        assert_eq!(resolved, PathBuf::from("python"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
