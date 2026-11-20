@@ -16,10 +16,12 @@ from pathlib import Path
 DEFAULT_EXE = Path("src-tauri/target/release/workbuddy2api.exe")
 DEFAULT_ASSETS_DIR = Path("dist/assets")
 DEFAULT_MIN_SIZE = 10 * 1024 * 1024
-# tauri-build 把 bundle.resources 拷到 target/<profile>/ 下（Windows 下该目录就是
-# 运行时的 resource_dir）。安装包缺内核/运行时的缺陷在这里拦住。
-DEFAULT_STAGING = Path("src-tauri/target/release")
-REQUIRED_STAGED_PAYLOAD = ("converter.py", "runtime/python.exe")
+# 安装包产物目录：NSIS bundler 把 resources 直接压进 setup.exe，**不会**在
+# target/release/ 下留副本（2026-11-20 v0.3.1 发版实测：按 staging 目录判会误报）。
+DEFAULT_NSIS_DIR = Path("src-tauri/target/release/bundle/nsis")
+# tauri-bundler 生成的 NSIS 脚本，7z 不可用时的兜底判据。
+NSIS_SCRIPT_DIR = Path("src-tauri/target/release/nsis")
+REQUIRED_PAYLOAD = ("converter.py", "runtime/python.exe")
 
 
 class ArtifactError(RuntimeError):
@@ -67,22 +69,94 @@ def verify_artifact(
         raise ArtifactError(f"build sha {build_sha} not embedded in exe")
 
 
-def verify_bundle_payload(staging: Path) -> None:
-    """Raise ArtifactError unless the bundled kernel and runtime were staged.
+def _seven_zip_candidates() -> list[str]:
+    return [
+        "7z",
+        "7za",
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ]
 
-    tauri-build copies `bundle.resources` into `target/<profile>/`; the NSIS bundler
-    then installs that directory next to the exe. A missing `converter.py` or
-    `runtime/python.exe` means the installer ships an app whose "start service"
-    button can only fail (issue #47), while every build log stays green.
+
+def _entries_from_7z(setup: Path) -> list[str] | None:
+    """List payload entries with 7z (ground truth: what users actually install)."""
+    for exe in _seven_zip_candidates():
+        try:
+            out = subprocess.check_output(
+                [exe, "l", "-slt", str(setup)],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        entries = [
+            line.split(" = ", 1)[1].strip()
+            for line in out.splitlines()
+            if line.startswith("Path = ")
+        ]
+        if entries:
+            return entries
+    return None
+
+
+def _entries_from_nsi(script_dir: Path) -> list[str] | None:
+    """Fallback when 7z is unavailable: read the generated NSIS script.
+
+    Returns the raw File-directive lines (quotes stripped). Matching is
+    substring-based, so both per-file ``File /oname=converter.py "..."`` and
+    directory recursion show up.
     """
-    staging = Path(staging)
-    missing = [rel for rel in REQUIRED_STAGED_PAYLOAD if not (staging / rel).is_file()]
+    scripts = sorted(Path(script_dir).rglob("installer.nsi"))
+    if not scripts:
+        return None
+    text = scripts[-1].read_text(encoding="utf-8", errors="replace")
+    lines = [
+        line.strip().strip('"')
+        for line in text.splitlines()
+        if "converter.py" in line or "runtime" in line
+    ]
+    return lines or None
+
+
+def assert_payload_entries(entries: list[str]) -> None:
+    """Raise unless every required kernel/runtime path appears in the payload."""
+    normalized = [str(e).replace("/", "\\").lower() for e in entries]
+    missing = [
+        rel
+        for rel in REQUIRED_PAYLOAD
+        if not any(rel.replace("/", "\\").lower() in p for p in normalized)
+    ]
     if missing:
         raise ArtifactError(
-            "bundled payload missing under "
-            f"{staging}: {', '.join(missing)} "
+            "installer payload missing "
+            f"{', '.join(missing)} "
             "(run: python scripts/prepare_bundle_runtime.py, then rebuild)"
         )
+
+
+def verify_installer_payload(bundle_dir: Path = DEFAULT_NSIS_DIR) -> None:
+    """Raise unless the produced NSIS installer really carries kernel + runtime.
+
+    Issue #47 was exactly this: every build log green, the solver exe fine, yet the
+    installer shipped without converter.py or a Python runtime. Only the installer
+    payload proves what users get, because the NSIS bundler does not stage copies
+    under target/release/.
+    """
+    bundle_dir = Path(bundle_dir)
+    installers = sorted(bundle_dir.glob("*.exe"))
+    if not installers:
+        raise ArtifactError(f"installer not found under {bundle_dir}")
+    setup = installers[0]
+    entries = _entries_from_7z(setup)
+    if entries is None:
+        entries = _entries_from_nsi(NSIS_SCRIPT_DIR)
+    if entries is None:
+        raise ArtifactError(
+            "cannot inspect installer payload: 7z unavailable and "
+            f"{NSIS_SCRIPT_DIR}/**/installer.nsi not found"
+        )
+    assert_payload_entries(entries)
 
 
 def main() -> int:
@@ -93,11 +167,11 @@ def main() -> int:
             min_size=DEFAULT_MIN_SIZE,
             build_sha=_current_git_sha(),
         )
-        verify_bundle_payload(DEFAULT_STAGING)
+        verify_installer_payload(DEFAULT_NSIS_DIR)
     except ArtifactError as e:
         print(f"[FAIL] {e}", file=sys.stderr)
         return 1
-    print("[OK] artifact verified: size, frontend assets, build sha, bundled kernel+runtime")
+    print("[OK] artifact verified: size, frontend assets, build sha, installer payload (kernel+runtime)")
     return 0
 
 

@@ -30,35 +30,34 @@ def _make_artifact(tmp_path: Path, payload: bytes, asset_name: str = "index-ABC1
     return exe, assets
 
 
-def _make_staging(tmp_path: Path) -> Path:
-    """模拟 tauri-build 拷好 bundle.resources 的 staging 目录（target/<profile>/）。"""
-    staging = tmp_path / "staging"
-    (staging / "runtime").mkdir(parents=True)
-    (staging / "converter.py").write_text("# kernel", encoding="utf-8")
-    (staging / "runtime" / "python.exe").write_bytes(b"MZ")
-    return staging
-
-
-def test_verify_bundle_payload_accepts_staged_kernel_and_runtime(tmp_path):
+def test_assert_payload_entries_accepts_kernel_and_runtime():
     module = _load_module()
-    assert module.verify_bundle_payload(_make_staging(tmp_path)) is None
+    module.assert_payload_entries(
+        [
+            "workbuddy2api.exe",
+            "converter.py",
+            "runtime\\python.exe",
+            "runtime\\Lib\\site-packages\\fastapi\\__init__.py",
+        ]
+    )
 
 
-def test_verify_bundle_payload_rejects_missing_kernel(tmp_path):
+def test_assert_payload_entries_accepts_forward_slashes():
     module = _load_module()
-    staging = _make_staging(tmp_path)
-    (staging / "converter.py").unlink()
-    with pytest.raises(module.ArtifactError, match="converter.py"):
-        module.verify_bundle_payload(staging)
+    module.assert_payload_entries(["converter.py", "runtime/python.exe"])
 
 
-def test_verify_bundle_payload_rejects_missing_runtime(tmp_path):
+def test_assert_payload_entries_rejects_missing_kernel():
     """v0.3.0 安装包的真实缺陷：exe 在、内核与运行时都不在。"""
     module = _load_module()
-    staging = _make_staging(tmp_path)
-    (staging / "runtime" / "python.exe").unlink()
+    with pytest.raises(module.ArtifactError, match="converter.py"):
+        module.assert_payload_entries(["workbuddy2api.exe", "runtime\\python.exe"])
+
+
+def test_assert_payload_entries_rejects_missing_runtime():
+    module = _load_module()
     with pytest.raises(module.ArtifactError, match="runtime/python.exe"):
-        module.verify_bundle_payload(staging)
+        module.assert_payload_entries(["workbuddy2api.exe", "converter.py"])
 
 
 def test_verify_artifact_accepts_sized_binary_with_embedded_asset(tmp_path):
@@ -100,13 +99,22 @@ def test_verify_artifact_checks_baked_build_sha(tmp_path):
         module.verify_artifact(exe, assets, min_size=128, build_sha="f" * 40)
 
 
+def _patch_installer(module, monkeypatch, tmp_path, entries):
+    """假装 target/release/bundle/nsis 里有一个 setup.exe，7z 列出的负载由 entries 决定。"""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir(exist_ok=True)
+    (bundle / "workbuddy2api_0.0.0_x64-setup.exe").write_bytes(b"MZ")
+    monkeypatch.setattr(module, "DEFAULT_NSIS_DIR", bundle)
+    monkeypatch.setattr(module, "_entries_from_7z", lambda setup: entries)
+
+
 def test_main_uses_ascii_logs_and_exits_zero_for_good_artifact(monkeypatch, tmp_path, capsys):
     module = _load_module()
     exe, assets = _make_artifact(tmp_path, b"x" * 256 + b"index-ABC123.js")
     monkeypatch.setattr(module, "DEFAULT_EXE", exe)
     monkeypatch.setattr(module, "DEFAULT_ASSETS_DIR", assets)
     monkeypatch.setattr(module, "DEFAULT_MIN_SIZE", 128)
-    monkeypatch.setattr(module, "DEFAULT_STAGING", _make_staging(tmp_path))
+    _patch_installer(module, monkeypatch, tmp_path, ["converter.py", "runtime\\python.exe"])
     monkeypatch.setattr(module, "_current_git_sha", lambda: None)
     assert module.main() == 0
     out = capsys.readouterr().out
@@ -120,7 +128,7 @@ def test_main_exits_nonzero_for_empty_shell(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(module, "DEFAULT_EXE", exe)
     monkeypatch.setattr(module, "DEFAULT_ASSETS_DIR", assets)
     monkeypatch.setattr(module, "DEFAULT_MIN_SIZE", 128)
-    monkeypatch.setattr(module, "DEFAULT_STAGING", _make_staging(tmp_path))
+    _patch_installer(module, monkeypatch, tmp_path, ["converter.py", "runtime\\python.exe"])
     monkeypatch.setattr(module, "_current_git_sha", lambda: None)
     assert module.main() != 0
     err = capsys.readouterr().err
@@ -128,16 +136,14 @@ def test_main_exits_nonzero_for_empty_shell(monkeypatch, tmp_path, capsys):
     assert err.isascii(), "失败日志也必须纯 ASCII，避免 cp1252 把构建判死"
 
 
-def test_main_fails_when_kernel_or_runtime_is_not_staged(monkeypatch, tmp_path, capsys):
+def test_main_fails_when_kernel_or_runtime_is_missing_from_installer(monkeypatch, tmp_path, capsys):
     """安装包里没有 converter.py / runtime 时，构建必须失败而不是静默发版。"""
     module = _load_module()
     exe, assets = _make_artifact(tmp_path, b"x" * 256 + b"index-ABC123.js")
-    staging = _make_staging(tmp_path)
-    (staging / "runtime" / "python.exe").unlink()
     monkeypatch.setattr(module, "DEFAULT_EXE", exe)
     monkeypatch.setattr(module, "DEFAULT_ASSETS_DIR", assets)
     monkeypatch.setattr(module, "DEFAULT_MIN_SIZE", 128)
-    monkeypatch.setattr(module, "DEFAULT_STAGING", staging)
+    _patch_installer(module, monkeypatch, tmp_path, ["workbuddy2api.exe", "converter.py"])
     monkeypatch.setattr(module, "_current_git_sha", lambda: None)
     assert module.main() != 0
     err = capsys.readouterr().err
